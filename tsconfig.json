@@ -1,41 +1,23 @@
 {
   "compilerOptions": {
     "target": "ES2020",
-    "useDefineForClassFields": true,
     "module": "ESNext",
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
-    "skipLibCheck": true,
     "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "noEmit": true,
-    "jsx": "react-jsx",
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["src/*"]
-    },
+    "lib": ["ES2020", "DOM"],
     "strict": true,
-    "noFallthroughCasesInSwitch": true
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
   },
-  "include": [
-    "src/core",
-    "src/services",
-    "src/readers",
-    "src/writers",
-    "src/transformers",
-    "src/hooks/index.ts",
-    "src/index.ts"
-  ],
-  "exclude": [
-    "node_modules",
-    "dist",
-    "src/lib",
-    "src/impl",
-    "src/abstraction",
-    "src/hml",
-    "src/hwpx",
-    "src/docx",
-    "src/react"
-  ]
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "tests"]
 }

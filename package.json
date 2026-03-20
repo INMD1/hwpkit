@@ -1,7 +1,7 @@
 {
   "name": "hwpkit",
-  "description": "HWP/HWPX/DOCX/MD 양방향 문서 변환 라이브러리 (브라우저 네이티브)",
-  "version": "1.0.0",
+  "description": "HWP/HWPX/DOCX/MD 양방향 문서 변환 라이브러리",
+  "version": "2.0.0",
   "author": {
     "name": "INMD1",
     "email": "lyw514549@gmail.com",
@@ -12,41 +12,36 @@
     "type": "git",
     "url": "https://github.com/INMD1/hwpkit.git"
   },
-  "scripts": {
-    "build": "vite build",
-    "dev": "vite",
-    "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
-  },
-  "main": "dist/hwpkit.umd.js",
-  "module": "dist/hwpkit.mjs",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/hwpkit.mjs",
-      "require": "./dist/hwpkit.umd.js"
-    },
-    "./react": {
-      "import": "./dist/react.mjs",
-      "require": "./dist/react.umd.js"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
     }
   },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "playground": "vite --config playground/vite.config.ts"
+  },
   "dependencies": {
-    "cfb": "^1.2.2",
-    "fast-xml-parser": "^4.4.0",
-    "fflate": "^0.8.2",
-    "iconv-lite": "^0.6.3",
-    "react": "^18.2.0"
+    "pako": "^2.1.0",
+    "saxes": "^6.0.0",
+    "xml2js": "^0.6.2"
   },
   "devDependencies": {
     "@types/node": "^20.11.24",
-    "@types/react": "^18.2.61",
-    "@vitejs/plugin-react": "^4.2.1",
-    "typescript": "^5.3.3",
-    "vite": "^5.1.4",
-    "vite-plugin-dts": "^3.7.3"
-  },
-  "peerDependencies": {
-    "react": ">=17.0.0"
+    "@types/pako": "^2.0.3",
+    "@types/xml2js": "^0.4.14",
+    "tsup": "^8.0.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.21",
+    "vitest": "^2.0.0"
   }
 }

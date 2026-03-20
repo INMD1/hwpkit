@@ -1,48 +1,38 @@
-# 🌉 HWPKit
+# HWPKit
+
 [![npm version](https://img.shields.io/npm/v/hwpkit.svg)](https://www.npmjs.com/package/hwpkit)
-[![license](https://img.shields.io/npm/l/hwpkit.svg)](https://github.com/INMD1/ANYTOHWPX/blob/main/license.md)
+[![license](https://img.shields.io/npm/l/hwpkit.svg)](https://github.com/INMD1/hwpkit/blob/main/license.md)
 
-**브라우저 네이티브 환경에서 동작하는 초경량 양방향 문서 변환 라이브러리**
+**HWP / HWPX / DOCX / Markdown 양방향 문서 변환 라이브러리**
 
-HWPKit(기존 명칭 DocBridge)는 Node.js 서버 의존성 없이 순수 브라우저 환경에서 다양한 문서 포맷(HWP, HWPX, DOCX, MD)을 상호 변환할 수 있는 강력한 TypeScript/React 라이브러리입니다. 브라우저 네이티브 API와 최소한의 의존성만 사용하여 매우 빠르고 가벼운 문서 처리 환경을 제공합니다.
-
----
-
-## ✨ 주요 특징
-
-- 🌐 **완전한 브라우저 네이티브**: 백엔드 서버 없이 클라이언트(브라우저) 환경에서 모든 문서 변환을 처리합니다.
-- ⚡ **빠르고 가벼움**: 불필요한 의존성을 최소화하고 브라우저 API를 적극 활용하여 가볍게 동작합니다.
-- 🔄 **양방향 변환 구조 지원**:
-  - `DOCX` ↔ `HWPX`
-  - `HWPX` ↔ `MD`
-  - `HWP` → `MD`
-  - `MD` → `HWP(HML)` / `HWPX`
-  - `DOCX` ↔ `MD`
-- ⚛️ **React 특화 Hooks 내장**: React 환경에서 상태(로딩, 결과, 에러)를 쉽게 관리할 수 있는 전용 Hooks 제공.
-- 🛡️ **TypeScript 지원**: 모든 변환 API 및 내부 추상 구문 트리(IR)에 대한 완벽한 타입을 제공합니다.
-- 🧩 **커스텀 변환기 작성 가능**: 중간 표현(IR)을 기반으로 한 구조(Reader → IR → Writer)를 채택하여, 사용자가 직접 변환 로직을 확장할 수 있습니다.
-- 🤖 **AI 특화 파이프라인 (개발 중)**: AI 문서 처리를 위한 XML 기반 정밀 내용 수정 기능 설계 중.
+한국 문서 포맷(HWP, HWPX)과 국제 표준(DOCX, Markdown)을 상호 변환하는 TypeScript 라이브러리입니다.
+브라우저와 Node.js 환경 모두에서 동작하며, 데이터 무결성과 무중단 변환을 최우선으로 설계했습니다.
 
 ---
 
-## 🚀 변환 기능 지원 현황
+## 주요 특징
 
-### 마크다운 (MD) 중심 변환
-- **MD → HWP(HML) / HWPX / DOCX**: 지원 완료 🟢
-- **HWP / HWPX / DOCX → MD**: 지원 완료 🟢
-
-### 일반 포맷 간 변환
-- **DOCX ↔ HWPX**: 지원 완료 🟢
-- **HWPX / HWP → DOCX**: 지원 완료 🟢
-- **DOCX → HWP**: 개발 예정 🟡
-
-*(※ 현재 라이브러리는 활발하게 개발 및 지속적인 개선 작업이 이루어지고 있어 세부 기능은 변경될 수 있습니다.)*
+- **Pipeline 체이닝 API** - `Pipeline.open(file).to('hwpx')` 한 줄로 변환
+- **데이터 무결성 100%** - 텍스트, 표, 이미지 누락 없이 변환
+- **무중단 변환** - 어떤 입력이 들어와도 크래시 없이 `Outcome<T>` 반환
+- **4단계 표 폴백** - Full > Grid > Flat > Text 순서로 안전 변환
+- **Result 모나드** - null/throw 대신 `Ok | Fail` 명시적 결과 처리
+- **TypeScript 완전 지원** - 모든 노드 타입과 API에 대한 타입 정의
 
 ---
 
-## 📦 설치
+## 변환 지원 현황
 
-패키지 매니저를 통해 손쉽게 설치할 수 있습니다.
+| 입력 \ 출력 | HWPX | DOCX | Markdown |
+|------------|:----:|:----:|:--------:|
+| **HWPX**   | -    | O    | O        |
+| **HWP**    | O    | O    | O        |
+| **DOCX**   | O    | -    | O        |
+| **Markdown** | O  | O    | -        |
+
+---
+
+## 설치
 
 ```bash
 npm install hwpkit
@@ -50,135 +40,184 @@ npm install hwpkit
 
 ---
 
-## 💻 사용 가이드
+## 사용법
 
-### 1. React 환경에서 Hooks 활용하기
-
-HWPKit는 상태 관리(`isPending`, `error`, `result`)가 내장된 다양한 Hooks를 제공합니다. `hwpkit/react` (또는 `src/hooks`) 내보내기를 통해 사용할 수 있습니다.
-
-#### 제공되는 Hooks
-- `useDocxToHwpx()`, `useHwpxToDocx()`
-- `useHwpxToMd()`, `useHwpToMd()`, `useDocxToMd()`
-- `useMdToHwpx()`, `useMdToDocx()`, `useMdToHwp()`
-
-#### DOCX → HWPX 변환 컴포넌트 예시
-```tsx
-import React from 'react';
-import { useDocxToHwpx, downloadBlob } from 'hwpkit'; // 경로에 맞게 Import
-
-function DocxToHwpxConverter() {
-  const { run, isPending, error } = useDocxToHwpx();
-
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    // run 함수 호출만으로 변환 수행
-    const hwpxBlob = await run(file);
-    
-    if (hwpxBlob) {
-      // 내장된 다운로드 헬퍼 함수를 통해 브라우저에서 다운로드
-      downloadBlob(hwpxBlob, 'converted.hwpx');
-    }
-  };
-
-  return (
-    <div>
-      <input type="file" accept=".docx" onChange={handleFileChange} />
-      {isPending && <p>⌛ 문서를 변환하고 있습니다...</p>}
-      {error && <p style={{ color: 'red' }}>❌ 변환 오류: {error.message}</p>}
-    </div>
-  );
-}
-```
-
-#### HWPX → Markdown 텍스트 추출 예시
-```tsx
-import React from 'react';
-import { useHwpxToMd } from 'hwpkit'; // 경로에 맞게 Import
-
-function HwpxToMdViewer() {
-  const { run, result, isPending, error } = useHwpxToMd();
-
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    // Markdown 문자열이 result 상태에 자동으로 저장됩니다.
-    await run(file);
-  };
-
-  return (
-    <div>
-      <input type="file" accept=".hwpx" onChange={handleFileChange} />
-      {isPending && <p>⌛ 변환 중...</p>}
-      {error && <p style={{ color: 'red' }}>❌ 오류 발생: {error.message}</p>}
-      
-      {/* 변환된 마크다운 내용 표시 */}
-      {result && <pre className="md-preview">{result}</pre>}
-    </div>
-  );
-}
-```
-
-### 2. 일반 JS/TS 환경에서 직접 호출하기 (Transformer API)
-
-React를 사용하지 않거나 백그라운드 스크립트에서 호출할 때는 코어 `Transformer` 객체를 직접 사용합니다(`src/index.ts` 기준).
+### Pipeline API (권장)
 
 ```typescript
-import { MdTransformer, HwpxTransformer, DocxTransformer } from 'hwpkit';
+import { Pipeline } from 'hwpkit';
 
-async function processDocuments(inputFile: File) {
-  try {
-    // 1. 문서 객체(File 또는 Blob)를 받아 Blob 변환
-    const hwpxBlob = await HwpxTransformer.fromDocx(inputFile);
+// 파일 변환
+const result = await Pipeline.open(uint8ArrayData, 'docx').to('hwpx');
 
-    // 2. 파일 객체를 받아 마크다운 문자열로 즉시 변환
-    const markdownText = await MdTransformer.fromHwpx(inputFile);
-    console.log('추출된 마크다운:', markdownText);
-    
-  } catch (error) {
-    console.error('문서 처리 중 오류가 발생했습니다:', error);
-  }
+if (result.ok) {
+  // result.data: Uint8Array (변환된 파일)
+  // result.warns: string[] (폴백 발생 시 경고 목록)
+  saveFile(result.data);
+} else {
+  console.error(result.error);
+}
+
+// 문서 구조만 추출 (인코딩 없이)
+const inspectResult = await Pipeline.open(data, 'docx').inspect();
+if (inspectResult.ok) {
+  console.log(inspectResult.data); // DocRoot
+}
+
+// File/Blob 입력 (비동기)
+const pipeline = await Pipeline.openAsync(file, 'hwpx');
+const converted = await pipeline.to('docx');
+
+// Markdown 문자열 직접 입력
+const mdResult = await Pipeline.open('# Hello\n\nWorld').to('docx');
+```
+
+### Decoder / Encoder 직접 사용
+
+```typescript
+import { DocxDecoder } from 'hwpkit';
+import { MdEncoder } from 'hwpkit';
+
+const decoder = new DocxDecoder();
+const encoder = new MdEncoder();
+
+const docResult = await decoder.decode(docxBytes);
+if (!docResult.ok) throw new Error(docResult.error);
+
+const mdResult = await encoder.encode(docResult.data);
+if (mdResult.ok) {
+  const mdText = new TextDecoder().decode(mdResult.data);
 }
 ```
 
----
+### 문서 모델 직접 구성
 
-## 🏗️ 라이브러리 아키텍처
+```typescript
+import { buildRoot, buildSheet, buildPara, buildSpan, buildGrid, buildRow, buildCell } from 'hwpkit';
 
-HWPKit는 확장에 용이한 **중간 표현(Intermediate Representation, IR)** 구조를 사용합니다.
-
-```text
-입력 파일 ──▶ [ Reader ] ──▶ [ IR Document ] ──▶ [ Writer ] ──▶ 출력 파일
+const doc = buildRoot({ title: '제목' }, [
+  buildSheet([
+    buildPara([buildSpan('Hello World', { b: true, pt: 14 })], { heading: 1 }),
+    buildPara([buildSpan('본문 텍스트입니다.')]),
+    buildGrid([
+      buildRow([
+        buildCell([buildPara([buildSpan('A1')])]),
+        buildCell([buildPara([buildSpan('B1')])]),
+      ]),
+      buildRow([
+        buildCell([buildPara([buildSpan('A2')])]),
+        buildCell([buildPara([buildSpan('B2')])]),
+      ]),
+    ]),
+  ]),
+]);
 ```
 
-- **Readers**: `HwpxReader`, `HwpReader`, `DocxReader`, `MarkdownReader` 등
-- **IR (추상 구문 트리)**: `IrDocumentNode`, `IrParagraphNode`, `IrTableNode` 등 코어 모델
-- **Writers**: `HwpxWriter`, `DocxWriter`, `MdWriter` 등
+### 트리 순회
+
+```typescript
+import { TreeWalker, walkNode, countNodes, validateRoot } from 'hwpkit';
+
+// 텍스트 추출
+const walker = new TreeWalker();
+const text = walker.extractText(docRoot);
+
+// 노드 통계
+const counts = countNodes(docRoot);
+// { root: 1, sheet: 1, para: 5, span: 5, txt: 5, grid: 1, row: 2, cell: 4 }
+
+// 유효성 검증
+const errors = validateRoot(docRoot);
+```
 
 ---
 
-## 🛠️ 개발 및 기여 (Contributing)
+## 아키텍처
 
-문서 파싱 규칙을 추가하거나 버그를 수정하시려면 언제든 레포지토리에 기여해 주시기 바랍니다.
+```
+입력 파일 --> [ Decoder ] --> [ DocRoot ] --> [ Encoder ] --> 출력 파일
+                                  |
+                            Pipeline.inspect()
+```
+
+### 문서 추상 모델 (Doc Model)
+
+모든 문서는 `DocRoot` 트리로 변환되어 포맷 간 변환의 중간 표현으로 사용됩니다.
+
+```
+DocRoot
+  └─ SheetNode (섹션/페이지)
+       ├─ ParaNode (문단)
+       │    ├─ SpanNode (텍스트 런)
+       │    │    └─ TxtNode / BrNode / PbNode
+       │    ├─ ImgNode (이미지)
+       │    └─ LinkNode (하이퍼링크)
+       └─ GridNode (표)
+            └─ RowNode
+                 └─ CellNode
+                      └─ ParaNode ...
+```
+
+### 안전 계층
+
+- **ShieldedParser** - 개별 노드 파싱 실패가 전체를 중단시키지 않음
+- **StyleBridge** - 포맷 간 스타일/단위 변환 (`Metric.*`)
+- **Outcome<T>** - 모든 결과를 `Ok | Fail`로 감싸 null/throw 제거
+
+### 디렉토리 구조
+
+```
+src/
+├── model/          # 문서 추상 모델 (DocRoot, 속성, 빌더)
+├── contract/       # Decoder/Encoder 인터페이스, Result 모나드
+├── pipeline/       # Pipeline 오케스트레이터, 포맷 레지스트리
+├── decoders/       # 입력 포맷 → DocRoot
+│   ├── docx/       #   DocxDecoder
+│   ├── hwpx/       #   HwpxDecoder
+│   ├── hwp/        #   HwpScanner
+│   └── md/         #   MdDecoder
+├── encoders/       # DocRoot → 출력 포맷
+│   ├── docx/       #   DocxEncoder
+│   ├── hwpx/       #   HwpxEncoder
+│   └── md/         #   MdEncoder
+├── walk/           # 트리 순회 (TreeWalker, walkNode)
+├── safety/         # ShieldedParser, StyleBridge
+└── toolkit/        # XmlKit, ArchiveKit, BinaryKit, TextKit
+```
+
+---
+
+## 개발
 
 ```bash
 # 의존성 설치
 npm install
 
-# 실시간 변경 사항 감지 및 빌드 (Vite 기반)
-npm run dev
-
-# 타입스크립트 타입 체크
+# 타입 체크
 npm run typecheck
 
-# 릴리즈용 프로덕션 빌드 (ESM / UMD)
+# 테스트 실행
+npm test
+
+# 빌드 (ESM + CJS + d.ts)
 npm run build
+
+# 개발 모드 (watch)
+npm run dev
 ```
+
+### 의존성
+
+| 패키지 | 용도 |
+|--------|------|
+| `pako` | ZIP inflate/deflate |
+| `xml2js` | XML 파싱/빌드 |
+| `saxes` | SAX 스트리밍 파서 (대용량 XML) |
+| `tsup` | 빌드 (esbuild 기반) |
+| `vitest` | 테스트 프레임워크 |
 
 ---
 
-## 📄 라이선스
+## 라이선스
 
-이 프로젝트는 **MIT 라이선스** 정책을 따릅니다. 사용 및 배포에 관한 더 자세한 정보는 레포지토리 내의 [`license.md`](./license.md) 파일을 참고하십시오.
+이 프로젝트는 **LGPL-2.1** 라이선스를 따릅니다. 자세한 내용은 [`license.md`](./license.md)를 참고하세요.

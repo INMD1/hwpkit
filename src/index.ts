@@ -1,76 +1,37 @@
-/**
- * HWPKit - 공개 API 진입점
- *
- * 변환 흐름:
- *   입력 파일 → ReadStrategy (Reader) → IrDocumentNode → WriteStrategy (Writer) → 출력
- *
- * ┌─────────────────────────────────────────────────────┐
- * │  Transformer (공개 API)                              │
- * │  ├── MdTransformer.fromHwpx(file) → string         │
- * │  ├── MdTransformer.fromHwp(file)  → string         │
- * │  ├── MdTransformer.fromDocx(file) → string         │
- * │  ├── HwpxTransformer.fromDocx(file) → Blob         │
- * │  ├── HwpxTransformer.fromMd(md)   → Blob           │
- * │  ├── DocxTransformer.fromHwpx(file) → Blob         │
- * │  ├── DocxTransformer.fromHwp(file)  → Blob         │
- * │  └── DocxTransformer.fromMd(md)     → Blob         │
- * └─────────────────────────────────────────────────────┘
- */
+// ─── 공개 API ───────────────────────────────────────────────
 
-// ─── 공개 Transformer API ─────────────────────────────────────────────────────
-export { MdTransformer } from './transformers/MdTransformer';
-export { HwpxTransformer } from './transformers/HwpxTransformer';
-export { DocxTransformer } from './transformers/DocxTransformer';
+// Pipeline
+export { Pipeline } from './pipeline/Pipeline';
+export { registry } from './pipeline/registry';
 
-// ─── 직접 Reader/Writer 사용 (고급) ──────────────────────────────────────────
-export { HwpxReader } from './readers/hwpx';
-export { HwpReader } from './readers/hwp';
-export { DocxReader } from './readers/docx';
-export { MarkdownReader } from './readers/markdown';
-export { MdWriter } from './writers/md';
-export { HwpxWriter } from './writers/hwpx';
-export { DocxWriter } from './writers/docx';
-
-// ─── IR 타입 ──────────────────────────────────────────────────────────────────
+// Model
 export type {
-  IrDocumentNode,
-  IrSectionNode,
-  IrBlockNode,
-  IrParagraphNode,
-  IrRunNode,
-  IrTextNode,
-  IrImageNode,
-  IrHyperlinkNode,
-  IrTableNode,
-  IrTableRowNode,
-  IrTableCellNode,
-  IrLineBreakNode,
-  IrPageBreakNode,
-  RunStyle,
-  ParagraphStyle,
-  PageLayout,
-  DocumentMeta,
-  TableStyle,
-  CellStyle,
-  CellBorder,
-  TextAlign,
-  HeadingLevel,
-} from './core/ir';
-export {
-  makeDocument,
-  makeSection,
-  makeParagraph,
-  makeRun,
-  makeImage,
-  makeTable,
-  makeTableRow,
-  makeTableCell,
-  DEFAULT_PAGE_LAYOUT,
-} from './core/ir';
+  DocRoot, SheetNode, ParaNode, SpanNode, GridNode, RowNode, CellNode,
+  ImgNode, LinkNode, TxtNode, BrNode, PbNode, ContentNode, AnyNode, BlockTag,
+} from './model/doc-tree';
+export type {
+  TextProps, ParaProps, CellProps, GridProps, PageDims, DocMeta,
+  Align, VAlign, Heading, StrokeKind, Stroke,
+} from './model/doc-props';
+export { A4, DEFAULT_STROKE } from './model/doc-props';
+export { buildRoot, buildSheet, buildPara, buildSpan, buildImg, buildGrid, buildRow, buildCell } from './model/builders';
 
-// ─── Strategy 인터페이스 (커스텀 Reader/Writer 작성 시) ─────────────────────
-export type { ReadStrategy, WriteStrategy } from './core/strategy';
+// Contract
+export type { Decoder } from './contract/decoder';
+export type { Encoder } from './contract/encoder';
+export type { Outcome, Ok, Fail } from './contract/result';
+export { succeed, fail } from './contract/result';
 
-// ─── Visitor 인터페이스 (커스텀 IR 순회 시) ──────────────────────────────────
-export type { NodeVisitor } from './core/visitor';
-export { BaseVisitor, dispatchVisit } from './core/visitor';
+// Safety
+export { ShieldedParser } from './safety/ShieldedParser';
+export { Metric, safeHex, safeAlign, safeFont, safeStrokeHwpx, safeStrokeDocx } from './safety/StyleBridge';
+
+// Walk
+export { TreeWalker, walkNode } from './walk/TreeWalker';
+export { countNodes, validateRoot } from './walk/tree-ops';
+
+// Toolkit
+export { XmlKit } from './toolkit/XmlKit';
+export { ArchiveKit } from './toolkit/ArchiveKit';
+export { BinaryKit } from './toolkit/BinaryKit';
+export { TextKit } from './toolkit/TextKit';
