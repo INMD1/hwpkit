@@ -7,10 +7,10 @@
     "email": "lyw514549@gmail.com",
     "github": "https://github.com/INMD1"
   },
-  "license": "MIT",
+  "license": "LGPL-2.1",
   "repository": {
     "type": "git",
-    "url": "https://github.com/INMD1/ANYTOHWPX.git"
+    "url": "https://github.com/INMD1/hwpkit.git"
   },
   "scripts": {
     "build": "vite build",
