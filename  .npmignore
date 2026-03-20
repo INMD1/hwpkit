@@ -1,0 +1,19 @@
+*.hml
+*.hml.md
+Sample.md
+node_modules
+pandoc-*
+*.hwpx
+examples
+
+
+# 시연 파일 주석
+demo
+index.html
+public
+/src/main.tsx
+/src/App.tsx
+hwp2md.py
+*.pdf
+hwp_format.txt
+test

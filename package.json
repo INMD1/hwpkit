@@ -1,0 +1,52 @@
+{
+  "name": "hwpkit",
+  "description": "HWP/HWPX/DOCX/MD 양방향 문서 변환 라이브러리 (브라우저 네이티브)",
+  "version": "1.0.0",
+  "author": {
+    "name": "INMD1",
+    "email": "lyw514549@gmail.com",
+    "github": "https://github.com/INMD1"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/INMD1/ANYTOHWPX.git"
+  },
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "main": "dist/hwpkit.umd.js",
+  "module": "dist/hwpkit.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/hwpkit.mjs",
+      "require": "./dist/hwpkit.umd.js"
+    },
+    "./react": {
+      "import": "./dist/react.mjs",
+      "require": "./dist/react.umd.js"
+    }
+  },
+  "dependencies": {
+    "cfb": "^1.2.2",
+    "fast-xml-parser": "^4.4.0",
+    "fflate": "^0.8.2",
+    "iconv-lite": "^0.6.3",
+    "react": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "@types/react": "^18.2.61",
+    "@vitejs/plugin-react": "^4.2.1",
+    "typescript": "^5.3.3",
+    "vite": "^5.1.4",
+    "vite-plugin-dts": "^3.7.3"
+  },
+  "peerDependencies": {
+    "react": ">=17.0.0"
+  }
+}
