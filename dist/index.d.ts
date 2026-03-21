@@ -39,10 +39,21 @@ interface CellProps {
     padPt?: number;
     align?: Align;
     va?: VAlign;
+    isHeader?: boolean;
+}
+interface TableLook {
+    firstRow?: boolean;
+    lastRow?: boolean;
+    firstCol?: boolean;
+    lastCol?: boolean;
+    bandedRows?: boolean;
+    bandedCols?: boolean;
 }
 interface GridProps {
     widthPct?: number;
     defaultStroke?: Stroke;
+    look?: TableLook;
+    headerRow?: boolean;
 }
 interface PageDims {
     wPt: number;
@@ -65,7 +76,7 @@ interface DocMeta {
 declare const A4: PageDims;
 declare const DEFAULT_STROKE: Stroke;
 
-type BlockTag = 'root' | 'sheet' | 'para' | 'span' | 'txt' | 'img' | 'link' | 'grid' | 'row' | 'cell' | 'br' | 'pb';
+type BlockTag = 'root' | 'sheet' | 'para' | 'span' | 'txt' | 'img' | 'link' | 'grid' | 'row' | 'cell' | 'br' | 'pb' | 'pagenum';
 interface TxtNode {
     tag: 'txt';
     content: string;
@@ -75,6 +86,10 @@ interface BrNode {
 }
 interface PbNode {
     tag: 'pb';
+}
+interface PageNumNode {
+    tag: 'pagenum';
+    format?: 'decimal' | 'roman' | 'romanCaps';
 }
 interface ImgNode {
     tag: 'img';
@@ -87,7 +102,7 @@ interface ImgNode {
 interface SpanNode {
     tag: 'span';
     props: TextProps;
-    kids: (TxtNode | BrNode | PbNode)[];
+    kids: (TxtNode | BrNode | PbNode | PageNumNode)[];
 }
 interface LinkNode {
     tag: 'link';
@@ -120,13 +135,15 @@ interface SheetNode {
     tag: 'sheet';
     dims: PageDims;
     kids: ContentNode[];
+    header?: ParaNode[];
+    footer?: ParaNode[];
 }
 interface DocRoot {
     tag: 'root';
     meta: DocMeta;
     kids: SheetNode[];
 }
-type AnyNode = DocRoot | SheetNode | ParaNode | SpanNode | TxtNode | ImgNode | LinkNode | GridNode | RowNode | CellNode | BrNode | PbNode;
+type AnyNode = DocRoot | SheetNode | ParaNode | SpanNode | TxtNode | ImgNode | LinkNode | GridNode | RowNode | CellNode | BrNode | PbNode | PageNumNode;
 
 type Outcome<T> = Ok<T> | Fail;
 interface Ok<T> {
@@ -179,7 +196,11 @@ declare class FormatRegistry {
 declare const registry: FormatRegistry;
 
 declare function buildRoot(meta?: DocMeta, kids?: SheetNode[]): DocRoot;
-declare function buildSheet(kids?: ContentNode[], dims?: PageDims): SheetNode;
+declare function buildSheet(kids?: ContentNode[], dims?: PageDims, opts?: {
+    header?: ParaNode[];
+    footer?: ParaNode[];
+}): SheetNode;
+declare function buildPageNum(format?: PageNumNode['format']): PageNumNode;
 declare function buildPara(kids?: ParaNode['kids'], props?: ParaProps): ParaNode;
 declare function buildSpan(content: string, props?: TextProps): SpanNode;
 declare function buildImg(b64: string, mime: ImgNode['mime'], w: number, h: number, alt?: string): ImgNode;
@@ -247,12 +268,9 @@ declare function countNodes(root: DocRoot): Record<string, number>;
 declare function validateRoot(root: DocRoot): string[];
 
 declare const XmlKit: {
+    /** @deprecated Use parseStrict instead */
     parse(xml: string): Promise<unknown>;
     parseStrict(xml: string): Promise<unknown>;
-    build(obj: unknown, opts?: {
-        rootName?: string;
-        headless?: boolean;
-    }): string;
     attr(node: Record<string, unknown>, key: string): string | undefined;
     text(node: Record<string, unknown> | string | undefined): string;
 };
@@ -290,4 +308,4 @@ declare const TextKit: {
     base64Decode(b64: string): Uint8Array;
 };
 
-export { A4, type Align, type AnyNode, ArchiveKit, BinaryKit, type BlockTag, type BrNode, type CellNode, type CellProps, type ContentNode, DEFAULT_STROKE, type Decoder, type DocMeta, type DocRoot, type Encoder, type Fail, type GridNode, type GridProps, type Heading, type ImgNode, type LinkNode, Metric, type Ok, type Outcome, type PageDims, type ParaNode, type ParaProps, type PbNode, Pipeline, type RowNode, type SheetNode, ShieldedParser, type SpanNode, type Stroke, type StrokeKind, TextKit, type TextProps, TreeWalker, type TxtNode, type VAlign, XmlKit, buildCell, buildGrid, buildImg, buildPara, buildRoot, buildRow, buildSheet, buildSpan, countNodes, fail, registry, safeAlign, safeFont, safeHex, safeStrokeDocx, safeStrokeHwpx, succeed, validateRoot, walkNode };
+export { A4, type Align, type AnyNode, ArchiveKit, BinaryKit, type BlockTag, type BrNode, type CellNode, type CellProps, type ContentNode, DEFAULT_STROKE, type Decoder, type DocMeta, type DocRoot, type Encoder, type Fail, type GridNode, type GridProps, type Heading, type ImgNode, type LinkNode, Metric, type Ok, type Outcome, type PageDims, type PageNumNode, type ParaNode, type ParaProps, type PbNode, Pipeline, type RowNode, type SheetNode, ShieldedParser, type SpanNode, type Stroke, type StrokeKind, type TableLook, TextKit, type TextProps, TreeWalker, type TxtNode, type VAlign, XmlKit, buildCell, buildGrid, buildImg, buildPageNum, buildPara, buildRoot, buildRow, buildSheet, buildSpan, countNodes, fail, registry, safeAlign, safeFont, safeHex, safeStrokeDocx, safeStrokeHwpx, succeed, validateRoot, walkNode };

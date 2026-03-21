@@ -1,10 +1,10 @@
 import type { Decoder } from '../../contract/decoder';
-import type { DocRoot, ContentNode, ParaNode, SpanNode } from '../../model/doc-tree';
+import type { DocRoot, ContentNode, ParaNode, SpanNode, ImgNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
 import type { ParaProps, TextProps } from '../../model/doc-props';
 import { A4 } from '../../model/doc-props';
 import { succeed, fail } from '../../contract/result';
-import { buildRoot, buildSheet, buildPara, buildSpan, buildGrid, buildRow, buildCell } from '../../model/builders';
+import { buildRoot, buildSheet, buildPara, buildSpan, buildImg, buildGrid, buildRow, buildCell } from '../../model/builders';
 import { ShieldedParser } from '../../safety/ShieldedParser';
 import { TextKit } from '../../toolkit/TextKit';
 import { registry } from '../../pipeline/registry';
@@ -69,6 +69,14 @@ export class MdDecoder implements Decoder {
         // Empty line
         if (line.trim() === '') { i++; continue; }
 
+        // Regular paragraph — check for alignment div
+        const alignMatch = line.match(/^<div\s+align="(center|right|left)">(.*?)<\/div>$/i);
+        if (alignMatch) {
+          const align = alignMatch[1].toLowerCase() as 'left' | 'center' | 'right';
+          kids.push(buildPara(parseInline(alignMatch[2]), { align }));
+          i++; continue;
+        }
+
         // Regular paragraph
         kids.push(buildPara(parseInline(line), {}));
         i++;
@@ -84,32 +92,67 @@ export class MdDecoder implements Decoder {
   }
 }
 
-function parseInline(text: string): SpanNode[] {
-  const spans: SpanNode[] = [];
+function parseInline(text: string): (SpanNode | ImgNode)[] {
+  const result: (SpanNode | ImgNode)[] = [];
   let rem = text;
 
   while (rem.length > 0) {
+    // Image: ![alt](data:mime;base64,...)
+    let m = rem.match(/^(.*?)!\[([^\]]*)\]\((data:([^;]+);base64,([^)]+))\)(.*)/s);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      const mime = m[4] as ImgNode['mime'];
+      const validMimes = ['image/png', 'image/jpeg', 'image/gif', 'image/bmp'];
+      result.push(buildImg(m[5], validMimes.includes(mime) ? mime : 'image/png', 100, 100, m[2] || undefined));
+      rem = m[6]; continue;
+    }
+
+    // Image: ![alt](url) — non-base64
+    m = rem.match(/^(.*?)!\[([^\]]*)\]\(([^)]+)\)(.*)/s);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      // Can't convert URL to base64, just preserve alt text
+      result.push(buildSpan(`[이미지: ${m[2] || m[3]}]`));
+      rem = m[4]; continue;
+    }
+
     // Bold+italic
-    let m = rem.match(/^(.*?)\*\*\*(.+?)\*\*\*(.*)/s);
-    if (m) { if (m[1]) spans.push(buildSpan(m[1])); spans.push(buildSpan(m[2], { b: true, i: true })); rem = m[3]; continue; }
+    m = rem.match(/^(.*?)\*\*\*(.+?)\*\*\*(.*)/s);
+    if (m) { if (m[1]) result.push(buildSpan(m[1])); result.push(buildSpan(m[2], { b: true, i: true })); rem = m[3]; continue; }
 
     // Bold
     m = rem.match(/^(.*?)\*\*(.+?)\*\*(.*)/s);
-    if (m) { if (m[1]) spans.push(buildSpan(m[1])); spans.push(buildSpan(m[2], { b: true })); rem = m[3]; continue; }
+    if (m) { if (m[1]) result.push(buildSpan(m[1])); result.push(buildSpan(m[2], { b: true })); rem = m[3]; continue; }
 
     // Italic
     m = rem.match(/^(.*?)\*(.+?)\*(.*)/s);
-    if (m) { if (m[1]) spans.push(buildSpan(m[1])); spans.push(buildSpan(m[2], { i: true })); rem = m[3]; continue; }
+    if (m) { if (m[1]) result.push(buildSpan(m[1])); result.push(buildSpan(m[2], { i: true })); rem = m[3]; continue; }
+
+    // Strikethrough ~~text~~
+    m = rem.match(/^(.*?)~~(.+?)~~(.*)/s);
+    if (m) { if (m[1]) result.push(buildSpan(m[1])); result.push(buildSpan(m[2], { s: true })); rem = m[3]; continue; }
+
+    // Underline <u>text</u>
+    m = rem.match(/^(.*?)<u>(.+?)<\/u>(.*)/si);
+    if (m) { if (m[1]) result.push(buildSpan(m[1])); result.push(buildSpan(m[2], { u: true })); rem = m[3]; continue; }
+
+    // Superscript <sup>text</sup>
+    m = rem.match(/^(.*?)<sup>(.+?)<\/sup>(.*)/si);
+    if (m) { if (m[1]) result.push(buildSpan(m[1])); result.push(buildSpan(m[2], { sup: true })); rem = m[3]; continue; }
+
+    // Subscript <sub>text</sub>
+    m = rem.match(/^(.*?)<sub>(.+?)<\/sub>(.*)/si);
+    if (m) { if (m[1]) result.push(buildSpan(m[1])); result.push(buildSpan(m[2], { sub: true })); rem = m[3]; continue; }
 
     // Inline code
     m = rem.match(/^(.*?)`(.+?)`(.*)/s);
-    if (m) { if (m[1]) spans.push(buildSpan(m[1])); spans.push(buildSpan(m[2], { font: 'Courier New' })); rem = m[3]; continue; }
+    if (m) { if (m[1]) result.push(buildSpan(m[1])); result.push(buildSpan(m[2], { font: 'Courier New' })); rem = m[3]; continue; }
 
-    spans.push(buildSpan(rem));
+    result.push(buildSpan(rem));
     break;
   }
 
-  return spans.length > 0 ? spans : [buildSpan(text)];
+  return result.length > 0 ? result : [buildSpan(text)];
 }
 
 function parseMdTable(lines: string[], startLine: number): { node: any; nextLine: number } | null {

@@ -5,12 +5,17 @@ export type BlockTag =
   | 'root' | 'sheet' | 'para' | 'span'
   | 'txt' | 'img' | 'link'
   | 'grid' | 'row' | 'cell'
-  | 'br' | 'pb';
+  | 'br' | 'pb' | 'pagenum';
 
 // ─── 리프 노드 ─────────────────────────────────────────────
 export interface TxtNode   { tag: 'txt'; content: string }
 export interface BrNode    { tag: 'br' }
 export interface PbNode    { tag: 'pb' }
+
+export interface PageNumNode {
+  tag: 'pagenum';
+  format?: 'decimal' | 'roman' | 'romanCaps';
+}
 
 export interface ImgNode {
   tag: 'img';
@@ -25,7 +30,7 @@ export interface ImgNode {
 export interface SpanNode {
   tag: 'span';
   props: TextProps;
-  kids: (TxtNode | BrNode | PbNode)[];
+  kids: (TxtNode | BrNode | PbNode | PageNumNode)[];
 }
 
 export interface LinkNode {
@@ -65,6 +70,8 @@ export interface SheetNode {
   tag: 'sheet';
   dims: PageDims;
   kids: ContentNode[];
+  header?: ParaNode[];
+  footer?: ParaNode[];
 }
 
 // ─── 루트 노드 ─────────────────────────────────────────────
@@ -79,4 +86,4 @@ export type AnyNode =
   | DocRoot | SheetNode | ParaNode | SpanNode
   | TxtNode | ImgNode | LinkNode
   | GridNode | RowNode | CellNode
-  | BrNode | PbNode;
+  | BrNode | PbNode | PageNumNode;

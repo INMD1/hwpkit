@@ -63,25 +63,29 @@ export const ArchiveKit = {
 
     for (const entry of entries) {
       const nameBytes = new TextEncoder().encode(entry.name);
-      const compressed = pako.deflate(entry.data, { level: 6 });
       const crc = crc32(entry.data);
 
+      // 'mimetype' must be stored uncompressed per OCF spec
+      const store = entry.name === 'mimetype';
+      const method = store ? 0 : 8;
+      const payload = store ? entry.data : pako.deflateRaw(entry.data, { level: 6 });
+
       // Local file header (30 bytes + name + data)
-      const local = new Uint8Array(30 + nameBytes.length + compressed.length);
+      const local = new Uint8Array(30 + nameBytes.length + payload.length);
       const lv = new DataView(local.buffer);
       lv.setUint32(0, 0x04034b50, true);
       lv.setUint16(4, 20, true);
       lv.setUint16(6, 0, true);
-      lv.setUint16(8, 8, true);                    // deflate
+      lv.setUint16(8, method, true);
       lv.setUint16(10, 0, true);
       lv.setUint16(12, 0, true);
       lv.setUint32(14, crc, true);
-      lv.setUint32(18, compressed.length, true);
+      lv.setUint32(18, payload.length, true);
       lv.setUint32(22, entry.data.length, true);
       lv.setUint16(26, nameBytes.length, true);
       lv.setUint16(28, 0, true);
       local.set(nameBytes, 30);
-      local.set(compressed, 30 + nameBytes.length);
+      local.set(payload, 30 + nameBytes.length);
 
       // Central directory header (46 bytes + name)
       const central = new Uint8Array(46 + nameBytes.length);
@@ -90,11 +94,11 @@ export const ArchiveKit = {
       cv.setUint16(4, 20, true);
       cv.setUint16(6, 20, true);
       cv.setUint16(8, 0, true);
-      cv.setUint16(10, 8, true);
+      cv.setUint16(10, method, true);
       cv.setUint16(12, 0, true);
       cv.setUint16(14, 0, true);
       cv.setUint32(16, crc, true);
-      cv.setUint32(20, compressed.length, true);
+      cv.setUint32(20, payload.length, true);
       cv.setUint32(24, entry.data.length, true);
       cv.setUint16(28, nameBytes.length, true);
       cv.setUint16(30, 0, true);

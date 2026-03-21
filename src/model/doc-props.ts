@@ -43,11 +43,23 @@ export interface CellProps {
   padPt?: number;
   align?: Align;
   va?: VAlign;
+  isHeader?: boolean;
+}
+
+export interface TableLook {
+  firstRow?: boolean;
+  lastRow?: boolean;
+  firstCol?: boolean;
+  lastCol?: boolean;
+  bandedRows?: boolean;
+  bandedCols?: boolean;
 }
 
 export interface GridProps {
   widthPct?: number;
   defaultStroke?: Stroke;
+  look?: TableLook;
+  headerRow?: boolean;
 }
 
 export interface PageDims {

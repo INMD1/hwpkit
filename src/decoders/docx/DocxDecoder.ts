@@ -1,12 +1,12 @@
 import type { Decoder } from '../../contract/decoder';
-import type { DocRoot, ContentNode, ParaNode, SpanNode, GridNode } from '../../model/doc-tree';
+import type { DocRoot, ContentNode, ParaNode, SpanNode, GridNode, ImgNode, PageNumNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
-import type { DocMeta, PageDims, TextProps, ParaProps, CellProps } from '../../model/doc-props';
+import type { DocMeta, PageDims, TextProps, ParaProps, CellProps, GridProps, TableLook } from '../../model/doc-props';
 import { A4 } from '../../model/doc-props';
 import { succeed, fail } from '../../contract/result';
-import { buildRoot, buildSheet, buildPara, buildSpan, buildGrid, buildRow, buildCell } from '../../model/builders';
+import { buildRoot, buildSheet, buildPara, buildSpan, buildImg, buildGrid, buildRow, buildCell } from '../../model/builders';
 import { ShieldedParser } from '../../safety/ShieldedParser';
-import { Metric, safeAlign, safeFont, safeHex } from '../../safety/StyleBridge';
+import { Metric, safeAlign, safeFont, safeHex, safeStrokeDocx } from '../../safety/StyleBridge';
 import { ArchiveKit } from '../../toolkit/ArchiveKit';
 import { XmlKit } from '../../toolkit/XmlKit';
 import { TextKit } from '../../toolkit/TextKit';
@@ -38,6 +38,15 @@ export class DocxDecoder implements Decoder {
         }
       }
 
+      // Parse numbering.xml for list support
+      const numXml = files.get('word/numbering.xml');
+      let numMap: NumMap = new Map();
+      if (numXml) {
+        try {
+          numMap = await parseNumbering(TextKit.decode(numXml));
+        } catch { /* non-fatal */ }
+      }
+
       const docStr = TextKit.decode(docXml);
       const docObj: any = await XmlKit.parseStrict(docStr);
 
@@ -45,15 +54,25 @@ export class DocxDecoder implements Decoder {
       const dims = extractDims(body) ?? { ...A4 };
       const elements = getBodyElements(body);
 
+      const decCtx: DecCtx = { relsMap, files, shield, numMap, warns };
+
       const kids: ContentNode[] = shield.guardAll(
         elements,
-        (el: any) => decodeElement(el, relsMap, files, shield),
+        (el: any) => decodeElement(el, decCtx),
         () => buildPara([buildSpan('[요소 파싱 실패]')]),
         'docx:bodyElement',
       );
 
+      // Decode header/footer
+      const headerParas = await decodeHeaderFooter('header', body, relsMap, files, decCtx);
+      const footerParas = await decodeHeaderFooter('footer', body, relsMap, files, decCtx);
+
       warns.push(...shield.flush());
-      const sheet = buildSheet(kids.filter(Boolean) as ContentNode[], dims);
+      const sheet = buildSheet(
+        kids.filter(Boolean) as ContentNode[],
+        dims,
+        { header: headerParas, footer: footerParas },
+      );
       return succeed(buildRoot(meta, [sheet]), warns);
     } catch (e: any) {
       warns.push(...shield.flush());
@@ -61,6 +80,19 @@ export class DocxDecoder implements Decoder {
     }
   }
 }
+
+// ─── types ─────────────────────────────────────────────────
+
+interface DecCtx {
+  relsMap: Map<string, string>;
+  files: Map<string, Uint8Array>;
+  shield: ShieldedParser;
+  numMap: NumMap;
+  warns: string[];
+}
+
+// numId → { abstractNumId, levels: Map<ilvl, { fmt, isOrdered }> }
+type NumMap = Map<number, { levels: Map<number, { fmt: string; isOrdered: boolean }> }>;
 
 // ─── helpers ────────────────────────────────────────────────
 
@@ -83,13 +115,45 @@ async function parseCoreProps(xml: string): Promise<DocMeta> {
     const obj: any = await XmlKit.parseStrict(xml);
     const c = obj?.['cp:coreProperties']?.[0] ?? obj?.coreProperties?.[0] ?? {};
     return {
-      title:    c?.['dc:title']?.[0]?._ ?? c?.['dc:title']?.[0] ?? undefined,
-      author:   c?.['dc:creator']?.[0]?._ ?? c?.['dc:creator']?.[0] ?? undefined,
-      subject:  c?.['dc:subject']?.[0]?._ ?? c?.['dc:subject']?.[0] ?? undefined,
-      created:  c?.['dcterms:created']?.[0]?._ ?? undefined,
-      modified: c?.['dcterms:modified']?.[0]?._ ?? undefined,
+      title:    c?.['dc:title']?.[0]?._text ?? undefined,
+      author:   c?.['dc:creator']?.[0]?._text ?? undefined,
+      subject:  c?.['dc:subject']?.[0]?._text ?? undefined,
+      created:  c?.['dcterms:created']?.[0]?._text ?? undefined,
+      modified: c?.['dcterms:modified']?.[0]?._text ?? undefined,
     };
   } catch { return {}; }
+}
+
+async function parseNumbering(xml: string): Promise<NumMap> {
+  const map: NumMap = new Map();
+  try {
+    const obj: any = await XmlKit.parseStrict(xml);
+    const root = obj?.['w:numbering']?.[0] ?? obj?.numbering?.[0] ?? obj;
+
+    // Parse abstractNums
+    const absMap = new Map<number, Map<number, { fmt: string; isOrdered: boolean }>>();
+    for (const abs of toArr(root?.['w:abstractNum'] ?? root?.abstractNum)) {
+      const absId = Number(abs?._attr?.['w:abstractNumId'] ?? abs?._attr?.abstractNumId ?? 0);
+      const levels = new Map<number, { fmt: string; isOrdered: boolean }>();
+      for (const lvl of toArr(abs?.['w:lvl'] ?? abs?.lvl)) {
+        const ilvl = Number(lvl?._attr?.['w:ilvl'] ?? lvl?._attr?.ilvl ?? 0);
+        const fmtNode = lvl?.['w:numFmt']?.[0]?._attr ?? lvl?.numFmt?.[0]?._attr ?? {};
+        const fmt = fmtNode?.['w:val'] ?? fmtNode?.val ?? 'decimal';
+        levels.set(ilvl, { fmt, isOrdered: fmt !== 'bullet' });
+      }
+      absMap.set(absId, levels);
+    }
+
+    // Parse nums
+    for (const num of toArr(root?.['w:num'] ?? root?.num)) {
+      const numId = Number(num?._attr?.['w:numId'] ?? num?._attr?.numId ?? 0);
+      const absRef = num?.['w:abstractNumId']?.[0]?._attr ?? num?.abstractNumId?.[0]?._attr ?? {};
+      const absId = Number(absRef?.['w:val'] ?? absRef?.val ?? 0);
+      const levels = absMap.get(absId) ?? new Map();
+      map.set(numId, { levels });
+    }
+  } catch { /* non-fatal */ }
+  return map;
 }
 
 function getBody(obj: any): any {
@@ -116,22 +180,88 @@ function extractDims(body: any): PageDims | null {
 }
 
 function getBodyElements(body: any): { type: string; node: any }[] {
+  const paras = toArr(body?.['w:p'] ?? body?.p);
+  const tables = toArr(body?.['w:tbl'] ?? body?.tbl);
+
+  if (tables.length === 0) return paras.map((n: any) => ({ type: 'para', node: n }));
+  if (paras.length === 0) return tables.map((n: any) => ({ type: 'table', node: n }));
+
+  // Use _childOrder from XmlKit to preserve document order
+  const childOrder = body?.['_childOrder'] as string[] | undefined;
+  if (Array.isArray(childOrder)) {
+    const items: { type: string; node: any }[] = [];
+    let pi = 0, ti = 0;
+    for (const tag of childOrder) {
+      if ((tag === 'w:p' || tag === 'p') && pi < paras.length) {
+        items.push({ type: 'para', node: paras[pi++] });
+      } else if ((tag === 'w:tbl' || tag === 'tbl') && ti < tables.length) {
+        items.push({ type: 'table', node: tables[ti++] });
+      }
+    }
+    while (pi < paras.length) items.push({ type: 'para', node: paras[pi++] });
+    while (ti < tables.length) items.push({ type: 'table', node: tables[ti++] });
+    return items;
+  }
+
+  // Fallback: paragraphs first, then tables
   return [
-    ...toArr(body?.['w:p'] ?? body?.p).map((n: any) => ({ type: 'para', node: n })),
-    ...toArr(body?.['w:tbl'] ?? body?.tbl).map((n: any) => ({ type: 'table', node: n })),
+    ...paras.map((n: any) => ({ type: 'para', node: n })),
+    ...tables.map((n: any) => ({ type: 'table', node: n })),
   ];
 }
 
-function decodeElement(
-  el: { type: string; node: any },
+// ─── Header/Footer decoding ────────────────────────────────
+
+async function decodeHeaderFooter(
+  kind: 'header' | 'footer',
+  body: any,
   relsMap: Map<string, string>,
   files: Map<string, Uint8Array>,
-  shield: ShieldedParser,
+  ctx: DecCtx,
+): Promise<ParaNode[] | undefined> {
+  try {
+    const sp = body?.['w:sectPr']?.[0] ?? body?.sectPr?.[0];
+    if (!sp) return undefined;
+
+    const refTag = kind === 'header' ? 'w:headerReference' : 'w:footerReference';
+    const refs = toArr(sp?.[refTag] ?? sp?.[refTag.replace('w:', '')]);
+    if (refs.length === 0) return undefined;
+
+    const rId = refs[0]?._attr?.['r:id'] ?? refs[0]?._attr?.['r:Id'] ?? refs[0]?._attr?.id;
+    if (!rId) return undefined;
+
+    const target = relsMap.get(rId);
+    if (!target) return undefined;
+
+    const filePath = target.startsWith('/') ? target.slice(1) : `word/${target}`;
+    const fileData = files.get(filePath);
+    if (!fileData) return undefined;
+
+    const xmlStr = TextKit.decode(fileData);
+    const obj: any = await XmlKit.parseStrict(xmlStr);
+
+    const rootTag = kind === 'header' ? 'w:hdr' : 'w:ftr';
+    const root = obj?.[rootTag]?.[0] ?? obj?.[rootTag.replace('w:', '')]?.[0] ?? obj;
+
+    const paras = toArr(root?.['w:p'] ?? root?.p);
+    if (paras.length === 0) return undefined;
+
+    return paras.map((p: any) => decodePara(p, ctx));
+  } catch {
+    return undefined;
+  }
+}
+
+// ─── Element decoding ──────────────────────────────────────
+
+function decodeElement(
+  el: { type: string; node: any },
+  ctx: DecCtx,
 ): ContentNode {
   if (el.type === 'table') {
-    const { value } = shield.guardGrid(
+    const { value } = ctx.shield.guardGrid(
       el.node,
-      (n) => decodeGrid(n as any, relsMap, files, shield),
+      (n) => decodeGrid(n as any, ctx),
       (n) => decodeGridSimple(n as any),
       (n) => decodeGridFlat(n as any),
       (n) => decodeGridText(n as any) as unknown as GridNode,
@@ -139,14 +269,12 @@ function decodeElement(
     );
     return value;
   }
-  return decodePara(el.node, relsMap, files, shield);
+  return decodePara(el.node, ctx);
 }
 
 function decodePara(
   p: any,
-  relsMap: Map<string, string>,
-  files: Map<string, Uint8Array>,
-  shield: ShieldedParser,
+  ctx: DecCtx,
 ): ParaNode {
   const pPr = p?.['w:pPr']?.[0] ?? {};
   const alignVal = pPr?.['w:jc']?.[0]?._attr?.['w:val'] ?? pPr?.['w:jc']?.[0]?._attr?.val;
@@ -157,18 +285,95 @@ function decodePara(
     heading: parseHeading(headStyle),
   };
 
+  // List/numbering
+  const numPr = pPr?.['w:numPr']?.[0] ?? pPr?.numPr?.[0];
+  if (numPr) {
+    const ilvlNode = numPr?.['w:ilvl']?.[0]?._attr ?? numPr?.ilvl?.[0]?._attr ?? {};
+    const numIdNode = numPr?.['w:numId']?.[0]?._attr ?? numPr?.numId?.[0]?._attr ?? {};
+    const ilvl = Number(ilvlNode?.['w:val'] ?? ilvlNode?.val ?? 0);
+    const numId = Number(numIdNode?.['w:val'] ?? numIdNode?.val ?? 0);
+
+    props.listLv = ilvl;
+    const numEntry = ctx.numMap.get(numId);
+    if (numEntry) {
+      const lvlInfo = numEntry.levels.get(ilvl) ?? numEntry.levels.get(0);
+      props.listOrd = lvlInfo?.isOrdered ?? false;
+    } else {
+      // Fallback: numId=1 is typically bullet, numId=2 is numbered
+      props.listOrd = numId >= 2;
+    }
+  }
+
   const runs = toArr(p?.['w:r'] ?? p?.r);
-  const kids: SpanNode[] = shield.guardAll(
+  const kids: (SpanNode | ImgNode)[] = ctx.shield.guardAll(
     runs,
-    (run: any) => decodeRun(run),
+    (run: any) => decodeRunOrImage(run, ctx),
     () => buildSpan(''),
     'docx:run',
   );
 
-  return buildPara(kids.filter(Boolean) as SpanNode[], props);
+  return buildPara(kids.filter(Boolean) as ParaNode['kids'], props);
 }
 
-function decodeRun(run: any): SpanNode {
+function decodeRunOrImage(run: any, ctx: DecCtx): SpanNode | ImgNode {
+  // Check for drawing (image)
+  const drawing = run?.['w:drawing']?.[0] ?? run?.drawing?.[0];
+  if (drawing) {
+    const img = decodeDrawing(drawing, ctx);
+    if (img) return img;
+  }
+  return decodeRun(run, ctx);
+}
+
+function decodeDrawing(drawing: any, ctx: DecCtx): ImgNode | null {
+  try {
+    const inline = drawing?.['wp:inline']?.[0] ?? drawing?.inline?.[0];
+    const anchor = drawing?.['wp:anchor']?.[0] ?? drawing?.anchor?.[0];
+    const container = inline ?? anchor;
+    if (!container) return null;
+
+    // Get dimensions
+    const extent = container?.['wp:extent']?.[0]?._attr ?? container?.extent?.[0]?._attr ?? {};
+    const cx = Number(extent?.cx ?? 0);
+    const cy = Number(extent?.cy ?? 0);
+    const wPt = Metric.emuToPt(cx);
+    const hPt = Metric.emuToPt(cy);
+
+    // Get alt text
+    const docPr = container?.['wp:docPr']?.[0]?._attr ?? container?.docPr?.[0]?._attr ?? {};
+    const alt = docPr?.descr ?? docPr?.name ?? '';
+
+    // Navigate to blip
+    const graphic = container?.['a:graphic']?.[0] ?? container?.graphic?.[0];
+    const graphicData = graphic?.['a:graphicData']?.[0] ?? graphic?.graphicData?.[0];
+    const pic = graphicData?.['pic:pic']?.[0] ?? graphicData?.pic?.[0];
+    const blipFill = pic?.['pic:blipFill']?.[0] ?? pic?.blipFill?.[0];
+    const blip = blipFill?.['a:blip']?.[0]?._attr ?? blipFill?.blip?.[0]?._attr ?? {};
+    const rId = blip?.['r:embed'] ?? blip?.embed;
+
+    if (!rId) return null;
+
+    const target = ctx.relsMap.get(rId);
+    if (!target) return null;
+
+    const filePath = target.startsWith('/') ? target.slice(1) : `word/${target}`;
+    const fileData = ctx.files.get(filePath);
+    if (!fileData) return null;
+
+    const ext = target.split('.').pop()?.toLowerCase() ?? 'png';
+    const mimeMap: Record<string, ImgNode['mime']> = {
+      png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+      gif: 'image/gif', bmp: 'image/bmp',
+    };
+    const mime = mimeMap[ext] ?? 'image/png';
+
+    return buildImg(TextKit.base64Encode(fileData), mime, wPt, hPt, alt || undefined);
+  } catch {
+    return null;
+  }
+}
+
+function decodeRun(run: any, ctx: DecCtx): SpanNode {
   const rPr = run?.['w:rPr']?.[0] ?? run?.rPr?.[0] ?? {};
 
   const szAttr = rPr?.['w:sz']?.[0]?._attr ?? rPr?.sz?.[0]?._attr ?? {};
@@ -184,46 +389,139 @@ function decodeRun(run: any): SpanNode {
 
   const underVal = rPr?.['w:u']?.[0]?._attr?.['w:val'] ?? rPr?.['w:u']?.[0]?._attr?.val;
 
+  // Background/highlight
+  const shdAttr = rPr?.['w:shd']?.[0]?._attr ?? rPr?.shd?.[0]?._attr ?? {};
+  const bgVal = safeHex(shdAttr?.['w:fill'] ?? shdAttr?.fill);
+
+  // Superscript/subscript
+  const vertAlignVal = rPr?.['w:vertAlign']?.[0]?._attr?.['w:val'] ?? rPr?.['w:vertAlign']?.[0]?._attr?.val;
+
+  // Check bold/italic/strike — val="0" means explicitly OFF
+  const bNode = rPr?.['w:b']?.[0] ?? rPr?.b?.[0];
+  const isBold = bNode != null && (bNode?._attr?.['w:val'] ?? bNode?._attr?.val ?? '1') !== '0';
+  const iNode = rPr?.['w:i']?.[0] ?? rPr?.i?.[0];
+  const isItalic = iNode != null && (iNode?._attr?.['w:val'] ?? iNode?._attr?.val ?? '1') !== '0';
+  const sNode = rPr?.['w:strike']?.[0] ?? rPr?.strike?.[0];
+  const isStrike = sNode != null && (sNode?._attr?.['w:val'] ?? sNode?._attr?.val ?? '1') !== '0';
+
   const props: TextProps = {
-    b:     (rPr?.['w:b']?.[0] != null || rPr?.b?.[0] != null) || undefined,
-    i:     (rPr?.['w:i']?.[0] != null || rPr?.i?.[0] != null) || undefined,
+    b:     isBold || undefined,
+    i:     isItalic || undefined,
     u:     underVal && underVal !== 'none' ? true : undefined,
-    s:     (rPr?.['w:strike']?.[0] != null) || undefined,
+    s:     isStrike || undefined,
+    sup:   vertAlignVal === 'superscript' || undefined,
+    sub:   vertAlignVal === 'subscript' || undefined,
     pt:    szVal ? Metric.halfPtToPt(Number(szVal)) : undefined,
     color: safeHex(colorVal),
     font:  fontName ? safeFont(fontName) : undefined,
+    bg:    bgVal,
   };
+
+  // Check for field codes (PAGE number)
+  const fldChar = run?.['w:fldChar']?.[0]?._attr ?? run?.fldChar?.[0]?._attr;
+  const instrText = run?.['w:instrText']?.[0];
 
   const textNodes = toArr(run?.['w:t'] ?? run?.t);
   const content = textNodes.map((t: any) => typeof t === 'string' ? t : t?._ ?? t?._text ?? '').join('');
+
+  // Handle page number field in instrText
+  if (instrText) {
+    const instrStr = typeof instrText === 'string' ? instrText : instrText?._text ?? '';
+    if (instrStr.trim().toUpperCase() === 'PAGE') {
+      const pageNum: PageNumNode = { tag: 'pagenum', format: 'decimal' };
+      return { tag: 'span', props, kids: [pageNum] };
+    }
+  }
 
   return buildSpan(content, props);
 }
 
 function decodeGrid(
   tbl: any,
-  relsMap: Map<string, string>,
-  files: Map<string, Uint8Array>,
-  shield: ShieldedParser,
+  ctx: DecCtx,
 ): GridNode {
+  // Parse tblPr for table styles
+  const tblPr = tbl?.['w:tblPr']?.[0] ?? tbl?.tblPr?.[0] ?? {};
+  const tblLookAttr = tblPr?.['w:tblLook']?.[0]?._attr ?? tblPr?.tblLook?.[0]?._attr ?? {};
+
+  const look: TableLook = {
+    firstRow:   tblLookAttr?.['w:firstRow'] === '1' || undefined,
+    lastRow:    tblLookAttr?.['w:lastRow'] === '1' || undefined,
+    firstCol:   tblLookAttr?.['w:firstColumn'] === '1' || tblLookAttr?.['w:firstCol'] === '1' || undefined,
+    lastCol:    tblLookAttr?.['w:lastColumn'] === '1' || tblLookAttr?.['w:lastCol'] === '1' || undefined,
+    bandedRows: tblLookAttr?.['w:noHBand'] === '0' || undefined,
+    bandedCols: tblLookAttr?.['w:noVBand'] === '0' || undefined,
+  };
+
+  // Parse table borders for defaultStroke
+  const tblBorders = tblPr?.['w:tblBorders']?.[0] ?? tblPr?.tblBorders?.[0];
+  let defaultStroke = undefined;
+  if (tblBorders) {
+    const top = tblBorders?.['w:top']?.[0]?._attr ?? tblBorders?.top?.[0]?._attr;
+    if (top) {
+      defaultStroke = safeStrokeDocx(
+        top?.['w:val'] ?? top?.val,
+        Number(top?.['w:sz'] ?? top?.sz ?? 4),
+        top?.['w:color'] ?? top?.color,
+      );
+    }
+  }
+
+  const gridProps: GridProps = { look, defaultStroke };
+
   const rowArr = toArr(tbl?.['w:tr'] ?? tbl?.tr);
-  const rowNodes = rowArr.map((row: any) => {
+  const rowNodes = rowArr.map((row: any, ri: number) => {
+    // Check for header row
+    const trPr = row?.['w:trPr']?.[0] ?? row?.trPr?.[0] ?? {};
+    const isHeaderRow = trPr?.['w:tblHeader']?.[0] != null || trPr?.tblHeader?.[0] != null;
+    if (ri === 0 && isHeaderRow) gridProps.headerRow = true;
+
     const cellArr = toArr(row?.['w:tc'] ?? row?.tc);
     const cellNodes = cellArr.map((cell: any) => {
       const tcPr = cell?.['w:tcPr']?.[0] ?? {};
       const gridSpan = Number(tcPr?.['w:gridSpan']?.[0]?._attr?.['w:val'] ?? 1);
+
+      // Cell background
       const bgAttr = tcPr?.['w:shd']?.[0]?._attr ?? {};
       const bg = safeHex(bgAttr?.['w:fill'] ?? bgAttr?.fill);
 
-      const paras = toArr(cell?.['w:p'] ?? cell?.p).map((p: any) => decodePara(p, relsMap, files, shield));
+      // Cell borders
+      const tcBorders = tcPr?.['w:tcBorders']?.[0] ?? tcPr?.tcBorders?.[0];
+      const cp: CellProps = { bg, isHeader: isHeaderRow || undefined };
+
+      if (tcBorders) {
+        const dirs: Array<[string, 'top' | 'bot' | 'left' | 'right']> = [
+          ['top', 'top'], ['bottom', 'bot'], ['left', 'left'], ['right', 'right'],
+        ];
+        for (const [xmlTag, propKey] of dirs) {
+          const bdr = tcBorders?.['w:' + xmlTag]?.[0]?._attr ?? tcBorders?.[xmlTag]?.[0]?._attr;
+          if (bdr) {
+            cp[propKey] = safeStrokeDocx(
+              bdr?.['w:val'] ?? bdr?.val,
+              Number(bdr?.['w:sz'] ?? bdr?.sz ?? 4),
+              bdr?.['w:color'] ?? bdr?.color,
+            );
+          }
+        }
+      }
+
+      // Vertical alignment
+      const vaAttr = tcPr?.['w:vAlign']?.[0]?._attr ?? tcPr?.vAlign?.[0]?._attr ?? {};
+      const vaVal = vaAttr?.['w:val'] ?? vaAttr?.val;
+      if (vaVal) {
+        const vaMap: Record<string, 'top' | 'mid' | 'bot'> = { top: 'top', center: 'mid', bottom: 'bot' };
+        cp.va = vaMap[vaVal];
+      }
+
+      const paras = toArr(cell?.['w:p'] ?? cell?.p).map((p: any) => decodePara(p, ctx));
       return buildCell(
         paras.length > 0 ? paras : [buildPara([buildSpan('')])],
-        { cs: gridSpan, rs: 1, props: { bg } as CellProps },
+        { cs: gridSpan, rs: 1, props: cp },
       );
     });
     return buildRow(cellNodes);
   });
-  return buildGrid(rowNodes);
+  return buildGrid(rowNodes, gridProps);
 }
 
 function decodeGridSimple(tbl: any): GridNode {

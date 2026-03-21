@@ -4,17 +4,26 @@
 export { Pipeline } from './pipeline/Pipeline';
 export { registry } from './pipeline/registry';
 
+// Side-effect imports: register all decoders/encoders
+import './decoders/md/MdDecoder';
+import './decoders/hwpx/HwpxDecoder';
+import './decoders/docx/DocxDecoder';
+import './decoders/hwp/HwpScanner';
+import './encoders/md/MdEncoder';
+import './encoders/hwpx/HwpxEncoder';
+import './encoders/docx/DocxEncoder';
+
 // Model
 export type {
   DocRoot, SheetNode, ParaNode, SpanNode, GridNode, RowNode, CellNode,
-  ImgNode, LinkNode, TxtNode, BrNode, PbNode, ContentNode, AnyNode, BlockTag,
+  ImgNode, LinkNode, TxtNode, BrNode, PbNode, PageNumNode, ContentNode, AnyNode, BlockTag,
 } from './model/doc-tree';
 export type {
-  TextProps, ParaProps, CellProps, GridProps, PageDims, DocMeta,
+  TextProps, ParaProps, CellProps, GridProps, TableLook, PageDims, DocMeta,
   Align, VAlign, Heading, StrokeKind, Stroke,
 } from './model/doc-props';
 export { A4, DEFAULT_STROKE } from './model/doc-props';
-export { buildRoot, buildSheet, buildPara, buildSpan, buildImg, buildGrid, buildRow, buildCell } from './model/builders';
+export { buildRoot, buildSheet, buildPara, buildSpan, buildImg, buildGrid, buildRow, buildCell, buildPageNum } from './model/builders';
 
 // Contract
 export type { Decoder } from './contract/decoder';
