@@ -50,7 +50,7 @@ const ALIGN_MAP: Record<string, Align> = {
   start: 'left', end: 'right',
 };
 export function safeAlign(raw?: string): Align {
-  return ALIGN_MAP[raw ?? ''] ?? 'left';
+  return ALIGN_MAP[raw ?? ''] ?? 'justify';
 }
 
 // ─── 테두리 정규화 ─────────────────────────────────────────
@@ -92,4 +92,15 @@ const FONT_MAP: Record<string, string> = {
 };
 export function safeFont(raw?: string): string {
   return FONT_MAP[raw ?? ''] ?? raw ?? 'Malgun Gothic';
+}
+
+// Reverse mapping: English → Korean (for HWPX encoding)
+const FONT_MAP_KR: Record<string, string> = {
+  'Malgun Gothic': '맑은 고딕',
+  'Batang': '바탕',
+  'Dotum': '돋움',
+  'Gulim': '굴림',
+};
+export function safeFontToKr(raw?: string): string {
+  return FONT_MAP_KR[raw ?? ''] ?? raw ?? '맑은 고딕';
 }

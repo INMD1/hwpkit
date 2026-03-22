@@ -4,7 +4,7 @@ import type { Outcome } from '../../contract/result';
 import type { PageDims, TextProps, ParaProps, CellProps, Stroke } from '../../model/doc-props';
 import { A4, DEFAULT_STROKE } from '../../model/doc-props';
 import { succeed, fail } from '../../contract/result';
-import { Metric } from '../../safety/StyleBridge';
+import { Metric, safeFontToKr } from '../../safety/StyleBridge';
 import { ArchiveKit } from '../../toolkit/ArchiveKit';
 import { TextKit } from '../../toolkit/TextKit';
 import { registry } from '../../pipeline/registry';
@@ -13,13 +13,17 @@ import { registry } from '../../pipeline/registry';
 const NS = [
   'xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app"',
   'xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"',
+  'xmlns:hp10="http://www.hancom.co.kr/hwpml/2016/paragraph"',
   'xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section"',
   'xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core"',
   'xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head"',
+  'xmlns:hhs="http://www.hancom.co.kr/hwpml/2011/history"',
   'xmlns:hm="http://www.hancom.co.kr/hwpml/2011/master-page"',
   'xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf"',
   'xmlns:dc="http://purl.org/dc/elements/1.1/"',
   'xmlns:opf="http://www.idpf.org/2007/opf/"',
+  'xmlns:ooxmlchart="http://www.hancom.co.kr/hwpml/2016/ooxmlchart"',
+  'xmlns:epub="http://www.idpf.org/2007/ops"',
   'xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"',
 ].join(' ');
 
@@ -55,6 +59,7 @@ interface HwpxCtx {
   borderFills: { id: number; xml: string }[];
   bins: BinEntry[];
   nextBinNum: number;
+  nextElementId: number;
   availableWidth: number; // HWPUNIT — page width minus margins
   fonts: string[];
   fontMap: Map<string, number>;
@@ -83,7 +88,7 @@ function registerCharPr(props: TextProps, ctx: HwpxCtx): number {
   const existing = ctx.charPrMap.get(key);
   if (existing !== undefined) return existing;
 
-  const fontName = props.font ?? '굴림체';
+  const fontName = safeFontToKr(props.font) || '굴림체';
   const fontId = registerFont(fontName, ctx);
 
   const id = ctx.charPrs.length;
@@ -186,7 +191,7 @@ function addBorderFill(ctx: HwpxCtx, stroke?: Stroke, bgColor?: string): number 
     fill = `<hc:fillBrush><hc:winBrush faceColor="${bc}" hatchColor="none" alpha="0"/></hc:fillBrush>`;
   }
 
-  const xml = `<hh:borderFill id="${id}" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0"><hh:slash type="NONE" Crooked="0" isCounter="0"/><hh:backSlash type="NONE" Crooked="0" isCounter="0"/><hh:leftBorder type="${type}" width="${w}" color="${c}"/><hh:rightBorder type="${type}" width="${w}" color="${c}"/><hh:topBorder type="${type}" width="${w}" color="${c}"/><hh:bottomBorder type="${type}" width="${w}" color="${c}"/><hh:diagonal type="NONE" width="0.1 mm" color="#000000"/>${fill}</hh:borderFill>`;
+  const xml = `<hh:borderFill id="${id}" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0"><hh:slash type="NONE" Crooked="0" isCounter="0"/><hh:backSlash type="NONE" Crooked="0" isCounter="0"/><hh:leftBorder type="${type}" width="${w}" color="${c}"/><hh:rightBorder type="${type}" width="${w}" color="${c}"/><hh:topBorder type="${type}" width="${w}" color="${c}"/><hh:bottomBorder type="${type}" width="${w}" color="${c}"/><hh:diagonal type="SOLID" width="0.1 mm" color="#000000"/>${fill}</hh:borderFill>`;
   ctx.borderFills.push({ id, xml });
   return id;
 }
@@ -207,7 +212,7 @@ export class HwpxEncoder implements Encoder {
       const ctx: HwpxCtx = {
         charPrs: [], charPrMap: new Map(),
         paraPrs: [], paraPrMap: new Map(),
-        borderFills: [], bins: [], nextBinNum: 1,
+        borderFills: [], bins: [], nextBinNum: 1, nextElementId: 10000,
         availableWidth,
         fonts: [], fontMap: new Map(),
       };
@@ -228,15 +233,25 @@ export class HwpxEncoder implements Encoder {
       if (sheet?.header) scanParas(sheet.header, ctx);
       if (sheet?.footer) scanParas(sheet.footer, ctx);
 
+      // Extract plain text preview from document
+      const previewText = extractPreviewText(sheet);
+
+      // IMPORTANT: Generate section XML FIRST so that borderFills created
+      // during table encoding are registered in ctx before headerXml runs.
+      const sectionData = TextKit.encode(sectionXml(sheet, dims, ctx));
+      const headerData = TextKit.encode(headerXml(dims, doc.meta, ctx));
+
       const entries: { name: string; data: Uint8Array }[] = [
-        { name: 'mimetype',                data: TextKit.encode('application/hwp+zip') },
-        { name: 'version.xml',             data: TextKit.encode(VERSION_XML) },
-        { name: 'META-INF/container.xml',   data: TextKit.encode(containerXml()) },
-        { name: 'META-INF/manifest.xml',    data: TextKit.encode(MANIFEST_XML) },
-        { name: 'settings.xml',            data: TextKit.encode(SETTINGS_XML) },
-        { name: 'Contents/content.hpf',     data: TextKit.encode(contentHpf(ctx)) },
-        { name: 'Contents/header.xml',      data: TextKit.encode(headerXml(dims, doc.meta, ctx)) },
-        { name: 'Contents/section0.xml',    data: TextKit.encode(sectionXml(sheet, dims, ctx)) },
+        { name: 'mimetype',                   data: TextKit.encode('application/hwp+zip') },
+        { name: 'version.xml',                data: TextKit.encode(VERSION_XML) },
+        { name: 'Contents/header.xml',         data: headerData },
+        { name: 'Contents/section0.xml',       data: sectionData },
+        { name: 'Preview/PrvText.txt',         data: TextKit.encode(previewText) },
+        { name: 'settings.xml',               data: TextKit.encode(SETTINGS_XML) },
+        { name: 'META-INF/container.rdf',      data: TextKit.encode(CONTAINER_RDF) },
+        { name: 'Contents/content.hpf',        data: TextKit.encode(contentHpf(ctx, doc.meta)) },
+        { name: 'META-INF/container.xml',      data: TextKit.encode(CONTAINER_XML) },
+        { name: 'META-INF/manifest.xml',       data: TextKit.encode(MANIFEST_XML) },
       ];
 
       for (const bin of ctx.bins) {
@@ -252,27 +267,29 @@ export class HwpxEncoder implements Encoder {
 
 // ─── Constants ──────────────────────────────────────────────
 
-const VERSION_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" tagetApplication="WORDPROCESSOR" major="5" minor="1" micro="0" buildNumber="1" os="1" xmlVersion="1.4" application="hwpkit" appVersion="2, 0, 0, 0"/>`;
+const VERSION_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" tagetApplication="WORDPROCESSOR" major="5" minor="1" micro="0" buildNumber="1" os="6" xmlVersion="1.2" application="Hancom Office Hangul" appVersion="11, 0, 0, 0"/>`;
 
-function containerXml(): string {
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><ocf:container xmlns:ocf="urn:oasis:names:tc:opendocument:xmlns:container" xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf"><ocf:rootfiles><ocf:rootfile full-path="Contents/content.hpf" media-type="application/hwpml-package+xml"/></ocf:rootfiles></ocf:container>`;
-}
+const CONTAINER_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><ocf:container xmlns:ocf="urn:oasis:names:tc:opendocument:xmlns:container" xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf"><ocf:rootfiles><ocf:rootfile full-path="Contents/content.hpf" media-type="application/hwpml-package+xml"/><ocf:rootfile full-path="Preview/PrvText.txt" media-type="text/plain"/><ocf:rootfile full-path="META-INF/container.rdf" media-type="application/rdf+xml"/></ocf:rootfiles></ocf:container>`;
+
+const CONTAINER_RDF = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about=""><ns0:hasPart xmlns:ns0="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/header.xml"/></rdf:Description><rdf:Description rdf:about="Contents/header.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#HeaderFile"/></rdf:Description><rdf:Description rdf:about=""><ns0:hasPart xmlns:ns0="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/section0.xml"/></rdf:Description><rdf:Description rdf:about="Contents/section0.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#SectionFile"/></rdf:Description><rdf:Description rdf:about=""><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#Document"/></rdf:Description></rdf:RDF>`;
 
 const MANIFEST_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><odf:manifest xmlns:odf="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"/>`;
 
-const SETTINGS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><ha:HWPApplicationSetting xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"/>`;
+const SETTINGS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><ha:HWPApplicationSetting xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"><ha:CaretPosition listIDRef="0" paraIDRef="0" pos="0"/><config:config-item-set name="PrintInfo"><config:config-item name="PrintMethod" type="short">0</config:config-item><config:config-item name="ZoomX" type="short">100</config:config-item><config:config-item name="ZoomY" type="short">100</config:config-item></config:config-item-set></ha:HWPApplicationSetting>`;
 
-function contentHpf(ctx: HwpxCtx): string {
-  let items = `<opf:item id="header" href="Contents/header.xml" media-type="application/xml"/>
-    <opf:item id="section0" href="Contents/section0.xml" media-type="application/xml"/>`;
+function contentHpf(ctx: HwpxCtx, meta?: any): string {
+  const title = esc(meta?.title ?? '');
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+  let items = `<opf:item id="header" href="Contents/header.xml" media-type="application/xml"/>`
+    + `<opf:item id="section0" href="Contents/section0.xml" media-type="application/xml"/>`
+    + `<opf:item id="settings" href="settings.xml" media-type="application/xml"/>`;
   for (const bin of ctx.bins) {
     const ext = bin.name.split('.').pop()?.toLowerCase() ?? 'png';
-    const ct = ext === 'png' ? 'image/png' : ext === 'jpg' ? 'image/jpeg' : ext === 'gif' ? 'image/gif' : 'image/bmp';
-    items += `\n    <opf:item id="${bin.id}" href="BinData/${bin.name}" media-type="${ct}" isEmbeded="1"/>`;
+    const ct = ext === 'png' ? 'image/png' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : ext === 'gif' ? 'image/gif' : 'image/bmp';
+    items += `<opf:item id="${bin.id}" href="BinData/${bin.name}" media-type="${ct}" isEmbeded="1"/>`;
   }
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><opf:package ${NS} version="" unique-identifier="" id=""><opf:metadata><opf:title/><opf:language>ko</opf:language></opf:metadata><opf:manifest>
-    ${items}
-  </opf:manifest><opf:spine><opf:itemref idref="section0"/></opf:spine></opf:package>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><opf:package ${NS} version="" unique-identifier="" id=""><opf:metadata><opf:title>${title}</opf:title><opf:language>ko</opf:language><opf:meta name="creator" content="text"/><opf:meta name="subject" content="text"/><opf:meta name="description" content="text"/><opf:meta name="CreatedDate" content="text">${now}</opf:meta><opf:meta name="ModifiedDate" content="text">${now}</opf:meta><opf:meta name="keyword" content="text"/></opf:metadata><opf:manifest>${items}</opf:manifest><opf:spine><opf:itemref idref="header" linear="no"/><opf:itemref idref="section0" linear="yes"/></opf:spine></opf:package>`;
 }
 
 // ─── header.xml ─────────────────────────────────────────────
@@ -300,7 +317,7 @@ function headerXml(dims: PageDims, meta: any, ctx: HwpxCtx): string {
     const bold = cp.bold ? '<hh:bold/>' : '';
     const italic = cp.italic ? '<hh:italic/>' : '';
     const fid = cp.fontId ?? 0;
-    charPrXml += `<hh:charPr id="${cp.id}" height="${cp.height}" textColor="${cp.textColor}" shadeColor="none" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="3"><hh:fontRef hangul="${fid}" latin="${fid}" hanja="${fid}" japanese="${fid}" other="${fid}" symbol="${fid}" user="${fid}"/><hh:ratio hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100"/><hh:spacing hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/><hh:relSz hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100"/><hh:offset hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>${bold}${italic}<hh:underline type="${cp.underline}" shape="SOLID" color="#000000"/><hh:strikeout shape="${cp.strikeout === 'NONE' ? 'NONE' : 'SOLID'}" color="#000000"/><hh:outline type="NONE"/><hh:shadow type="NONE" color="#C0C0C0" offsetX="10" offsetY="10"/></hh:charPr>`;
+    charPrXml += `<hh:charPr id="${cp.id}" height="${cp.height}" textColor="${cp.textColor}" shadeColor="none" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="3"><hh:fontRef hangul="${fid}" latin="${fid}" hanja="${fid}" japanese="${fid}" other="${fid}" symbol="${fid}" user="${fid}"/><hh:ratio hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100"/><hh:spacing hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/><hh:relSz hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100"/><hh:offset hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>${bold}${italic}<hh:underline type="${cp.underline}" shape="SOLID" color="#000000"/><hh:strikeout shape="${cp.strikeout}" color="#000000"/><hh:outline type="NONE"/><hh:shadow type="NONE" color="#C0C0C0" offsetX="10" offsetY="10"/></hh:charPr>`;
   }
 
   // ParaPr definitions
@@ -312,7 +329,7 @@ function headerXml(dims: PageDims, meta: any, ctx: HwpxCtx): string {
   // BorderFill definitions
   const borderFillXml = ctx.borderFills.map(bf => bf.xml).join('');
 
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hh:head ${NS} version="1.4" secCnt="1"><hh:beginNum page="1" footnote="1" endnote="1" pic="1" tbl="1" equation="1"/><hh:refList>${fontFaces}<hh:borderFills itemCnt="${ctx.borderFills.length}">${borderFillXml}</hh:borderFills><hh:charProperties itemCnt="${ctx.charPrs.length}">${charPrXml}</hh:charProperties><hh:paraProperties itemCnt="${ctx.paraPrs.length}">${paraPrXml}</hh:paraProperties><hh:tabProperties itemCnt="1"><hh:tabPr id="0" autoTabLeft="0" autoTabRight="0"/></hh:tabProperties><hh:styles itemCnt="1"><hh:style id="0" type="PARA" name="Normal" engName="Normal" paraPrIDRef="0" charPrIDRef="0" nextStyleIDRef="0" langIDRef="0" lockForm="0"/></hh:styles></hh:refList><hh:compatibleDocument targetProgram="NONE"/><hh:docOption linkinfo="" gridMethod="0" memoOption="3" headFootFlags="0"/></hh:head>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hh:head ${NS} version="1.2" secCnt="1"><hh:beginNum page="1" footnote="1" endnote="1" pic="1" tbl="1" equation="1"/><hh:refList>${fontFaces}<hh:borderFills itemCnt="${ctx.borderFills.length}">${borderFillXml}</hh:borderFills><hh:charProperties itemCnt="${ctx.charPrs.length}">${charPrXml}</hh:charProperties><hh:paraProperties itemCnt="${ctx.paraPrs.length}">${paraPrXml}</hh:paraProperties><hh:tabProperties itemCnt="1"><hh:tabPr id="0" autoTabLeft="0" autoTabRight="0"/></hh:tabProperties><hh:styles itemCnt="1"><hh:style id="0" type="PARA" name="바탕글" engName="Normal" paraPrIDRef="0" charPrIDRef="0" nextStyleIDRef="0" langID="1042" lockForm="0"/></hh:styles></hh:refList><hh:compatibleDocument targetProgram="HWP201X"><hh:layoutCompatibility/></hh:compatibleDocument><hh:docOption><hh:linkinfo path="" pageInherit="1" footnoteInherit="0"/></hh:docOption><hh:trackchageConfig flags="56"/></hh:head>`;
 }
 
 // ─── section0.xml ───────────────────────────────────────────
@@ -322,10 +339,12 @@ function sectionXml(sheet: SheetNode | undefined, dims: PageDims, ctx: HwpxCtx):
 
   // First paragraph includes secPr
   // WIDELY = portrait (standard), NARROWLY = landscape
-  const secPr = `<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0"><hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/><hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/><hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/><hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/><hp:pagePr landscape="${dims.orient === 'landscape' ? 'NARROWLY' : 'WIDELY'}" width="${Metric.ptToHwp(dims.wPt)}" height="${Metric.ptToHwp(dims.hPt)}" gutterType="LEFT_ONLY"><hp:margin header="0" footer="0" gutter="0" left="${Metric.ptToHwp(dims.ml)}" right="${Metric.ptToHwp(dims.mr)}" top="${Metric.ptToHwp(dims.mt)}" bottom="${Metric.ptToHwp(dims.mb)}"/></hp:pagePr><hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="284" belowLine="568" aboveLine="852"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr><hp:endNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="0" type="NONE" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="0" belowLine="576" aboveLine="864"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="END_OF_DOCUMENT" beneathText="0"/></hp:endNotePr><hp:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill></hp:secPr>`;
+  const secPr = `<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0"><hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/><hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/><hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/><hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/><hp:pagePr landscape="${dims.orient === 'landscape' ? 'NARROWLY' : 'WIDELY'}" width="${Metric.ptToHwp(dims.wPt)}" height="${Metric.ptToHwp(dims.hPt)}" gutterType="LEFT_ONLY"><hp:margin header="2834" footer="2834" gutter="0" left="${Metric.ptToHwp(dims.ml)}" right="${Metric.ptToHwp(dims.mr)}" top="${Metric.ptToHwp(dims.mt)}" bottom="${Metric.ptToHwp(dims.mb)}"/></hp:pagePr><hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="284" belowLine="568" aboveLine="852"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr><hp:endNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="0" type="NONE" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="0" belowLine="576" aboveLine="864"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="END_OF_DOCUMENT" beneathText="0"/></hp:endNotePr><hp:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="EVEN" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="ODD" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill></hp:secPr><hp:ctrl><hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/></hp:ctrl>`;
 
   let contentXml = '';
   let isFirst = true;
+
+  const defaultLineseg = `<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="1000" textheight="1000" baseline="850" spacing="600" horzpos="0" horzsize="${ctx.availableWidth}" flags="393216"/></hp:linesegarray>`;
 
   for (const kid of kids) {
     if (kid.tag === 'para') {
@@ -333,18 +352,16 @@ function sectionXml(sheet: SheetNode | undefined, dims: PageDims, ctx: HwpxCtx):
       isFirst = false;
     } else if (kid.tag === 'grid') {
       // Grid is embedded inside a paragraph's run
-      if (isFirst) {
-        contentXml += `<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0">${secPr}${encodeGrid(kid, ctx)}</hp:run></hp:p>`;
-        isFirst = false;
-      } else {
-        contentXml += `<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0">${encodeGrid(kid, ctx)}</hp:run></hp:p>`;
-      }
+      const gridXml = encodeGrid(kid, ctx);
+      const prefix = isFirst ? secPr : '';
+      contentXml += `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0">${prefix}${gridXml}</hp:run>${defaultLineseg}</hp:p>`;
+      isFirst = false;
     }
   }
 
   // If empty, add one empty paragraph with secPr
   if (contentXml === '') {
-    contentXml = `<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0">${secPr}</hp:run></hp:p>`;
+    contentXml = `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0">${secPr}<hp:t></hp:t></hp:run>${defaultLineseg}</hp:p>`;
   }
 
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hs:sec ${NS}>${contentXml}</hs:sec>`;
@@ -376,7 +393,28 @@ function encodePara(para: ParaNode, ctx: HwpxCtx, secPr: string = ''): string {
     }
   }
 
-  return `<hp:p id="0" paraPrIDRef="${paraPrId}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">${runs}</hp:p>`;
+  // Compute lineseg values based on font size
+  const fontSize = getFontSizeForPara(para, ctx);
+  const vertsize = fontSize;
+  const textheight = fontSize;
+  const baseline = Math.round(fontSize * 0.85);
+  const spacing = Math.round(fontSize * 0.6);
+  const linesegarray = `<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="${vertsize}" textheight="${textheight}" baseline="${baseline}" spacing="${spacing}" horzpos="0" horzsize="${ctx.availableWidth}" flags="393216"/></hp:linesegarray>`;
+
+  return `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="${paraPrId}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">${runs}${linesegarray}</hp:p>`;
+}
+
+/** Get the font size (in HWPX height units, 1000=10pt) for lineseg computation */
+function getFontSizeForPara(para: ParaNode, ctx: HwpxCtx): number {
+  for (const kid of para.kids) {
+    if (kid.tag === 'span') {
+      const charPrId = ctx.charPrMap.get(charPrKey(kid.props));
+      if (charPrId !== undefined && ctx.charPrs[charPrId]) {
+        return ctx.charPrs[charPrId].height;
+      }
+    }
+  }
+  return 1000; // default 10pt
 }
 
 function encodeRun(span: SpanNode, ctx: HwpxCtx): string {
@@ -385,7 +423,11 @@ function encodeRun(span: SpanNode, ctx: HwpxCtx): string {
   const parts: string[] = [];
   for (const kid of span.kids) {
     if (kid.tag === 'txt') {
-      parts.push(`<hp:t>${esc(kid.content)}</hp:t>`);
+      if (kid.content) {
+        parts.push(`<hp:t>${esc(kid.content)}</hp:t>`);
+      } else {
+        parts.push(`<hp:t></hp:t>`);
+      }
     } else if (kid.tag === 'pagenum') {
       const fmt = kid.format === 'roman' ? 'ROMAN_LOWER' : kid.format === 'romanCaps' ? 'ROMAN_UPPER' : 'DIGIT';
       parts.push(`<hp:pageNum pageStartsOn="BOTH" formatType="${fmt}"/>`);
@@ -405,22 +447,44 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
   const w = Metric.ptToHwp(img.w);
   const h = Metric.ptToHwp(img.h);
 
-  return `<hp:run charPrIDRef="${charPrId}"><hp:pic id="0" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" treatAsChar="1"><hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:imgRect x="0" y="0" w="${w}" h="${h}"/><hp:imgClip left="0" right="0" top="0" bottom="0"/><hp:img binaryItemIDRef="${binId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/></hp:pic></hp:run>`;
+  return `<hp:run charPrIDRef="${charPrId}"><hp:pic id="${ctx.nextElementId++}" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" treatAsChar="1"><hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:imgRect x="0" y="0" w="${w}" h="${h}"/><hp:imgClip left="0" right="0" top="0" bottom="0"/><hp:img binaryItemIDRef="${binId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/></hp:pic></hp:run>`;
 }
 
 function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
-  const colCount = grid.kids[0]?.kids.length ?? 0;
   const rowCount = grid.kids.length;
 
-  // Calculate column widths: use source widths if available, else divide equally
-  // HWPX uses HWPUNIT (1/7200 inch). Convert pt → HWPUNIT: 1pt = 100 HWPUNIT
+  // Compute true column count: max total colSpan across all rows
+  let colCount = 0;
+  for (const row of grid.kids) {
+    let rowCols = 0;
+    for (const cell of row.kids) rowCols += cell.cs;
+    if (rowCols > colCount) colCount = rowCols;
+  }
+  if (colCount === 0) colCount = grid.kids[0]?.kids.length ?? 1;
+
+  // Calculate column widths in HWPUNIT
   const totalWidth = ctx.availableWidth;
   const defaultColW = Math.round(totalWidth / (colCount || 1));
   const colWidths: number[] = [];
   if (grid.props.colWidths && grid.props.colWidths.length === colCount) {
-    for (const wPt of grid.props.colWidths) colWidths.push(wPt > 0 ? Math.round(wPt * 100) : defaultColW);
+    // Fill zero-width columns by distributing remaining space
+    const srcPt = [...grid.props.colWidths];
+    const knownTotal = srcPt.filter(w => w > 0).reduce((s, w) => s + w, 0);
+    const zeroCount = srcPt.filter(w => w <= 0).length;
+    const remaining = Math.max(0, Metric.hwpToPt(totalWidth) - knownTotal);
+    const zeroFill = zeroCount > 0 ? remaining / zeroCount : 0;
+    for (let i = 0; i < srcPt.length; i++) {
+      if (srcPt[i] <= 0) srcPt[i] = zeroFill > 0 ? zeroFill : Metric.hwpToPt(defaultColW);
+    }
+    for (const wPt of srcPt) colWidths.push(Metric.ptToHwp(wPt));
   } else {
     for (let c = 0; c < colCount; c++) colWidths.push(defaultColW);
+  }
+  // Scale to fit available width
+  const rawTotal = colWidths.reduce((s, w) => s + w, 0);
+  if (rawTotal > totalWidth * 1.05) {
+    const scale = totalWidth / rawTotal;
+    for (let i = 0; i < colWidths.length; i++) colWidths[i] = Math.round(colWidths[i] * scale);
   }
   const actualTotal = colWidths.reduce((s, w) => s + w, 0);
 
@@ -452,7 +516,7 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
       for (let sc = colIdx; sc < colIdx + cell.cs && sc < colWidths.length; sc++) cellW += colWidths[sc];
       if (cellW === 0) cellW = defaultColW * cell.cs;
 
-      cellsXml += `<hp:tc name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${cell.props.va === 'mid' ? 'CENTER' : cell.props.va === 'bot' ? 'BOTTOM' : 'TOP'}" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">${parasXml}</hp:subList><hp:cellAddr colAddr="${colIdx}" rowAddr="${ri}"/><hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/><hp:cellSz width="${cellW}" height="0"/><hp:cellMargin left="141" right="141" top="141" bottom="141"/></hp:tc>`;
+      cellsXml += `<hp:tc name="" header="0" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${cell.props.va === 'mid' ? 'CENTER' : cell.props.va === 'bot' ? 'BOTTOM' : 'TOP'}" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">${parasXml}</hp:subList><hp:cellAddr colAddr="${colIdx}" rowAddr="${ri}"/><hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/><hp:cellSz width="${cellW}" height="1000"/><hp:cellMargin left="141" right="141" top="141" bottom="141"/></hp:tc>`;
       colIdx += cell.cs;
     }
     rowsXml += `<hp:tr>${cellsXml}</hp:tr>`;
@@ -460,7 +524,32 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
 
   const headerRow = grid.props.headerRow ? ' repeatHeader="1"' : '';
 
-  return `<hp:tbl id="0" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL"${headerRow} rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="0"><hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="0" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:inMargin left="138" right="138" top="138" bottom="138"/>${rowsXml}</hp:tbl>`;
+  return `<hp:tbl id="${ctx.nextElementId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL"${headerRow} rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="0"><hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="1000" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:inMargin left="138" right="138" top="138" bottom="138"/>${rowsXml}</hp:tbl>`;
+}
+
+function extractPreviewText(sheet?: SheetNode): string {
+  if (!sheet) return '';
+  const lines: string[] = [];
+  for (const kid of sheet.kids) {
+    if (kid.tag === 'para') {
+      const text = kid.kids.map(k => {
+        if (k.tag === 'span') return k.kids.map(c => c.tag === 'txt' ? c.content : '').join('');
+        return '';
+      }).join('');
+      if (text) lines.push(text);
+    } else if (kid.tag === 'grid') {
+      for (const row of kid.kids) {
+        const cells = row.kids.map(cell =>
+          cell.kids.map(p => p.kids.map(k => {
+            if (k.tag === 'span') return k.kids.map(c => c.tag === 'txt' ? c.content : '').join('');
+            return '';
+          }).join('')).join('')
+        );
+        lines.push(cells.join('\t'));
+      }
+    }
+  }
+  return lines.join('\r\n');
 }
 
 function esc(s: string): string { return TextKit.escapeXml(s); }

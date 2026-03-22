@@ -65,8 +65,8 @@ export const ArchiveKit = {
       const nameBytes = new TextEncoder().encode(entry.name);
       const crc = crc32(entry.data);
 
-      // 'mimetype' must be stored uncompressed per OCF spec
-      const store = entry.name === 'mimetype';
+      // 'mimetype' and 'version.xml' must be stored uncompressed per HWPX spec
+      const store = entry.name === 'mimetype' || entry.name === 'version.xml';
       const method = store ? 0 : 8;
       const payload = store ? entry.data : pako.deflateRaw(entry.data, { level: 6 });
 
@@ -78,7 +78,7 @@ export const ArchiveKit = {
       lv.setUint16(6, 0, true);
       lv.setUint16(8, method, true);
       lv.setUint16(10, 0, true);
-      lv.setUint16(12, 0, true);
+      lv.setUint16(12, 0x0021, true); // date (1980-01-01)
       lv.setUint32(14, crc, true);
       lv.setUint32(18, payload.length, true);
       lv.setUint32(22, entry.data.length, true);
@@ -95,8 +95,8 @@ export const ArchiveKit = {
       cv.setUint16(6, 20, true);
       cv.setUint16(8, 0, true);
       cv.setUint16(10, method, true);
-      cv.setUint16(12, 0, true);
-      cv.setUint16(14, 0, true);
+      cv.setUint16(12, 0, true); // mod time
+      cv.setUint16(14, 0x0021, true); // mod date (1980-01-01)
       cv.setUint32(16, crc, true);
       cv.setUint32(20, payload.length, true);
       cv.setUint32(24, entry.data.length, true);

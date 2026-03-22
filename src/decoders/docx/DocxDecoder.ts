@@ -1,5 +1,5 @@
 import type { Decoder } from '../../contract/decoder';
-import type { DocRoot, ContentNode, ParaNode, SpanNode, GridNode, ImgNode, PageNumNode } from '../../model/doc-tree';
+import type { DocRoot, ContentNode, ParaNode, SpanNode, GridNode, ImgNode, PageNumNode, CellNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
 import type { DocMeta, PageDims, TextProps, ParaProps, CellProps, GridProps, TableLook } from '../../model/doc-props';
 import { A4 } from '../../model/doc-props';
@@ -470,16 +470,71 @@ function decodeGrid(
   const gridProps: GridProps = { look, defaultStroke };
 
   const rowArr = toArr(tbl?.['w:tr'] ?? tbl?.tr);
-  const rowNodes = rowArr.map((row: any, ri: number) => {
+
+  // ── Pass 1: parse raw cells with vMerge info ──
+  interface RawCell {
+    cell: any; gridSpan: number;
+    vMergeRestart: boolean; vMergeContinue: boolean;
+  }
+  const rawGrid: RawCell[][] = rowArr.map((row: any) => {
+    const cellArr = toArr(row?.['w:tc'] ?? row?.tc);
+    return cellArr.map((cell: any): RawCell => {
+      const tcPr = cell?.['w:tcPr']?.[0] ?? {};
+      const gridSpan = Number(tcPr?.['w:gridSpan']?.[0]?._attr?.['w:val'] ?? 1);
+      const vMergeNode = tcPr?.['w:vMerge']?.[0];
+      const vMergeVal = vMergeNode?._attr?.['w:val'] ?? vMergeNode?._attr?.val;
+      const vMergeRestart = vMergeVal === 'restart';
+      // vMerge present but val is not "restart" → continuation cell
+      const vMergeContinue = vMergeNode != null && !vMergeRestart;
+      return { cell, gridSpan, vMergeRestart, vMergeContinue };
+    });
+  });
+
+  // ── Pass 2: compute rowSpan for restart cells ──
+  // rsMap[ri][ci] = computed rowSpan (only set for restart cells)
+  const rsMap: Map<string, number> = new Map();
+  for (let ri = 0; ri < rawGrid.length; ri++) {
+    let gridCol = 0;
+    for (let ci = 0; ci < rawGrid[ri].length; ci++) {
+      const rc = rawGrid[ri][ci];
+      if (rc.vMergeRestart) {
+        let span = 1;
+        for (let nr = ri + 1; nr < rawGrid.length; nr++) {
+          // Find the cell at the same grid column in the next row
+          let col = 0;
+          let found = false;
+          for (const nc of rawGrid[nr]) {
+            if (col === gridCol && nc.vMergeContinue) {
+              span++;
+              found = true;
+              break;
+            }
+            col += nc.gridSpan;
+          }
+          if (!found) break;
+        }
+        rsMap.set(`${ri},${ci}`, span);
+      }
+      gridCol += rc.gridSpan;
+    }
+  }
+
+  // ── Pass 3: build CellNodes, skip continuation cells ──
+  const rowNodes = rawGrid.map((rawRow, ri) => {
     // Check for header row
+    const row = rowArr[ri];
     const trPr = row?.['w:trPr']?.[0] ?? row?.trPr?.[0] ?? {};
     const isHeaderRow = trPr?.['w:tblHeader']?.[0] != null || trPr?.tblHeader?.[0] != null;
     if (ri === 0 && isHeaderRow) gridProps.headerRow = true;
 
-    const cellArr = toArr(row?.['w:tc'] ?? row?.tc);
-    const cellNodes = cellArr.map((cell: any) => {
+    const cellNodes: CellNode[] = [];
+    for (let ci = 0; ci < rawRow.length; ci++) {
+      const rc = rawRow[ci];
+      // Skip continuation cells — they are part of a vertical merge
+      if (rc.vMergeContinue) continue;
+
+      const cell = rc.cell;
       const tcPr = cell?.['w:tcPr']?.[0] ?? {};
-      const gridSpan = Number(tcPr?.['w:gridSpan']?.[0]?._attr?.['w:val'] ?? 1);
 
       // Cell background
       const bgAttr = tcPr?.['w:shd']?.[0]?._attr ?? {};
@@ -513,12 +568,14 @@ function decodeGrid(
         cp.va = vaMap[vaVal];
       }
 
+      const rs = rsMap.get(`${ri},${ci}`) ?? 1;
+
       const paras = toArr(cell?.['w:p'] ?? cell?.p).map((p: any) => decodePara(p, ctx));
-      return buildCell(
+      cellNodes.push(buildCell(
         paras.length > 0 ? paras : [buildPara([buildSpan('')])],
-        { cs: gridSpan, rs: 1, props: cp },
-      );
-    });
+        { cs: rc.gridSpan, rs, props: cp },
+      ));
+    }
     return buildRow(cellNodes);
   });
   return buildGrid(rowNodes, gridProps);

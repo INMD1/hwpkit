@@ -522,13 +522,35 @@ function parseTableCtrl(
     for (const c of parsed) { c.row = Math.floor(idx / colCnt); c.col = idx % colCnt; idx++; }
   }
 
-  // Compute column widths in points from cell widths (HWPUNIT → pt: 1 HWPUNIT = 1/7200 inch = 72/7200 pt)
-  const HWP_TO_PT = 72 / 7200;
+  // Compute column widths in points from cell widths
   const colWidthsPt: number[] = new Array(colCnt).fill(0);
+  // Pass 1: use cells with cs=1 for exact column widths
   for (const c of parsed) {
     if (c.cs === 1 && c.widthHwp > 0) {
-      const wPt = c.widthHwp * HWP_TO_PT;
+      const wPt = Metric.hwpToPt(c.widthHwp);
       if (wPt > colWidthsPt[c.col]) colWidthsPt[c.col] = wPt;
+    }
+  }
+  // Pass 2: for columns still 0, try to derive from multi-span cells
+  const zeroColumns = colWidthsPt.filter(w => w === 0).length;
+  if (zeroColumns > 0) {
+    for (const c of parsed) {
+      if (c.cs > 1 && c.widthHwp > 0) {
+        // Subtract known column widths from the span
+        let known = 0;
+        let unknownCols = 0;
+        for (let ci = c.col; ci < c.col + c.cs && ci < colCnt; ci++) {
+          if (colWidthsPt[ci] > 0) known += colWidthsPt[ci];
+          else unknownCols++;
+        }
+        if (unknownCols > 0) {
+          const remaining = Metric.hwpToPt(c.widthHwp) - known;
+          const each = remaining > 0 ? remaining / unknownCols : 0;
+          for (let ci = c.col; ci < c.col + c.cs && ci < colCnt; ci++) {
+            if (colWidthsPt[ci] === 0 && each > 0) colWidthsPt[ci] = each;
+          }
+        }
+      }
     }
   }
 

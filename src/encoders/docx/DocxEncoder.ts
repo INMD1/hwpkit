@@ -48,7 +48,7 @@ export class DocxEncoder implements Encoder {
         { name: 'word/document.xml',              data: TextKit.encode(documentXml(kids, dims, ctx, headerRId, footerRId)) },
         { name: 'word/styles.xml',                data: TextKit.encode(stylesXml()) },
         { name: 'word/settings.xml',              data: TextKit.encode(settingsXml()) },
-        { name: 'word/_rels/document.xml.rels',   data: TextKit.encode(docRels(images, headerRId, footerRId)) },
+        { name: 'word/_rels/document.xml.rels',   data: TextKit.encode(docRels(images, headerRId, footerRId, numInfo.hasLists)) },
         { name: 'docProps/app.xml',               data: TextKit.encode(appXml()) },
         { name: 'docProps/core.xml',              data: TextKit.encode(coreXml(doc.meta)) },
       ];
@@ -187,12 +187,14 @@ function pkgRels(): string {
 </Relationships>`;
 }
 
-function docRels(images: ImageEntry[], headerRId?: string, footerRId?: string): string {
+function docRels(images: ImageEntry[], headerRId?: string, footerRId?: string, hasLists?: boolean): string {
   let rels = `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
   <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>`;
 
-  // Numbering relationship
-  rels += `\n  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>`;
+  // Numbering relationship — only when lists exist
+  if (hasLists) {
+    rels += `\n  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>`;
+  }
 
   for (const img of images) {
     rels += `\n  <Relationship Id="${img.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${img.name}"/>`;
@@ -424,16 +426,34 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
   const noHBand   = look?.bandedRows ? '0' : '1';
   const noVBand   = look?.bandedCols ? '0' : '1';
 
-  // Calculate column widths in DXA
-  const colCount = grid.kids[0]?.kids.length ?? 1;
+  // Determine actual grid column count from colWidths or by scanning all rows
   const d = dims ?? A4;
   const availDxa = Metric.ptToDxa(d.wPt - d.ml - d.mr);
+
+  // Compute true column count: max total colSpan across all rows
+  let colCount = 0;
+  for (const row of grid.kids) {
+    let rowCols = 0;
+    for (const cell of row.kids) rowCols += cell.cs;
+    if (rowCols > colCount) colCount = rowCols;
+  }
+  if (colCount === 0) colCount = grid.kids[0]?.kids.length ?? 1;
+
   const defaultColDxa = Math.round(availDxa / colCount);
 
   // Use actual column widths if available from source format
   const colWidthsDxa: number[] = [];
   if (grid.props.colWidths && grid.props.colWidths.length === colCount) {
-    const srcWidths = grid.props.colWidths.map(w => w > 0 ? Metric.ptToDxa(w) : defaultColDxa);
+    // Fill zero-width columns by distributing remaining space
+    const srcPt = [...grid.props.colWidths];
+    const knownTotal = srcPt.filter(w => w > 0).reduce((s, w) => s + w, 0);
+    const zeroCount = srcPt.filter(w => w <= 0).length;
+    const remaining = Math.max(0, Metric.dxaToPt(availDxa) - knownTotal);
+    const zeroFill = zeroCount > 0 ? remaining / zeroCount : 0;
+    for (let i = 0; i < srcPt.length; i++) {
+      if (srcPt[i] <= 0) srcPt[i] = zeroFill > 0 ? zeroFill : Metric.dxaToPt(defaultColDxa);
+    }
+    const srcWidths = srcPt.map(w => Metric.ptToDxa(w));
     const srcTotal = srcWidths.reduce((s, w) => s + w, 0);
     // Normalize to fit available page width if source widths exceed it
     const scale = srcTotal > availDxa ? availDxa / srcTotal : 1;
@@ -446,9 +466,34 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
   // Grid columns
   const gridCols = colWidthsDxa.map(w => `<w:gridCol w:w="${Math.round(w)}"/>`).join('');
 
+  // Pre-compute vMerge map: for each (ri, colIdx), track if a cell with rs>1 spans into this row
+  // Key: "ri,colIdx", Value: 'restart' | 'continue'
+  const vMergeMap = new Map<string, 'restart' | 'continue'>();
+  for (let ri = 0; ri < grid.kids.length; ri++) {
+    let colIdx = 0;
+    for (const cell of grid.kids[ri].kids) {
+      if (cell.rs > 1) {
+        vMergeMap.set(`${ri},${colIdx}`, 'restart');
+        for (let sr = 1; sr < cell.rs; sr++) {
+          vMergeMap.set(`${ri + sr},${colIdx}`, 'continue');
+        }
+      }
+      colIdx += cell.cs;
+    }
+  }
+
   const rows = grid.kids.map((row, ri) => {
     let colIdx = 0;
-    const cells = row.kids.map(cell => {
+
+    // Build actual cells including continuation cells for vMerge
+    const cellXmls: string[] = [];
+    let srcCellIdx = 0;
+
+    // Walk through grid columns, emitting either real cells or vMerge continue cells
+    while (srcCellIdx < row.kids.length) {
+      const cell = row.kids[srcCellIdx];
+      const mergeType = vMergeMap.get(`${ri},${colIdx}`);
+
       const cp = cell.props;
       const tcPrParts: string[] = [];
 
@@ -456,10 +501,14 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
       let cellW = 0;
       for (let sc = colIdx; sc < colIdx + cell.cs && sc < colWidthsDxa.length; sc++) cellW += colWidthsDxa[sc];
       if (cellW === 0) cellW = defaultColDxa * cell.cs;
-      colIdx += cell.cs;
       tcPrParts.push(`<w:tcW w:w="${Math.round(cellW)}" w:type="dxa"/>`);
 
       if (cell.cs > 1) tcPrParts.push(`<w:gridSpan w:val="${cell.cs}"/>`);
+
+      // vMerge
+      if (cell.rs > 1) {
+        tcPrParts.push(`<w:vMerge w:val="restart"/>`);
+      }
 
       // Cell borders
       const borders = encodeCellBorders(cp);
@@ -475,8 +524,61 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
       }
 
       const tcPr = `<w:tcPr>${tcPrParts.join('')}</w:tcPr>`;
-      return `      <w:tc>${tcPr}${cell.kids.map(p => encodeParaInner(p, ctx)).join('')}</w:tc>`;
-    }).join('\n');
+      cellXmls.push(`      <w:tc>${tcPr}${cell.kids.map(p => encodeParaInner(p, ctx)).join('')}</w:tc>`);
+      colIdx += cell.cs;
+      srcCellIdx++;
+    }
+
+    // Now emit vMerge continue cells for rows that are spanned into
+    // We need to check if any cells from rows above span into this row
+    // Re-walk grid columns looking for continue cells not covered by this row's cells
+    const finalCells: string[] = [];
+    let finalColIdx = 0;
+    let cellIter = 0;
+
+    // Use the computed colCount (max across all rows)
+    const totalGridCols = colCount;
+
+    // Re-check: we need to interleave vMerge continue cells
+    // The current row may have fewer cells because the model already skipped continuation cells
+    // So we need to insert continuation cells where vMergeMap says 'continue' for this row
+    finalColIdx = 0;
+    cellIter = 0;
+    for (let gc = 0; gc < totalGridCols; ) {
+      const mergeType = vMergeMap.get(`${ri},${gc}`);
+      if (mergeType === 'continue') {
+        // Find the original cell's cs from the restart row
+        let origCs = 1;
+        for (let sr = ri - 1; sr >= 0; sr--) {
+          const mt = vMergeMap.get(`${sr},${gc}`);
+          if (mt === 'restart') {
+            // Find the cell at this column in that row
+            let col = 0;
+            for (const c of grid.kids[sr].kids) {
+              if (col === gc) { origCs = c.cs; break; }
+              col += c.cs;
+            }
+            break;
+          }
+        }
+        let cw = 0;
+        for (let sc = gc; sc < gc + origCs && sc < colWidthsDxa.length; sc++) cw += colWidthsDxa[sc];
+        if (cw === 0) cw = defaultColDxa * origCs;
+        let contParts = `<w:tcW w:w="${Math.round(cw)}" w:type="dxa"/>`;
+        if (origCs > 1) contParts += `<w:gridSpan w:val="${origCs}"/>`;
+        contParts += `<w:vMerge/>`;
+        finalCells.push(`      <w:tc><w:tcPr>${contParts}</w:tcPr><w:p><w:pPr/></w:p></w:tc>`);
+        gc += origCs;
+      } else {
+        if (cellIter < cellXmls.length) {
+          finalCells.push(cellXmls[cellIter]);
+          gc += row.kids[cellIter]?.cs ?? 1;
+          cellIter++;
+        } else {
+          gc++;
+        }
+      }
+    }
 
     // Header row
     let trPr = '';
@@ -484,7 +586,7 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
       trPr = '<w:trPr><w:tblHeader/></w:trPr>';
     }
 
-    return `    <w:tr>${trPr}\n${cells}\n    </w:tr>`;
+    return `    <w:tr>${trPr}\n${finalCells.join('\n')}\n    </w:tr>`;
   }).join('\n');
 
   // Table borders from defaultStroke

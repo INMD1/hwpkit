@@ -33,7 +33,7 @@ export { succeed, fail } from './contract/result';
 
 // Safety
 export { ShieldedParser } from './safety/ShieldedParser';
-export { Metric, safeHex, safeAlign, safeFont, safeStrokeHwpx, safeStrokeDocx } from './safety/StyleBridge';
+export { Metric, safeHex, safeAlign, safeFont, safeFontToKr, safeStrokeHwpx, safeStrokeDocx } from './safety/StyleBridge';
 
 // Walk
 export { TreeWalker, walkNode } from './walk/TreeWalker';
