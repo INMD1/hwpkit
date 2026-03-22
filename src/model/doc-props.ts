@@ -57,6 +57,7 @@ export interface TableLook {
 
 export interface GridProps {
   widthPct?: number;
+  colWidths?: number[];   // column widths in points
   defaultStroke?: Stroke;
   look?: TableLook;
   headerRow?: boolean;

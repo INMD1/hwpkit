@@ -428,19 +428,36 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
   const colCount = grid.kids[0]?.kids.length ?? 1;
   const d = dims ?? A4;
   const availDxa = Metric.ptToDxa(d.wPt - d.ml - d.mr);
-  const colWidthDxa = Math.round(availDxa / colCount);
+  const defaultColDxa = Math.round(availDxa / colCount);
+
+  // Use actual column widths if available from source format
+  const colWidthsDxa: number[] = [];
+  if (grid.props.colWidths && grid.props.colWidths.length === colCount) {
+    const srcWidths = grid.props.colWidths.map(w => w > 0 ? Metric.ptToDxa(w) : defaultColDxa);
+    const srcTotal = srcWidths.reduce((s, w) => s + w, 0);
+    // Normalize to fit available page width if source widths exceed it
+    const scale = srcTotal > availDxa ? availDxa / srcTotal : 1;
+    for (const w of srcWidths) colWidthsDxa.push(Math.round(w * scale));
+  } else {
+    for (let c = 0; c < colCount; c++) colWidthsDxa.push(defaultColDxa);
+  }
+  const totalDxa = colWidthsDxa.reduce((s, w) => s + w, 0);
 
   // Grid columns
-  const gridCols = Array.from({ length: colCount }, () => `<w:gridCol w:w="${colWidthDxa}"/>`).join('');
+  const gridCols = colWidthsDxa.map(w => `<w:gridCol w:w="${Math.round(w)}"/>`).join('');
 
   const rows = grid.kids.map((row, ri) => {
+    let colIdx = 0;
     const cells = row.kids.map(cell => {
       const cp = cell.props;
       const tcPrParts: string[] = [];
 
-      // Cell width in DXA
-      const cellW = colWidthDxa * cell.cs;
-      tcPrParts.push(`<w:tcW w:w="${cellW}" w:type="dxa"/>`);
+      // Cell width in DXA (sum of spanned columns)
+      let cellW = 0;
+      for (let sc = colIdx; sc < colIdx + cell.cs && sc < colWidthsDxa.length; sc++) cellW += colWidthsDxa[sc];
+      if (cellW === 0) cellW = defaultColDxa * cell.cs;
+      colIdx += cell.cs;
+      tcPrParts.push(`<w:tcW w:w="${Math.round(cellW)}" w:type="dxa"/>`);
 
       if (cell.cs > 1) tcPrParts.push(`<w:gridSpan w:val="${cell.cs}"/>`);
 
@@ -482,7 +499,7 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
   }
 
   return `    <w:tbl>
-      <w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="${availDxa}" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="${firstRow}" w:lastRow="${lastRow}" w:firstColumn="${firstCol}" w:lastColumn="${lastCol}" w:noHBand="${noHBand}" w:noVBand="${noVBand}"/>${tblBorders}<w:tblCellMar><w:top w:w="28" w:type="dxa"/><w:left w:w="102" w:type="dxa"/><w:bottom w:w="28" w:type="dxa"/><w:right w:w="102" w:type="dxa"/></w:tblCellMar></w:tblPr>
+      <w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="${Math.round(totalDxa)}" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="${firstRow}" w:lastRow="${lastRow}" w:firstColumn="${firstCol}" w:lastColumn="${lastCol}" w:noHBand="${noHBand}" w:noVBand="${noVBand}"/>${tblBorders}<w:tblCellMar><w:top w:w="28" w:type="dxa"/><w:left w:w="102" w:type="dxa"/><w:bottom w:w="28" w:type="dxa"/><w:right w:w="102" w:type="dxa"/></w:tblCellMar></w:tblPr>
       <w:tblGrid>${gridCols}</w:tblGrid>
 ${rows}
     </w:tbl>`;

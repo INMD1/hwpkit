@@ -34,6 +34,7 @@ interface CharPrDef {
   strikeout: string;
   textColor: string;
   fontName: string;
+  fontId: number;
   bg?: string;
 }
 
@@ -55,6 +56,8 @@ interface HwpxCtx {
   bins: BinEntry[];
   nextBinNum: number;
   availableWidth: number; // HWPUNIT — page width minus margins
+  fonts: string[];
+  fontMap: Map<string, number>;
 }
 
 function charPrKey(p: TextProps): string {
@@ -65,10 +68,23 @@ function paraPrKey(p: ParaProps): string {
   return `${p.align ?? 'left'}|${p.listOrd ?? ''}|${p.listLv ?? 0}`;
 }
 
+function registerFont(name: string, ctx: HwpxCtx): number {
+  const n = name || '굴림체';
+  const existing = ctx.fontMap.get(n);
+  if (existing !== undefined) return existing;
+  const id = ctx.fonts.length;
+  ctx.fonts.push(n);
+  ctx.fontMap.set(n, id);
+  return id;
+}
+
 function registerCharPr(props: TextProps, ctx: HwpxCtx): number {
   const key = charPrKey(props);
   const existing = ctx.charPrMap.get(key);
   if (existing !== undefined) return existing;
+
+  const fontName = props.font ?? '굴림체';
+  const fontId = registerFont(fontName, ctx);
 
   const id = ctx.charPrs.length;
   const def: CharPrDef = {
@@ -79,7 +95,8 @@ function registerCharPr(props: TextProps, ctx: HwpxCtx): number {
     underline: props.u ? 'BOTTOM' : 'NONE',
     strikeout: props.s ? 'SOLID' : 'NONE',
     textColor: props.color ? `#${props.color}` : '#000000',
-    fontName: props.font ?? '굴림체',
+    fontName,
+    fontId,
     bg: props.bg,
   };
   ctx.charPrs.push(def);
@@ -192,6 +209,7 @@ export class HwpxEncoder implements Encoder {
         paraPrs: [], paraPrMap: new Map(),
         borderFills: [], bins: [], nextBinNum: 1,
         availableWidth,
+        fonts: [], fontMap: new Map(),
       };
 
       // Default borderFill (id=1, no border)
@@ -260,16 +278,29 @@ function contentHpf(ctx: HwpxCtx): string {
 // ─── header.xml ─────────────────────────────────────────────
 
 function headerXml(dims: PageDims, meta: any, ctx: HwpxCtx): string {
-  // Font face definitions
-  const defaultFont = '굴림체';
-  const fontFaces = `<hh:fontfaces itemCnt="1"><hh:fontface lang="HANGUL" fontCnt="1"><hh:font id="0" face="${defaultFont}" type="TTF" isEmbedded="0"><hh:typeInfo familyType="FCAT_GOTHIC" weight="6" proportion="0" contrast="0" strokeVariation="1" armStyle="1" letterform="1" midline="1" xHeight="1"/></hh:font></hh:fontface><hh:fontface lang="LATIN" fontCnt="1"><hh:font id="0" face="${defaultFont}" type="TTF" isEmbedded="0"><hh:typeInfo familyType="FCAT_GOTHIC" weight="6" proportion="0" contrast="0" strokeVariation="1" armStyle="1" letterform="1" midline="1" xHeight="1"/></hh:font></hh:fontface></hh:fontfaces>`;
+  // Font face definitions — register all unique fonts per language group
+  const fontCount = ctx.fonts.length || 1;
+  const langs = ['HANGUL', 'LATIN', 'HANJA', 'JAPANESE', 'OTHER', 'SYMBOL', 'USER'];
+  let fontFaces = `<hh:fontfaces itemCnt="${langs.length}">`;
+  for (const lang of langs) {
+    fontFaces += `<hh:fontface lang="${lang}" fontCnt="${fontCount}">`;
+    for (let fi = 0; fi < ctx.fonts.length; fi++) {
+      fontFaces += `<hh:font id="${fi}" face="${esc(ctx.fonts[fi])}" type="TTF" isEmbedded="0"><hh:typeInfo familyType="FCAT_GOTHIC" weight="6" proportion="0" contrast="0" strokeVariation="1" armStyle="1" letterform="1" midline="1" xHeight="1"/></hh:font>`;
+    }
+    if (ctx.fonts.length === 0) {
+      fontFaces += `<hh:font id="0" face="굴림체" type="TTF" isEmbedded="0"><hh:typeInfo familyType="FCAT_GOTHIC" weight="6" proportion="0" contrast="0" strokeVariation="1" armStyle="1" letterform="1" midline="1" xHeight="1"/></hh:font>`;
+    }
+    fontFaces += `</hh:fontface>`;
+  }
+  fontFaces += `</hh:fontfaces>`;
 
   // CharPr definitions
   let charPrXml = '';
   for (const cp of ctx.charPrs) {
     const bold = cp.bold ? '<hh:bold/>' : '';
     const italic = cp.italic ? '<hh:italic/>' : '';
-    charPrXml += `<hh:charPr id="${cp.id}" height="${cp.height}" textColor="${cp.textColor}" shadeColor="none" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="3"><hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/><hh:ratio hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100"/><hh:spacing hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/><hh:relSz hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100"/><hh:offset hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>${bold}${italic}<hh:underline type="${cp.underline}" shape="SOLID" color="#000000"/><hh:strikeout shape="${cp.strikeout === 'NONE' ? 'NONE' : 'SOLID'}" color="#000000"/><hh:outline type="NONE"/><hh:shadow type="NONE" color="#C0C0C0" offsetX="10" offsetY="10"/></hh:charPr>`;
+    const fid = cp.fontId ?? 0;
+    charPrXml += `<hh:charPr id="${cp.id}" height="${cp.height}" textColor="${cp.textColor}" shadeColor="none" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="3"><hh:fontRef hangul="${fid}" latin="${fid}" hanja="${fid}" japanese="${fid}" other="${fid}" symbol="${fid}" user="${fid}"/><hh:ratio hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100"/><hh:spacing hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/><hh:relSz hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100"/><hh:offset hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>${bold}${italic}<hh:underline type="${cp.underline}" shape="SOLID" color="#000000"/><hh:strikeout shape="${cp.strikeout === 'NONE' ? 'NONE' : 'SOLID'}" color="#000000"/><hh:outline type="NONE"/><hh:shadow type="NONE" color="#C0C0C0" offsetX="10" offsetY="10"/></hh:charPr>`;
   }
 
   // ParaPr definitions
@@ -381,9 +412,17 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
   const colCount = grid.kids[0]?.kids.length ?? 0;
   const rowCount = grid.kids.length;
 
-  // Calculate column widths from available page width
+  // Calculate column widths: use source widths if available, else divide equally
+  // HWPX uses HWPUNIT (1/7200 inch). Convert pt → HWPUNIT: 1pt = 100 HWPUNIT
   const totalWidth = ctx.availableWidth;
-  const colWidth = Math.round(totalWidth / (colCount || 1));
+  const defaultColW = Math.round(totalWidth / (colCount || 1));
+  const colWidths: number[] = [];
+  if (grid.props.colWidths && grid.props.colWidths.length === colCount) {
+    for (const wPt of grid.props.colWidths) colWidths.push(wPt > 0 ? Math.round(wPt * 100) : defaultColW);
+  } else {
+    for (let c = 0; c < colCount; c++) colWidths.push(defaultColW);
+  }
+  const actualTotal = colWidths.reduce((s, w) => s + w, 0);
 
   // Table borderFillIDRef
   const tblBfId = grid.props.defaultStroke
@@ -395,6 +434,7 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
   for (let ri = 0; ri < grid.kids.length; ri++) {
     const row = grid.kids[ri];
     let cellsXml = '';
+    let colIdx = 0;
     for (let ci = 0; ci < row.kids.length; ci++) {
       const cell = row.kids[ci];
 
@@ -407,14 +447,20 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
       // Encode cell paragraphs
       const parasXml = cell.kids.map(p => encodePara(p, ctx)).join('');
 
-      cellsXml += `<hp:tc name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${cell.props.va === 'mid' ? 'CENTER' : cell.props.va === 'bot' ? 'BOTTOM' : 'TOP'}" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">${parasXml}</hp:subList><hp:cellAddr colAddr="${ci}" rowAddr="${ri}"/><hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/><hp:cellSz width="${colWidth * cell.cs}" height="0"/><hp:cellMargin left="141" right="141" top="141" bottom="141"/></hp:tc>`;
+      // Calculate cell width from column widths
+      let cellW = 0;
+      for (let sc = colIdx; sc < colIdx + cell.cs && sc < colWidths.length; sc++) cellW += colWidths[sc];
+      if (cellW === 0) cellW = defaultColW * cell.cs;
+
+      cellsXml += `<hp:tc name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${cell.props.va === 'mid' ? 'CENTER' : cell.props.va === 'bot' ? 'BOTTOM' : 'TOP'}" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">${parasXml}</hp:subList><hp:cellAddr colAddr="${colIdx}" rowAddr="${ri}"/><hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/><hp:cellSz width="${cellW}" height="0"/><hp:cellMargin left="141" right="141" top="141" bottom="141"/></hp:tc>`;
+      colIdx += cell.cs;
     }
     rowsXml += `<hp:tr>${cellsXml}</hp:tr>`;
   }
 
   const headerRow = grid.props.headerRow ? ' repeatHeader="1"' : '';
 
-  return `<hp:tbl id="0" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL"${headerRow} rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="0"><hp:sz width="${totalWidth}" widthRelTo="ABSOLUTE" height="0" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="0" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:inMargin left="138" right="138" top="138" bottom="138"/>${rowsXml}</hp:tbl>`;
+  return `<hp:tbl id="0" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL"${headerRow} rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="0"><hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="0" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:inMargin left="138" right="138" top="138" bottom="138"/>${rowsXml}</hp:tbl>`;
 }
 
 function esc(s: string): string { return TextKit.escapeXml(s); }

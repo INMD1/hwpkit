@@ -51,6 +51,7 @@ interface TableLook {
 }
 interface GridProps {
     widthPct?: number;
+    colWidths?: number[];
     defaultStroke?: Stroke;
     look?: TableLook;
     headerRow?: boolean;
