@@ -1,5 +1,5 @@
 import type { Encoder } from '../../contract/encoder';
-import type { DocRoot, ParaNode, SpanNode, GridNode, ContentNode, ImgNode, SheetNode } from '../../model/doc-tree';
+import type { DocRoot, ParaNode, SpanNode, GridNode, ContentNode, ImgNode, SheetNode, CellNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
 import type { PageDims, TextProps, ParaProps, CellProps, Stroke } from '../../model/doc-props';
 import { A4, DEFAULT_STROKE } from '../../model/doc-props';
@@ -23,6 +23,7 @@ const NS = [
   'xmlns:dc="http://purl.org/dc/elements/1.1/"',
   'xmlns:opf="http://www.idpf.org/2007/opf/"',
   'xmlns:ooxmlchart="http://www.hancom.co.kr/hwpml/2016/ooxmlchart"',
+  'xmlns:hwpunitchar="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar"',
   'xmlns:epub="http://www.idpf.org/2007/ops"',
   'xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"',
 ].join(' ');
@@ -47,6 +48,10 @@ interface ParaPrDef {
   align: string;
   listType?: string;
   listLevel?: number;
+  intentHwp: number;   // first-line indent in HWPUNIT
+  prevHwp: number;     // space before paragraph in HWPUNIT
+  nextHwp: number;     // space after paragraph in HWPUNIT
+  lineSpacing: number; // line spacing percentage (e.g., 160 = 160%)
 }
 
 interface BinEntry { id: string; name: string; data: Uint8Array }
@@ -70,7 +75,7 @@ function charPrKey(p: TextProps): string {
 }
 
 function paraPrKey(p: ParaProps): string {
-  return `${p.align ?? 'left'}|${p.listOrd ?? ''}|${p.listLv ?? 0}`;
+  return `${p.align ?? 'left'}|${p.listOrd ?? ''}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}`;
 }
 
 function registerFont(name: string, ctx: HwpxCtx): number {
@@ -118,6 +123,10 @@ function registerParaPr(props: ParaProps, ctx: HwpxCtx): number {
   const def: ParaPrDef = {
     id,
     align: (props.align ?? 'left').toUpperCase(),
+    intentHwp: props.indentPt ? Metric.ptToHwp(props.indentPt) : 0,
+    prevHwp:   props.spaceBefore ? Metric.ptToHwp(props.spaceBefore) : 0,
+    nextHwp:   props.spaceAfter  ? Metric.ptToHwp(props.spaceAfter)  : 0,
+    lineSpacing: props.lineHeight ? Math.round(props.lineHeight * 100) : 160,
   };
   if (props.listOrd !== undefined) {
     def.listType = props.listOrd ? 'DIGIT' : 'BULLET';
@@ -267,7 +276,7 @@ export class HwpxEncoder implements Encoder {
 
 // ─── Constants ──────────────────────────────────────────────
 
-const VERSION_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" tagetApplication="WORDPROCESSOR" major="5" minor="1" micro="0" buildNumber="1" os="6" xmlVersion="1.2" application="Hancom Office Hangul" appVersion="11, 0, 0, 0"/>`;
+const VERSION_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" tagetApplication="WORDPROCESSOR" major="5" minor="1" micro="0" buildNumber="1" os="1" xmlVersion="1.4" application="Hancom Office Hangul" appVersion="11, 0, 0, 0"/>`;
 
 const CONTAINER_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><ocf:container xmlns:ocf="urn:oasis:names:tc:opendocument:xmlns:container" xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf"><ocf:rootfiles><ocf:rootfile full-path="Contents/content.hpf" media-type="application/hwpml-package+xml"/><ocf:rootfile full-path="Preview/PrvText.txt" media-type="text/plain"/><ocf:rootfile full-path="META-INF/container.rdf" media-type="application/rdf+xml"/></ocf:rootfiles></ocf:container>`;
 
@@ -289,7 +298,7 @@ function contentHpf(ctx: HwpxCtx, meta?: any): string {
     const ct = ext === 'png' ? 'image/png' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : ext === 'gif' ? 'image/gif' : 'image/bmp';
     items += `<opf:item id="${bin.id}" href="BinData/${bin.name}" media-type="${ct}" isEmbeded="1"/>`;
   }
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><opf:package ${NS} version="" unique-identifier="" id=""><opf:metadata><opf:title>${title}</opf:title><opf:language>ko</opf:language><opf:meta name="creator" content="text"/><opf:meta name="subject" content="text"/><opf:meta name="description" content="text"/><opf:meta name="CreatedDate" content="text">${now}</opf:meta><opf:meta name="ModifiedDate" content="text">${now}</opf:meta><opf:meta name="keyword" content="text"/></opf:metadata><opf:manifest>${items}</opf:manifest><opf:spine><opf:itemref idref="header" linear="no"/><opf:itemref idref="section0" linear="yes"/></opf:spine></opf:package>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><opf:package ${NS} version="" unique-identifier="" id=""><opf:metadata><opf:title>${title}</opf:title><opf:language>ko</opf:language><opf:meta name="creator" content="text"/><opf:meta name="subject" content="text"/><opf:meta name="description" content="text"/><opf:meta name="CreatedDate" content="text">${now}</opf:meta><opf:meta name="ModifiedDate" content="text">${now}</opf:meta><opf:meta name="keyword" content="text"/></opf:metadata><opf:manifest>${items}</opf:manifest><opf:spine><opf:itemref idref="header" linear="yes"/><opf:itemref idref="section0" linear="yes"/></opf:spine></opf:package>`;
 }
 
 // ─── header.xml ─────────────────────────────────────────────
@@ -323,13 +332,14 @@ function headerXml(dims: PageDims, meta: any, ctx: HwpxCtx): string {
   // ParaPr definitions
   let paraPrXml = '';
   for (const pp of ctx.paraPrs) {
-    paraPrXml += `<hh:paraPr id="${pp.id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="0" suppressLineNumbers="0" checked="0"><hh:align horizontal="${pp.align}" vertical="BASELINE"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="BREAK_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/><hh:margin><hc:intent value="0" unit="HWPUNIT"/><hc:left value="0" unit="HWPUNIT"/><hc:right value="0" unit="HWPUNIT"/><hc:prev value="0" unit="HWPUNIT"/><hc:next value="0" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="PERCENT" value="160" unit="HWPUNIT"/><hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>`;
+    const marginSwitch = `<hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar"><hh:margin><hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="0" unit="HWPUNIT"/><hc:right value="0" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="PERCENT" value="${pp.lineSpacing}" unit="HWPUNIT"/></hp:case><hp:default><hh:margin><hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="0" unit="HWPUNIT"/><hc:right value="0" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="PERCENT" value="${pp.lineSpacing}" unit="HWPUNIT"/></hp:default></hp:switch>`;
+    paraPrXml += `<hh:paraPr id="${pp.id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="0" suppressLineNumbers="0" checked="0"><hh:align horizontal="${pp.align}" vertical="BASELINE"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="BREAK_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/>${marginSwitch}<hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>`;
   }
 
   // BorderFill definitions
   const borderFillXml = ctx.borderFills.map(bf => bf.xml).join('');
 
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hh:head ${NS} version="1.2" secCnt="1"><hh:beginNum page="1" footnote="1" endnote="1" pic="1" tbl="1" equation="1"/><hh:refList>${fontFaces}<hh:borderFills itemCnt="${ctx.borderFills.length}">${borderFillXml}</hh:borderFills><hh:charProperties itemCnt="${ctx.charPrs.length}">${charPrXml}</hh:charProperties><hh:paraProperties itemCnt="${ctx.paraPrs.length}">${paraPrXml}</hh:paraProperties><hh:tabProperties itemCnt="1"><hh:tabPr id="0" autoTabLeft="0" autoTabRight="0"/></hh:tabProperties><hh:styles itemCnt="1"><hh:style id="0" type="PARA" name="바탕글" engName="Normal" paraPrIDRef="0" charPrIDRef="0" nextStyleIDRef="0" langID="1042" lockForm="0"/></hh:styles></hh:refList><hh:compatibleDocument targetProgram="HWP201X"><hh:layoutCompatibility/></hh:compatibleDocument><hh:docOption><hh:linkinfo path="" pageInherit="1" footnoteInherit="0"/></hh:docOption><hh:trackchageConfig flags="56"/></hh:head>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hh:head ${NS} version="1.4" secCnt="1"><hh:beginNum page="1" footnote="1" endnote="1" pic="1" tbl="1" equation="1"/><hh:refList>${fontFaces}<hh:borderFills itemCnt="${ctx.borderFills.length}">${borderFillXml}</hh:borderFills><hh:charProperties itemCnt="${ctx.charPrs.length}">${charPrXml}</hh:charProperties><hh:paraProperties itemCnt="${ctx.paraPrs.length}">${paraPrXml}</hh:paraProperties><hh:tabProperties itemCnt="1"><hh:tabPr id="0" autoTabLeft="0" autoTabRight="0"/></hh:tabProperties><hh:styles itemCnt="1"><hh:style id="0" type="PARA" name="바탕글" engName="Normal" paraPrIDRef="0" charPrIDRef="0" nextStyleIDRef="0" langID="1042" lockForm="0"/></hh:styles></hh:refList><hh:compatibleDocument targetProgram="HWP201X"><hh:layoutCompatibility/></hh:compatibleDocument><hh:docOption><hh:linkinfo path="" pageInherit="1" footnoteInherit="0"/></hh:docOption><hh:trackchageConfig flags="56"/></hh:head>`;
 }
 
 // ─── section0.xml ───────────────────────────────────────────
@@ -339,7 +349,7 @@ function sectionXml(sheet: SheetNode | undefined, dims: PageDims, ctx: HwpxCtx):
 
   // First paragraph includes secPr
   // WIDELY = portrait (standard), NARROWLY = landscape
-  const secPr = `<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0"><hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/><hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/><hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/><hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/><hp:pagePr landscape="${dims.orient === 'landscape' ? 'NARROWLY' : 'WIDELY'}" width="${Metric.ptToHwp(dims.wPt)}" height="${Metric.ptToHwp(dims.hPt)}" gutterType="LEFT_ONLY"><hp:margin header="2834" footer="2834" gutter="0" left="${Metric.ptToHwp(dims.ml)}" right="${Metric.ptToHwp(dims.mr)}" top="${Metric.ptToHwp(dims.mt)}" bottom="${Metric.ptToHwp(dims.mb)}"/></hp:pagePr><hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="284" belowLine="568" aboveLine="852"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr><hp:endNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="0" type="NONE" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="0" belowLine="576" aboveLine="864"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="END_OF_DOCUMENT" beneathText="0"/></hp:endNotePr><hp:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="EVEN" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="ODD" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill></hp:secPr><hp:ctrl><hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/></hp:ctrl>`;
+  const secPr = `<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0"><hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/><hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/><hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/><hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/><hp:pagePr landscape="${dims.orient === 'landscape' ? 'NARROWLY' : 'WIDELY'}" width="${Metric.ptToHwp(dims.wPt)}" height="${Metric.ptToHwp(dims.hPt)}" gutterType="LEFT_ONLY"><hp:margin header="2834" footer="2834" gutter="0" left="${Metric.ptToHwp(dims.ml)}" right="${Metric.ptToHwp(dims.mr)}" top="${Metric.ptToHwp(dims.mt)}" bottom="${Metric.ptToHwp(dims.mb)}"/></hp:pagePr><hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="284" belowLine="568" aboveLine="852"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr><hp:endNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="0" type="NONE" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="0" belowLine="576" aboveLine="864"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="END_OF_DOCUMENT" beneathText="0"/></hp:endNotePr><hp:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="EVEN" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="ODD" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill></hp:secPr><hp:ctrl><hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/></hp:ctrl>`;
 
   let contentXml = '';
   let isFirst = true;
@@ -351,23 +361,45 @@ function sectionXml(sheet: SheetNode | undefined, dims: PageDims, ctx: HwpxCtx):
       contentXml += encodePara(kid, ctx, isFirst ? secPr : '');
       isFirst = false;
     } else if (kid.tag === 'grid') {
-      // Grid is embedded inside a paragraph's run
+      // Grid is embedded inside a paragraph's run.
+      // When secPr is present, put it in a separate run (matching real HWPX structure).
       const gridXml = encodeGrid(kid, ctx);
       const prefix = isFirst ? secPr : '';
-      contentXml += `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0">${prefix}${gridXml}</hp:run>${defaultLineseg}</hp:p>`;
+      const runsXml = prefix
+        ? `<hp:run charPrIDRef="0">${prefix}</hp:run><hp:run charPrIDRef="0">${gridXml}<hp:t></hp:t></hp:run>`
+        : `<hp:run charPrIDRef="0">${gridXml}<hp:t></hp:t></hp:run>`;
+      contentXml += `<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">${runsXml}${defaultLineseg}</hp:p>`;
       isFirst = false;
     }
   }
 
   // If empty, add one empty paragraph with secPr
   if (contentXml === '') {
-    contentXml = `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0">${secPr}<hp:t></hp:t></hp:run>${defaultLineseg}</hp:p>`;
+    contentXml = `<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0">${secPr}<hp:t></hp:t></hp:run>${defaultLineseg}</hp:p>`;
   }
 
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hs:sec ${NS}>${contentXml}</hs:sec>`;
 }
 
-function encodePara(para: ParaNode, ctx: HwpxCtx, secPr: string = ''): string {
+function estimateCellHeight(cell: CellNode, ctx: HwpxCtx): number {
+  const topPad = 141;
+  const botPad = 141;
+  let contentHeight = 0;
+  for (const para of cell.kids) {
+    const fontSize = getFontSizeForPara(para, ctx);
+    const paraPrId = ctx.paraPrMap.get(paraPrKey(para.props));
+    const paraPr = paraPrId !== undefined ? ctx.paraPrs[paraPrId] : null;
+    const lineSpacing = paraPr ? paraPr.lineSpacing : 160;
+    const spaceBefore = paraPr ? paraPr.prevHwp : 0;
+    const spaceAfter = paraPr ? paraPr.nextHwp : 0;
+    const lineHeight = Math.round(fontSize * lineSpacing / 100);
+    contentHeight += lineHeight + spaceBefore + spaceAfter;
+  }
+  if (contentHeight === 0) contentHeight = Math.round(1000 * 1.6); // 10pt @ 160%
+  return contentHeight + topPad + botPad;
+}
+
+function encodePara(para: ParaNode, ctx: HwpxCtx, secPr: string = '', availWidth?: number): string {
   const paraPrId = registerParaPr(para.props, ctx);
 
   let runs = '';
@@ -393,15 +425,20 @@ function encodePara(para: ParaNode, ctx: HwpxCtx, secPr: string = ''): string {
     }
   }
 
-  // Compute lineseg values based on font size
+  // Compute lineseg values based on font size and actual line spacing.
+  // In HWPX, vertsize = font height and spacing = extra gap = fontSize * (lineSpacing/100 - 1).
+  // Total rendered line height = vertsize + spacing.
   const fontSize = getFontSizeForPara(para, ctx);
+  const paraPr = ctx.paraPrs[paraPrId];
+  const lineSpacing = paraPr?.lineSpacing ?? 160;
   const vertsize = fontSize;
   const textheight = fontSize;
   const baseline = Math.round(fontSize * 0.85);
-  const spacing = Math.round(fontSize * 0.6);
-  const linesegarray = `<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="${vertsize}" textheight="${textheight}" baseline="${baseline}" spacing="${spacing}" horzpos="0" horzsize="${ctx.availableWidth}" flags="393216"/></hp:linesegarray>`;
+  const spacing = Math.max(0, Math.round(fontSize * (lineSpacing / 100 - 1)));
+  const horzsize = availWidth ?? ctx.availableWidth;
+  const linesegarray = `<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="${vertsize}" textheight="${textheight}" baseline="${baseline}" spacing="${spacing}" horzpos="0" horzsize="${horzsize}" flags="393216"/></hp:linesegarray>`;
 
-  return `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="${paraPrId}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">${runs}${linesegarray}</hp:p>`;
+  return `<hp:p id="0" paraPrIDRef="${paraPrId}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">${runs}${linesegarray}</hp:p>`;
 }
 
 /** Get the font size (in HWPX height units, 1000=10pt) for lineseg computation */
@@ -446,8 +483,13 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
   const charPrId = registerCharPr({}, ctx);
   const w = Metric.ptToHwp(img.w);
   const h = Metric.ptToHwp(img.h);
+  const cx = Math.round(w / 2);
+  const cy = Math.round(h / 2);
 
-  return `<hp:run charPrIDRef="${charPrId}"><hp:pic id="${ctx.nextElementId++}" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" treatAsChar="1"><hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:imgRect x="0" y="0" w="${w}" h="${h}"/><hp:imgClip left="0" right="0" top="0" bottom="0"/><hp:img binaryItemIDRef="${binId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/></hp:pic></hp:run>`;
+  // hp:pic children must follow the exact HWPX spec order.
+  // Critical: image binary reference uses hc: namespace (not hp:).
+  // hp:imgRect must use hc:pt0..pt3 child elements (not flat attributes).
+  return `<hp:run charPrIDRef="${charPrId}"><hp:pic id="${ctx.nextElementId++}" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="0" reverse="0"><hp:offset x="0" y="0"/><hp:orgSz width="${w}" height="${h}"/><hp:curSz width="${w}" height="${h}"/><hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="${cx}" centerY="${cy}" rotateimage="1"/><hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo><hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${w}" y="0"/><hc:pt2 x="${w}" y="${h}"/><hc:pt3 x="0" y="${h}"/></hp:imgRect><hp:imgClip left="0" right="0" top="0" bottom="0"/><hp:inMargin left="0" right="0" top="0" bottom="0"/><hp:imgDim dimwidth="${w}" dimheight="${h}"/><hc:img binaryItemIDRef="${binId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/><hp:effects/><hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="0" right="0" top="0" bottom="0"/></hp:pic><hp:t></hp:t></hp:run>`;
 }
 
 function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
@@ -493,10 +535,23 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
     ? addBorderFill(ctx, grid.props.defaultStroke)
     : 2; // default table border
 
+  // Pre-calculate row heights (max cell height per row)
+  const rowHeights: number[] = [];
+  for (const row of grid.kids) {
+    let maxH = 0;
+    for (const cell of row.kids) {
+      const h = estimateCellHeight(cell, ctx);
+      if (h > maxH) maxH = h;
+    }
+    rowHeights.push(maxH);
+  }
+  const totalTableHeight = rowHeights.reduce((s, h) => s + h, 0);
+
   // Rows
   let rowsXml = '';
   for (let ri = 0; ri < grid.kids.length; ri++) {
     const row = grid.kids[ri];
+    const rowH = rowHeights[ri];
     let cellsXml = '';
     let colIdx = 0;
     for (let ci = 0; ci < row.kids.length; ci++) {
@@ -508,15 +563,18 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
         cellBfId = addBorderFill(ctx, grid.props.defaultStroke ?? DEFAULT_STROKE, cell.props.bg);
       }
 
-      // Encode cell paragraphs
-      const parasXml = cell.kids.map(p => encodePara(p, ctx)).join('');
-
       // Calculate cell width from column widths
       let cellW = 0;
       for (let sc = colIdx; sc < colIdx + cell.cs && sc < colWidths.length; sc++) cellW += colWidths[sc];
       if (cellW === 0) cellW = defaultColW * cell.cs;
 
-      cellsXml += `<hp:tc name="" header="0" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${cell.props.va === 'mid' ? 'CENTER' : cell.props.va === 'bot' ? 'BOTTOM' : 'TOP'}" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">${parasXml}</hp:subList><hp:cellAddr colAddr="${colIdx}" rowAddr="${ri}"/><hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/><hp:cellSz width="${cellW}" height="1000"/><hp:cellMargin left="141" right="141" top="141" bottom="141"/></hp:tc>`;
+      // Cell inner width for lineseg (subtract left + right cell margins)
+      const cellInnerW = Math.max(cellW - 282, 100);
+
+      // Encode cell paragraphs with correct inner width
+      const parasXml = cell.kids.map(p => encodePara(p, ctx, '', cellInnerW)).join('');
+
+      cellsXml += `<hp:tc name="" header="0" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${cell.props.va === 'mid' ? 'CENTER' : cell.props.va === 'bot' ? 'BOTTOM' : 'TOP'}" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">${parasXml}</hp:subList><hp:cellAddr colAddr="${colIdx}" rowAddr="${ri}"/><hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/><hp:cellSz width="${cellW}" height="${rowH}"/><hp:cellMargin left="141" right="141" top="141" bottom="141"/></hp:tc>`;
       colIdx += cell.cs;
     }
     rowsXml += `<hp:tr>${cellsXml}</hp:tr>`;
@@ -524,7 +582,7 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
 
   const headerRow = grid.props.headerRow ? ' repeatHeader="1"' : '';
 
-  return `<hp:tbl id="${ctx.nextElementId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL"${headerRow} rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="0"><hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="1000" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:inMargin left="138" right="138" top="138" bottom="138"/>${rowsXml}</hp:tbl>`;
+  return `<hp:tbl id="${ctx.nextElementId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE"${headerRow} rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="0"><hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="${totalTableHeight}" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="138" right="138" top="138" bottom="138"/><hp:inMargin left="138" right="138" top="138" bottom="138"/>${rowsXml}</hp:tbl>`;
 }
 
 function extractPreviewText(sheet?: SheetNode): string {
