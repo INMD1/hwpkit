@@ -1,6 +1,4 @@
 # 🌉 HWPKit
-[![npm version](https://img.shields.io/npm/v/hwpkit.svg)](https://www.npmjs.com/package/hwpkit)
-[![license](https://img.shields.io/npm/l/hwpkit.svg)](https://github.com/INMD1/ANYTOHWPX/blob/main/license.md)
 
 **브라우저 네이티브 환경에서 동작하는 초경량 양방향 문서 변환 라이브러리**
 
@@ -181,4 +179,4 @@ npm run build
 
 ## 📄 라이선스
 
-이 프로젝트는 **MIT 라이선스** 정책을 따릅니다. 사용 및 배포에 관한 더 자세한 정보는 레포지토리 내의 [`license.md`](./license.md) 파일을 참고하십시오.
+이 프로젝트는 **LGPG 2.1 라이선스** 정책을 따릅니다. 사용 및 배포에 관한 더 자세한 정보는 레포지토리 내의 [`license.md`](./license.md) 파일을 참고하십시오.
