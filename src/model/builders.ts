@@ -1,6 +1,6 @@
 import type {
   DocRoot, SheetNode, ParaNode, SpanNode, ImgNode,
-  GridNode, RowNode, CellNode, ContentNode, TxtNode, PageNumNode,
+  GridNode, RowNode, CellNode, ContentNode, TxtNode, PageNumNode, BrNode, PbNode,
 } from './doc-tree';
 import type { TextProps, ParaProps, CellProps, GridProps, DocMeta, PageDims } from './doc-props';
 import { A4 } from './doc-props';
@@ -23,6 +23,9 @@ export function buildSheet(
 export function buildPageNum(format?: PageNumNode['format']): PageNumNode {
   return { tag: 'pagenum', format };
 }
+
+export function buildBr(): BrNode { return { tag: 'br' }; }
+export function buildPb(): PbNode { return { tag: 'pb' }; }
 
 export function buildPara(kids: ParaNode['kids'] = [], props: ParaProps = {}): ParaNode {
   return { tag: 'para', props, kids };

@@ -75,6 +75,8 @@ interface DocMeta {
     modified?: string;
 }
 declare const A4: PageDims;
+declare const A4_LANDSCAPE: PageDims;
+declare function normalizeDims(dims: PageDims): PageDims;
 declare const DEFAULT_STROKE: Stroke;
 
 type BlockTag = 'root' | 'sheet' | 'para' | 'span' | 'txt' | 'img' | 'link' | 'grid' | 'row' | 'cell' | 'br' | 'pb' | 'pagenum';
@@ -202,6 +204,8 @@ declare function buildSheet(kids?: ContentNode[], dims?: PageDims, opts?: {
     footer?: ParaNode[];
 }): SheetNode;
 declare function buildPageNum(format?: PageNumNode['format']): PageNumNode;
+declare function buildBr(): BrNode;
+declare function buildPb(): PbNode;
 declare function buildPara(kids?: ParaNode['kids'], props?: ParaProps): ParaNode;
 declare function buildSpan(content: string, props?: TextProps): SpanNode;
 declare function buildImg(b64: string, mime: ImgNode['mime'], w: number, h: number, alt?: string): ImgNode;
@@ -310,4 +314,4 @@ declare const TextKit: {
     base64Decode(b64: string): Uint8Array;
 };
 
-export { A4, type Align, type AnyNode, ArchiveKit, BinaryKit, type BlockTag, type BrNode, type CellNode, type CellProps, type ContentNode, DEFAULT_STROKE, type Decoder, type DocMeta, type DocRoot, type Encoder, type Fail, type GridNode, type GridProps, type Heading, type ImgNode, type LinkNode, Metric, type Ok, type Outcome, type PageDims, type PageNumNode, type ParaNode, type ParaProps, type PbNode, Pipeline, type RowNode, type SheetNode, ShieldedParser, type SpanNode, type Stroke, type StrokeKind, type TableLook, TextKit, type TextProps, TreeWalker, type TxtNode, type VAlign, XmlKit, buildCell, buildGrid, buildImg, buildPageNum, buildPara, buildRoot, buildRow, buildSheet, buildSpan, countNodes, fail, registry, safeAlign, safeFont, safeFontToKr, safeHex, safeStrokeDocx, safeStrokeHwpx, succeed, validateRoot, walkNode };
+export { A4, A4_LANDSCAPE, type Align, type AnyNode, ArchiveKit, BinaryKit, type BlockTag, type BrNode, type CellNode, type CellProps, type ContentNode, DEFAULT_STROKE, type Decoder, type DocMeta, type DocRoot, type Encoder, type Fail, type GridNode, type GridProps, type Heading, type ImgNode, type LinkNode, Metric, normalizeDims, type Ok, type Outcome, type PageDims, type PageNumNode, type ParaNode, type ParaProps, type PbNode, Pipeline, type RowNode, type SheetNode, ShieldedParser, type SpanNode, type Stroke, type StrokeKind, type TableLook, TextKit, type TextProps, TreeWalker, type TxtNode, type VAlign, XmlKit, buildBr, buildCell, buildGrid, buildImg, buildPageNum, buildPara, buildPb, buildRoot, buildRow, buildSheet, buildSpan, countNodes, fail, registry, safeAlign, safeFont, safeFontToKr, safeHex, safeStrokeDocx, safeStrokeHwpx, succeed, validateRoot, walkNode };

@@ -2,7 +2,7 @@ import type { Encoder } from '../../contract/encoder';
 import type { DocRoot, ParaNode, SpanNode, GridNode, ContentNode, ImgNode, SheetNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
 import type { PageDims, GridProps, CellProps } from '../../model/doc-props';
-import { A4 } from '../../model/doc-props';
+import { A4, normalizeDims } from '../../model/doc-props';
 import { succeed, fail } from '../../contract/result';
 import { Metric } from '../../safety/StyleBridge';
 import { ArchiveKit } from '../../toolkit/ArchiveKit';
@@ -17,7 +17,7 @@ export class DocxEncoder implements Encoder {
   async encode(doc: DocRoot): Promise<Outcome<Uint8Array>> {
     try {
       const sheet = doc.kids[0];
-      const dims  = sheet?.dims ?? A4;
+      const dims  = normalizeDims(sheet?.dims ?? A4);
       const kids  = sheet?.kids ?? [];
 
       const images: ImageEntry[] = [];
@@ -360,6 +360,23 @@ function encodeParaInner(para: ParaNode, ctx: EncCtx): string {
     numPr = `<w:pStyle w:val="ListParagraph"/><w:numPr><w:ilvl w:val="${ilvl}"/><w:numId w:val="${numId}"/></w:numPr>`;
   }
 
+  // Spacing (before / after / line height)
+  let spacingXml = '';
+  const { spaceBefore, spaceAfter, lineHeight } = para.props;
+  if (spaceBefore !== undefined || spaceAfter !== undefined || lineHeight !== undefined) {
+    const parts: string[] = [];
+    if (spaceBefore !== undefined) parts.push(`w:before="${Metric.ptToDxa(spaceBefore)}"`);
+    if (spaceAfter  !== undefined) parts.push(`w:after="${Metric.ptToDxa(spaceAfter)}"`);
+    if (lineHeight  !== undefined) parts.push(`w:line="${Math.round(lineHeight * 240)}" w:lineRule="auto"`);
+    spacingXml = `<w:spacing ${parts.join(' ')}/>`;
+  }
+
+  // Indentation
+  let indentXml = '';
+  if (para.props.indentPt !== undefined) {
+    indentXml = `<w:ind w:left="${Metric.ptToDxa(para.props.indentPt)}"/>`;
+  }
+
   const runs = para.kids.map(k => {
     if (k.tag === 'span') return encodeRun(k, ctx);
     if (k.tag === 'img') return encodeImage(k, ctx);
@@ -367,7 +384,7 @@ function encodeParaInner(para: ParaNode, ctx: EncCtx): string {
   }).join('');
 
   return `    <w:p>
-      <w:pPr>${headStyle}${numPr}<w:jc w:val="${align === 'justify' ? 'both' : align}"/></w:pPr>
+      <w:pPr>${headStyle}${numPr}${spacingXml}${indentXml}<w:jc w:val="${align === 'justify' ? 'both' : align}"/></w:pPr>
       ${runs}
     </w:p>`;
 }

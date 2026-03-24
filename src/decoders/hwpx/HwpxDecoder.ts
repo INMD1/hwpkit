@@ -4,7 +4,7 @@ import type { Outcome } from '../../contract/result';
 import type { DocMeta, PageDims, TextProps, ParaProps, CellProps, GridProps, Stroke } from '../../model/doc-props';
 import { A4 } from '../../model/doc-props';
 import { succeed, fail } from '../../contract/result';
-import { buildRoot, buildSheet, buildPara, buildSpan, buildImg, buildGrid, buildRow, buildCell } from '../../model/builders';
+import { buildRoot, buildSheet, buildPara, buildSpan, buildImg, buildGrid, buildRow, buildCell, buildPb } from '../../model/builders';
 import { ShieldedParser } from '../../safety/ShieldedParser';
 import { Metric, safeAlign, safeFont, safeHex, safeStrokeHwpx } from '../../safety/StyleBridge';
 import { ArchiveKit } from '../../toolkit/ArchiveKit';
@@ -22,12 +22,20 @@ interface CharPrInfo {
   pt?: number; color?: string; font?: string; bg?: string;
 }
 
+interface ParaPrInfo {
+  align?: string;
+  indentPt?: number;
+  spaceBefore?: number;
+  spaceAfter?: number;
+  lineHeight?: number;
+}
+
 interface DecCtx {
   files: Map<string, Uint8Array>;
   shield: ShieldedParser;
   borderFills: Map<number, BorderFillInfo>;
   charPrs: Map<number, CharPrInfo>;
-  paraPrs: Map<number, { align?: string }>;
+  paraPrs: Map<number, ParaPrInfo>;
   warns: string[];
 }
 
@@ -53,7 +61,7 @@ export class HwpxDecoder implements Decoder {
       let dims: PageDims = { ...A4 };
       let borderFills = new Map<number, BorderFillInfo>();
       let charPrs = new Map<number, CharPrInfo>();
-      let paraPrs = new Map<number, { align?: string }>();
+      let paraPrs = new Map<number, ParaPrInfo>();
 
       if (headXml) {
         try {
@@ -249,8 +257,8 @@ function extractCharPrs(headObj: any): Map<number, CharPrInfo> {
   return map;
 }
 
-function extractParaPrs(headObj: any): Map<number, { align?: string }> {
-  const map = new Map<number, { align?: string }>();
+function extractParaPrs(headObj: any): Map<number, ParaPrInfo> {
+  const map = new Map<number, ParaPrInfo>();
   try {
     const root = headObj?.['hh:head']?.[0] ?? headObj?.['hh:HEAD']?.[0] ?? headObj?.HEAD?.[0] ?? headObj;
     const refList = root?.['hh:refList']?.[0] ?? root?.['hh:REFLIST']?.[0] ?? root?.REFLIST?.[0];
@@ -268,7 +276,42 @@ function extractParaPrs(headObj: any): Map<number, { align?: string }> {
       const alignNode = pp?.['hh:align']?.[0]?._attr ?? pp?.['hh:ALIGN']?.[0]?._attr;
       const align = alignNode?.horizontal ?? alignNode?.Horizontal;
 
-      map.set(id, { align });
+      // Read margin and lineSpacing from direct child OR hp:switch > hp:default/hp:case
+      let marginEl = pp?.['hh:margin']?.[0] ?? null;
+      let lineSpEl = pp?.['hh:lineSpacing']?.[0] ?? null;
+      if (!marginEl) {
+        const sw = pp?.['hp:switch']?.[0];
+        const container = sw?.['hp:default']?.[0] ?? sw?.['hp:case']?.[0];
+        marginEl = container?.['hh:margin']?.[0] ?? null;
+        lineSpEl = lineSpEl ?? container?.['hh:lineSpacing']?.[0] ?? null;
+      }
+
+      let indentPt: number | undefined;
+      let spaceBefore: number | undefined;
+      let spaceAfter: number | undefined;
+      let lineHeight: number | undefined;
+
+      if (marginEl) {
+        // Handle both hc:intent (our encoder) and hc:indent (Hancom standard)
+        const intentEl = marginEl?.['hc:intent']?.[0] ?? marginEl?.['hc:indent']?.[0];
+        const prevEl   = marginEl?.['hc:prev']?.[0];
+        const nextEl   = marginEl?.['hc:next']?.[0];
+        const intentVal = Number(intentEl?._attr?.value ?? 0);
+        const prevVal   = Number(prevEl?._attr?.value ?? 0);
+        const nextVal   = Number(nextEl?._attr?.value ?? 0);
+        if (intentVal !== 0) indentPt    = Metric.hwpToPt(intentVal);
+        if (prevVal   >  0)  spaceBefore = Metric.hwpToPt(prevVal);
+        if (nextVal   >  0)  spaceAfter  = Metric.hwpToPt(nextVal);
+      }
+
+      if (lineSpEl) {
+        const lsAttr = lineSpEl._attr ?? {};
+        const lsType = lsAttr.type ?? 'PERCENT';
+        const lsVal  = Number(lsAttr.value ?? 160);
+        if (lsType === 'PERCENT' && lsVal > 0) lineHeight = lsVal / 100;
+      }
+
+      map.set(id, { align, indentPt, spaceBefore, spaceAfter, lineHeight });
     }
   } catch { /* non-fatal */ }
   return map;
@@ -423,6 +466,14 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   const inlineAttr = inlineParaPr?._attr ?? {};
   const props: ParaProps = { align: safeAlign(align) };
 
+  // Apply spacing/indent/lineHeight from paraPr definition
+  if (paraPrDef) {
+    if (paraPrDef.indentPt    !== undefined) props.indentPt    = paraPrDef.indentPt;
+    if (paraPrDef.spaceBefore !== undefined) props.spaceBefore = paraPrDef.spaceBefore;
+    if (paraPrDef.spaceAfter  !== undefined) props.spaceAfter  = paraPrDef.spaceAfter;
+    if (paraPrDef.lineHeight  !== undefined) props.lineHeight  = paraPrDef.lineHeight;
+  }
+
   // List support (from inline attr)
   if (inlineAttr.listType) {
     props.listOrd = inlineAttr.listType === 'DIGIT' || inlineAttr.listType === 'DECIMAL';
@@ -462,6 +513,11 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
 
     const spanProps = resolveCharPr(run, ctx);
     kids.push(buildSpan(content, spanProps));
+  }
+
+  // pageBreak="1" → prepend a pb node in its own span
+  if (pAttr.pageBreak === '1') {
+    kids.unshift({ tag: 'span', props: {}, kids: [buildPb()] });
   }
 
   return buildPara(kids.filter(Boolean) as ParaNode['kids'], props);
@@ -542,6 +598,25 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
   if (borderFill?.stroke) gridProps.defaultStroke = borderFill.stroke;
 
   const rowArr = getTag(tbl, 'hp:tr', 'hp:ROW');
+
+  // Read column widths from the first row that has all cs=1 cells
+  for (const row of rowArr) {
+    const cells = getTag(row, 'hp:tc', 'hp:CELL');
+    const rowWidths: number[] = [];
+    let allSingle = true;
+    for (const cell of cells) {
+      const cellSpanAttr = cell?.['hp:cellSpan']?.[0]?._attr ?? {};
+      const cs = Number(cellSpanAttr.colSpan ?? cell?._attr?.ColSpan ?? 1);
+      if (cs > 1) { allSingle = false; break; }
+      const szAttr = cell?.['hp:cellSz']?.[0]?._attr ?? {};
+      const w = Number(szAttr.width ?? 0);
+      rowWidths.push(Metric.hwpToPt(w));
+    }
+    if (allSingle && rowWidths.length > 0 && rowWidths.some(w => w > 0)) {
+      gridProps.colWidths = rowWidths;
+      break;
+    }
+  }
   const rowNodes = rowArr.map((row: any) => {
     const cellArr = getTag(row, 'hp:tc', 'hp:CELL');
     const cellNodes = cellArr.map((cell: any) => {

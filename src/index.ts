@@ -22,8 +22,8 @@ export type {
   TextProps, ParaProps, CellProps, GridProps, TableLook, PageDims, DocMeta,
   Align, VAlign, Heading, StrokeKind, Stroke,
 } from './model/doc-props';
-export { A4, DEFAULT_STROKE } from './model/doc-props';
-export { buildRoot, buildSheet, buildPara, buildSpan, buildImg, buildGrid, buildRow, buildCell, buildPageNum } from './model/builders';
+export { A4, A4_LANDSCAPE, DEFAULT_STROKE, normalizeDims } from './model/doc-props';
+export { buildRoot, buildSheet, buildPara, buildSpan, buildImg, buildGrid, buildRow, buildCell, buildPageNum, buildBr, buildPb } from './model/builders';
 
 // Contract
 export type { Decoder } from './contract/decoder';

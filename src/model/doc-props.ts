@@ -89,4 +89,26 @@ export const A4: PageDims = {
   orient: 'portrait',
 };
 
+export const A4_LANDSCAPE: PageDims = {
+  wPt: 841.89, hPt: 595.28,
+  mt: 56.69, mb: 56.69, ml: 70.87, mr: 70.87,
+  orient: 'landscape',
+};
+
+/**
+ * orient === 'landscape'일 때 wPt < hPt이면 swap,
+ * orient === 'portrait'일 때 wPt > hPt이면 swap하여
+ * 방향과 치수가 항상 일치하도록 정규화합니다.
+ */
+export function normalizeDims(dims: PageDims): PageDims {
+  const orient = dims.orient ?? 'portrait';
+  if (orient === 'landscape' && dims.wPt < dims.hPt) {
+    return { ...dims, wPt: dims.hPt, hPt: dims.wPt };
+  }
+  if (orient === 'portrait' && dims.wPt > dims.hPt) {
+    return { ...dims, wPt: dims.hPt, hPt: dims.wPt };
+  }
+  return dims;
+}
+
 export const DEFAULT_STROKE: Stroke = { kind: 'solid', pt: 0.5, color: '000000' };

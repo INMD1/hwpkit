@@ -4,7 +4,7 @@ import type { Outcome } from '../../contract/result';
 import type { DocMeta, PageDims, TextProps, ParaProps, CellProps, GridProps, TableLook } from '../../model/doc-props';
 import { A4 } from '../../model/doc-props';
 import { succeed, fail } from '../../contract/result';
-import { buildRoot, buildSheet, buildPara, buildSpan, buildImg, buildGrid, buildRow, buildCell } from '../../model/builders';
+import { buildRoot, buildSheet, buildPara, buildSpan, buildImg, buildGrid, buildRow, buildCell, buildPb } from '../../model/builders';
 import { ShieldedParser } from '../../safety/ShieldedParser';
 import { Metric, safeAlign, safeFont, safeHex, safeStrokeDocx } from '../../safety/StyleBridge';
 import { ArchiveKit } from '../../toolkit/ArchiveKit';
@@ -285,6 +285,21 @@ function decodePara(
     heading: parseHeading(headStyle),
   };
 
+  // Spacing (before/after/line height)
+  const spacingAttr = pPr?.['w:spacing']?.[0]?._attr ?? pPr?.spacing?.[0]?._attr ?? {};
+  const beforeVal   = Number(spacingAttr?.['w:before'] ?? spacingAttr?.before ?? 0);
+  const afterVal    = Number(spacingAttr?.['w:after']  ?? spacingAttr?.after  ?? 0);
+  const lineVal     = Number(spacingAttr?.['w:line']   ?? spacingAttr?.line   ?? 0);
+  const lineRule    = spacingAttr?.['w:lineRule'] ?? spacingAttr?.lineRule ?? 'auto';
+  if (beforeVal > 0) props.spaceBefore = Metric.dxaToPt(beforeVal);
+  if (afterVal  > 0) props.spaceAfter  = Metric.dxaToPt(afterVal);
+  if (lineVal   > 0 && lineRule === 'auto') props.lineHeight = lineVal / 240;
+
+  // Indentation
+  const indAttr = pPr?.['w:ind']?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
+  const leftVal = Number(indAttr?.['w:left'] ?? indAttr?.left ?? 0);
+  if (leftVal > 0) props.indentPt = Metric.dxaToPt(leftVal);
+
   // List/numbering
   const numPr = pPr?.['w:numPr']?.[0] ?? pPr?.numPr?.[0];
   if (numPr) {
@@ -421,6 +436,15 @@ function decodeRun(run: any, ctx: DecCtx): SpanNode {
   const fldChar = run?.['w:fldChar']?.[0]?._attr ?? run?.fldChar?.[0]?._attr;
   const instrText = run?.['w:instrText']?.[0];
 
+  // Page break: <w:br w:type="page"/>
+  const brNodes = toArr(run?.['w:br'] ?? run?.br ?? []);
+  for (const br of brNodes) {
+    const brType = br?._attr?.['w:type'] ?? br?._attr?.type;
+    if (brType === 'page') {
+      return { tag: 'span', props, kids: [buildPb()] };
+    }
+  }
+
   const textNodes = toArr(run?.['w:t'] ?? run?.t);
   const content = textNodes.map((t: any) => typeof t === 'string' ? t : t?._ ?? t?._text ?? '').join('');
 
@@ -468,6 +492,16 @@ function decodeGrid(
   }
 
   const gridProps: GridProps = { look, defaultStroke };
+
+  // Read column widths from w:tblGrid
+  const tblGrid = tbl?.['w:tblGrid']?.[0] ?? tbl?.tblGrid?.[0];
+  if (tblGrid) {
+    const gridCols = toArr(tblGrid?.['w:gridCol'] ?? tblGrid?.gridCol ?? []);
+    const colWidthsPt = gridCols
+      .map((gc: any) => Metric.dxaToPt(Number(gc?._attr?.['w:w'] ?? gc?._attr?.w ?? 0)))
+      .filter((w: number) => w > 0);
+    if (colWidthsPt.length > 0) gridProps.colWidths = colWidthsPt;
+  }
 
   const rowArr = toArr(tbl?.['w:tr'] ?? tbl?.tr);
 

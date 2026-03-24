@@ -2,7 +2,7 @@ import type { Encoder } from '../../contract/encoder';
 import type { DocRoot, ParaNode, SpanNode, GridNode, ContentNode, ImgNode, SheetNode, CellNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
 import type { PageDims, TextProps, ParaProps, CellProps, Stroke } from '../../model/doc-props';
-import { A4, DEFAULT_STROKE } from '../../model/doc-props';
+import { A4, DEFAULT_STROKE, normalizeDims } from '../../model/doc-props';
 import { succeed, fail } from '../../contract/result';
 import { Metric, safeFontToKr } from '../../safety/StyleBridge';
 import { ArchiveKit } from '../../toolkit/ArchiveKit';
@@ -213,7 +213,7 @@ export class HwpxEncoder implements Encoder {
   async encode(doc: DocRoot): Promise<Outcome<Uint8Array>> {
     try {
       const sheet = doc.kids[0];
-      const dims = sheet?.dims ?? A4;
+      const dims = normalizeDims(sheet?.dims ?? A4);
 
       // Available width = page width - left margin - right margin (in HWPUNIT)
       const availableWidth = Metric.ptToHwp(dims.wPt) - Metric.ptToHwp(dims.ml) - Metric.ptToHwp(dims.mr);
@@ -402,6 +402,11 @@ function estimateCellHeight(cell: CellNode, ctx: HwpxCtx): number {
 function encodePara(para: ParaNode, ctx: HwpxCtx, secPr: string = '', availWidth?: number): string {
   const paraPrId = registerParaPr(para.props, ctx);
 
+  // Detect page break: paragraph starts on new page if any span contains a pb node
+  const hasPageBreak = para.kids.some(
+    k => k.tag === 'span' && k.kids.some(c => c.tag === 'pb'),
+  );
+
   let runs = '';
   for (const kid of para.kids) {
     if (kid.tag === 'span') {
@@ -438,7 +443,7 @@ function encodePara(para: ParaNode, ctx: HwpxCtx, secPr: string = '', availWidth
   const horzsize = availWidth ?? ctx.availableWidth;
   const linesegarray = `<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="${vertsize}" textheight="${textheight}" baseline="${baseline}" spacing="${spacing}" horzpos="0" horzsize="${horzsize}" flags="393216"/></hp:linesegarray>`;
 
-  return `<hp:p id="0" paraPrIDRef="${paraPrId}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">${runs}${linesegarray}</hp:p>`;
+  return `<hp:p id="0" paraPrIDRef="${paraPrId}" styleIDRef="0" pageBreak="${hasPageBreak ? '1' : '0'}" columnBreak="0" merged="0">${runs}${linesegarray}</hp:p>`;
 }
 
 /** Get the font size (in HWPX height units, 1000=10pt) for lineseg computation */
@@ -471,6 +476,7 @@ function encodeRun(span: SpanNode, ctx: HwpxCtx): string {
     } else if (kid.tag === 'br') {
       parts.push(`<hp:t>\n</hp:t>`);
     }
+    // pb is handled at paragraph level (pageBreak attribute), skip here
   }
 
   return `<hp:run charPrIDRef="${charPrId}">${parts.join('')}</hp:run>`;
