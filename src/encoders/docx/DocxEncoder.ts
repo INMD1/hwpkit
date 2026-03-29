@@ -21,7 +21,7 @@ export class DocxEncoder implements Encoder {
       const kids  = sheet?.kids ?? [];
 
       const images: ImageEntry[] = [];
-      const ctx: EncCtx = { images, nextId: 10, nextImgNum: 1, warns: [] };
+      const ctx: EncCtx = { images, nextId: 10, nextImgNum: 1, warns: [], imgMap: new WeakMap() };
 
       // Collect images from content
       collectImages(kids, ctx);
@@ -85,6 +85,7 @@ interface EncCtx {
   nextId: number;
   nextImgNum: number;
   warns: string[];
+  imgMap: WeakMap<ImgNode, string>; // ImgNode → rId (no mutation)
 }
 
 // ─── Image collection ───────────────────────────────────────
@@ -118,14 +119,13 @@ function collectImagesFromPara(para: ParaNode, ctx: EncCtx): void {
 }
 
 function registerImage(img: ImgNode, ctx: EncCtx): void {
-  // Check if already registered (by b64 reference)
-  if ((img as any)._rId) return;
+  if (ctx.imgMap.has(img)) return;
   const ext = mimeToExt(img.mime);
   const name = `image${ctx.nextImgNum++}.${ext}`;
   const rId = `rId${ctx.nextId++}`;
   const data = TextKit.base64Decode(img.b64);
   ctx.images.push({ rId, name, data, ext });
-  (img as any)._rId = rId;
+  ctx.imgMap.set(img, rId);
 }
 
 // ─── List/numbering collection ──────────────────────────────
@@ -421,7 +421,7 @@ function encodeRun(span: SpanNode, _ctx: EncCtx): string {
 }
 
 function encodeImage(img: ImgNode, ctx: EncCtx): string {
-  const rId = (img as any)._rId;
+  const rId = ctx.imgMap.get(img);
   if (!rId) return '';
 
   const cx = Metric.ptToEmu(img.w);
@@ -449,7 +449,7 @@ function encodeAnchor(
   const distB = Metric.ptToEmu(layout.distB ?? 0);
   const distL = Metric.ptToEmu(layout.distL ?? 9144);   // DOCX 기본 0.18pt
   const distR = Metric.ptToEmu(layout.distR ?? 9144);
-  const behindDoc = layout.behindDoc ? '1' : '0';
+  const behindDoc = (layout.behindDoc || layout.wrap === 'behind') ? '1' : '0';
   const relH = layout.zOrder ?? 251658240;
 
   // 가로 위치

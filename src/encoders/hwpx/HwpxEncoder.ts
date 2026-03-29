@@ -87,6 +87,7 @@ interface HwpxCtx {
   availableWidth: number; // HWPUNIT — page width minus margins
   fonts: string[];
   fontMap: Map<string, number>;
+  imgMap: WeakMap<ImgNode, string>; // ImgNode → binId (no mutation)
 }
 
 function charPrKey(p: TextProps): string {
@@ -169,10 +170,7 @@ function scanPara(para: ParaNode, ctx: HwpxCtx): void {
   registerParaPr(para.props, ctx);
   for (const kid of para.kids) {
     if (kid.tag === "span") registerCharPr(kid.props, ctx);
-    else if (kid.tag === "img") {
-      registerImage(kid, ctx);
-      console.log(para.kids);
-    }
+    else if (kid.tag === "img") registerImage(kid, ctx);
   }
 }
 
@@ -195,14 +193,14 @@ function mimeToExt(mime: string): string {
 }
 
 function registerImage(img: ImgNode, ctx: HwpxCtx): void {
-  if ((img as any)._binId) return;
+  if (ctx.imgMap.has(img)) return;
   const ext = mimeToExt(img.mime);
   const id = `BIN${String(ctx.nextBinNum).padStart(4, "0")}`;
   const name = `${id}.${ext}`;
   ctx.nextBinNum++;
   const data = TextKit.base64Decode(img.b64);
   ctx.bins.push({ id, name, data });
-  (img as any)._binId = id;
+  ctx.imgMap.set(img, id);
 }
 
 // ─── BorderFill ─────────────────────────────────────────────
@@ -264,6 +262,7 @@ export class HwpxEncoder implements Encoder {
         availableWidth,
         fonts: [],
         fontMap: new Map(),
+        imgMap: new WeakMap(),
       };
 
       // Default borderFill (id=1, no border)
@@ -560,19 +559,33 @@ function encodeRun(span: SpanNode, ctx: HwpxCtx): string {
 
 // HWPX textWrap 매핑
 const WRAP_HWPX: Record<string, string> = {
-  inline: 'TOP_AND_BOTTOM', square: 'TOP_AND_BOTTOM',
-  tight: 'BOTH_SIDES', through: 'BOTH_SIDES',
-  none: 'TOP_AND_BOTTOM', behind: 'TOP_AND_BOTTOM', front: 'TOP_AND_BOTTOM',
+  inline: 'TOP_AND_BOTTOM',
+  square: 'SQUARE',
+  tight: 'BOTH_SIDES',
+  through: 'BOTH_SIDES',
+  none: 'FRONT_TEXT',
+  behind: 'BEHIND_TEXT',
+  front: 'FRONT_TEXT',
+};
+// textFlow 매핑 (wrap 타입별)
+const TEXT_FLOW_HWPX: Record<string, string> = {
+  inline: 'BOTH_SIDES',
+  square: 'LARGEST_ONLY',
+  tight: 'BOTH_SIDES',
+  through: 'BOTH_SIDES',
+  none: 'BOTH_SIDES',
+  behind: 'BOTH_SIDES',
+  front: 'BOTH_SIDES',
 };
 const HORZ_RELTO_HWPX: Record<string, string> = {
-  para: 'PARA', margin: 'MARGIN', page: 'PAGE', column: 'COLUMN',
+  para: 'PARA', margin: 'MARGIN', page: 'PAPER', column: 'COLUMN',
 };
 const VERT_RELTO_HWPX: Record<string, string> = {
-  para: 'PARA', margin: 'MARGIN', page: 'PAGE', line: 'LINE',
+  para: 'PARA', margin: 'MARGIN', page: 'PAPER', line: 'LINE',
 };
 
 function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
-  const binId = (img as any)._binId;
+  const binId = ctx.imgMap.get(img);
   if (!binId) return "";
 
   const charPrId = registerCharPr({}, ctx);
@@ -585,9 +598,11 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
   const isInline = !layout || layout.wrap === 'inline';
 
   const textWrap = layout ? (WRAP_HWPX[layout.wrap] ?? 'TOP_AND_BOTTOM') : 'TOP_AND_BOTTOM';
+  const textFlow = layout ? (TEXT_FLOW_HWPX[layout.wrap] ?? 'BOTH_SIDES') : 'BOTH_SIDES';
   const treatAsChar = isInline ? '1' : '0';
-  const flowWithText = isInline ? '1' : '0';
-  const allowOverlap = isInline ? '0' : '1';
+  const flowWithText = '1';
+  // behind/front/inline 이미지는 다른 객체와 겹침 허용 불필요; square/tight는 허용
+  const allowOverlap = (!isInline && layout?.wrap !== 'behind' && layout?.wrap !== 'front') ? '1' : '0';
 
   const horzRelTo = layout?.horzRelTo ? (HORZ_RELTO_HWPX[layout.horzRelTo] ?? 'PARA') : 'PARA';
   const vertRelTo = layout?.vertRelTo ? (VERT_RELTO_HWPX[layout.vertRelTo] ?? 'PARA') : 'PARA';
@@ -600,7 +615,7 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
   const vertOffset = layout?.yPt != null ? Metric.ptToHwp(layout.yPt) : 0;
 
   // hp:pic children must follow the exact HWPX spec order.
-  return `<hp:run charPrIDRef="${charPrId}"><hp:pic id="${ctx.nextElementId++}" zOrder="0" numberingType="PICTURE" textWrap="${textWrap}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="0" reverse="0"><hp:offset x="0" y="0"/><hp:orgSz width="${w}" height="${h}"/><hp:curSz width="${w}" height="${h}"/><hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="${cx}" centerY="${cy}" rotateimage="1"/><hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo><hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${w}" y="0"/><hc:pt2 x="${w}" y="${h}"/><hc:pt3 x="0" y="${h}"/></hp:imgRect><hp:imgClip left="0" right="0" top="0" bottom="0"/><hp:inMargin left="0" right="0" top="0" bottom="0"/><hp:imgDim dimwidth="${w}" dimheight="${h}"/><hc:img binaryItemIDRef="${binId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/><hp:effects/><hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="${treatAsChar}" affectLSpacing="0" flowWithText="${flowWithText}" allowOverlap="${allowOverlap}" holdAnchorAndSO="0" vertRelTo="${vertRelTo}" horzRelTo="${horzRelTo}" vertAlign="${vertAlign}" horzAlign="${horzAlign}" vertOffset="${vertOffset}" horzOffset="${horzOffset}"/><hp:outMargin left="0" right="0" top="0" bottom="0"/></hp:pic><hp:t></hp:t></hp:run>`;
+  return `<hp:run charPrIDRef="${charPrId}"><hp:pic id="${ctx.nextElementId++}" zOrder="0" numberingType="PICTURE" textWrap="${textWrap}" textFlow="${textFlow}" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="0" reverse="0"><hp:offset x="0" y="0"/><hp:orgSz width="${w}" height="${h}"/><hp:curSz width="${w}" height="${h}"/><hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="${cx}" centerY="${cy}" rotateimage="1"/><hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo><hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${w}" y="0"/><hc:pt2 x="${w}" y="${h}"/><hc:pt3 x="0" y="${h}"/></hp:imgRect><hp:imgClip left="0" right="0" top="0" bottom="0"/><hp:inMargin left="0" right="0" top="0" bottom="0"/><hp:imgDim dimwidth="${w}" dimheight="${h}"/><hc:img binaryItemIDRef="${binId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/><hp:effects/><hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="${treatAsChar}" affectLSpacing="0" flowWithText="${flowWithText}" allowOverlap="${allowOverlap}" holdAnchorAndSO="0" vertRelTo="${vertRelTo}" horzRelTo="${horzRelTo}" vertAlign="${vertAlign}" horzAlign="${horzAlign}" vertOffset="${vertOffset}" horzOffset="${horzOffset}"/><hp:outMargin left="0" right="0" top="0" bottom="0"/></hp:pic><hp:t></hp:t></hp:run>`;
 }
 
 function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {

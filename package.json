@@ -1,7 +1,7 @@
 {
-  "name": "hwpkit",
+  "name": "hwpkit-dev",
   "description": "HWP/HWPX/DOCX/MD 양방향 문서 변환 라이브러리",
-  "version": "2.0.0",
+  "version": "0.0.1",
   "author": {
     "name": "INMD1",
     "email": "lyw514549@gmail.com",

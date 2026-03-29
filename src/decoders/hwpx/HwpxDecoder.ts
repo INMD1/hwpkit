@@ -597,8 +597,16 @@ function extractHwpxLayout(posAttr: any, pic: any): ImgLayout {
   // textWrap → wrap
   const textWrap: string = (pic?._attr?.textWrap ?? pic?.['hp:pic']?.[0]?._attr?.textWrap ?? 'TOP_AND_BOTTOM');
   const wrapMap: Record<string, ImgWrap> = {
-    TOP_AND_BOTTOM: 'square', BOTH_SIDES: 'tight',
-    LARGER_ONLY: 'tight', SMALLER_ONLY: 'tight',
+    TOP_AND_BOTTOM: 'square',
+    SQUARE: 'square',
+    BOTH_SIDES: 'tight',
+    LEFT: 'tight',
+    RIGHT: 'tight',
+    LARGER_ONLY: 'tight',
+    SMALLER_ONLY: 'tight',
+    LARGEST_ONLY: 'tight',
+    BEHIND_TEXT: 'behind',
+    FRONT_TEXT: 'none',
   };
   const wrap: ImgWrap = wrapMap[textWrap] ?? 'square';
 
@@ -607,7 +615,7 @@ function extractHwpxLayout(posAttr: any, pic: any): ImgLayout {
     PARA: 'para', MARGIN: 'margin', PAGE: 'page', COLUMN: 'column',
   };
   const vertRelToMap: Record<string, ImgVertRelTo> = {
-    PARA: 'para', MARGIN: 'margin', PAGE: 'page', LINE: 'line',
+    PARA: 'para', MARGIN: 'margin', PAGE: 'page', PAPER: 'page', LINE: 'line',
   };
   const horzRelTo = horzRelToMap[posAttr.horzRelTo ?? ''] ?? 'para';
   const vertRelTo = vertRelToMap[posAttr.vertRelTo ?? ''] ?? 'para';

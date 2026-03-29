@@ -99,12 +99,28 @@ export class DocxDecoder implements Decoder {
 
       const decCtx: DecCtx = { relsMap, files, shield, numMap, warns };
 
-      const kids: ContentNode[] = shield.guardAll(
-        elements,
-        (el: any) => decodeElement(el, decCtx),
-        () => buildPara([buildSpan("[요소 파싱 실패]")]),
-        "docx:bodyElement",
-      );
+      const kids: ContentNode[] = [];
+      for (const el of elements) {
+        const node = shield.guard(
+          () => decodeElement(el, decCtx),
+          buildPara([buildSpan("[요소 파싱 실패]")]),
+          "docx:bodyElement",
+        );
+        kids.push(node);
+
+        // Inline sectPr in pPr = section break → insert page-break paragraph after
+        if (el.type === 'para') {
+          const pPr = el.node?.["w:pPr"]?.[0] ?? el.node?.pPr?.[0] ?? {};
+          const inlineSectPr = pPr?.["w:sectPr"]?.[0] ?? pPr?.sectPr?.[0];
+          if (inlineSectPr) {
+            const typeAttr = inlineSectPr?.["w:type"]?.[0]?._attr;
+            const sectType = typeAttr?.["w:val"] ?? typeAttr?.val ?? 'nextPage';
+            if (sectType !== 'continuous') {
+              kids.push(buildPara([{ tag: 'span', props: {}, kids: [buildPb()] }]));
+            }
+          }
+        }
+      }
 
       // Decode header/footer
       const headerParas = await decodeHeaderFooter(
@@ -445,6 +461,11 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
     }
   }
 
+  // pageBreakBefore: paragraph always starts on a new page
+  const pbBeforeNode = pPr?.["w:pageBreakBefore"]?.[0] ?? pPr?.pageBreakBefore?.[0];
+  const hasPageBreakBefore = pbBeforeNode != null &&
+    (pbBeforeNode?._attr?.["w:val"] ?? pbBeforeNode?._attr?.val ?? "1") !== "0";
+
   const runs = toArr(p?.["w:r"] ?? p?.r);
 
   // 3/28 이미지 태크를 찾을수 있기 때문에 별도 함수 구현
@@ -456,7 +477,14 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
     "docx:run",
   );
 
-  return buildPara(kids.filter(Boolean) as ParaNode["kids"], props);
+  const filteredKids = kids.filter(Boolean) as ParaNode["kids"];
+
+  // Prepend pb span when pageBreakBefore is set
+  if (hasPageBreakBefore) {
+    filteredKids.unshift({ tag: 'span', props: {}, kids: [buildPb()] });
+  }
+
+  return buildPara(filteredKids, props);
 }
 
 // 3/28 코드 수정
