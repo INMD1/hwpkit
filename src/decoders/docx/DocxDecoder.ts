@@ -790,6 +790,14 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
       trPr?.["w:tblHeader"]?.[0] != null || trPr?.tblHeader?.[0] != null;
     if (ri === 0 && isHeaderRow) gridProps.headerRow = true;
 
+    // Row height from w:trHeight
+    let rowHeightPt: number | undefined;
+    const trHAttr = trPr?.["w:trHeight"]?.[0]?._attr ?? trPr?.trHeight?.[0]?._attr;
+    if (trHAttr) {
+      const hDxa = Number(trHAttr?.["w:val"] ?? trHAttr?.val ?? 0);
+      if (hDxa > 0) rowHeightPt = Metric.dxaToPt(hDxa);
+    }
+
     const cellNodes: CellNode[] = [];
     for (let ci = 0; ci < rawRow.length; ci++) {
       const rc = rawRow[ci];
@@ -854,7 +862,7 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
         }),
       );
     }
-    return buildRow(cellNodes);
+    return buildRow(cellNodes, rowHeightPt);
   });
   return buildGrid(rowNodes, gridProps);
 }

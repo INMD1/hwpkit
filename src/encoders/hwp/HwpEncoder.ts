@@ -34,9 +34,12 @@ const TAG_PARA_CHAR_SHAPE = T + 52; // 68
 const TAG_CTRL_HEADER    = T + 55;  // 71
 const TAG_LIST_HEADER    = T + 56;  // 72
 const TAG_PAGE_DEF       = T + 57;  // 73
+const TAG_PARA_LINE_SEG  = T + 53;  // 69
+const TAG_FOOTNOTE_SHAPE = T + 58;  // 74
 const TAG_TABLE_B        = T + 64;  // 80
 
 const CTRL_TABLE = 0x74626C20; // ' lbt' as LE uint32
+const CTRL_SECD  = 0x73656364; // 'secd' section definition ctrl
 
 /** Border width index table (points) — matches BORDER_W_PT in HwpScanner */
 const BORDER_W_PT = [
@@ -145,6 +148,13 @@ function psKey(p: ParaProps): string {
 function bfKey(s: Stroke, bg?: string): string {
   return `${s.kind}|${s.pt}|${s.color}|${bg ?? ''}`;
 }
+function bfPerSideKey(l: Stroke, r: Stroke, t: Stroke, b: Stroke, bg?: string): string {
+  return `${bfKey(l)}/${bfKey(r)}/${bfKey(t)}/${bfKey(b)}/${bg ?? ''}`;
+}
+
+type BfEntry =
+  | { uniform: true; s: Stroke; bg?: string }
+  | { uniform: false; l: Stroke; r: Stroke; t: Stroke; b: Stroke; bg?: string };
 
 class StyleCollector {
   readonly DEF_STROKE: Stroke = { kind: 'solid', pt: 0.5, color: '000000' };
@@ -158,7 +168,7 @@ class StyleCollector {
   psProps: ParaProps[] = [{}];
   private psIdx = new Map<string, number>([[psKey({}), 0]]);
 
-  bfData: { s: Stroke; bg?: string }[] = [];
+  bfData: BfEntry[] = [];
   private bfIdx = new Map<string, number>();
 
   constructor() {
@@ -198,7 +208,16 @@ class StyleCollector {
     const k = bfKey(s, bg);
     if (this.bfIdx.has(k)) return this.bfIdx.get(k)!;
     const id = this.bfData.length + 1;
-    this.bfData.push({ s, bg });
+    this.bfData.push({ uniform: true, s, bg });
+    this.bfIdx.set(k, id);
+    return id;
+  }
+
+  addBorderFillPerSide(l: Stroke, r: Stroke, t: Stroke, b: Stroke, bg?: string): number {
+    const k = bfPerSideKey(l, r, t, b, bg);
+    if (this.bfIdx.has(k)) return this.bfIdx.get(k)!;
+    const id = this.bfData.length + 1;
+    this.bfData.push({ uniform: false, l, r, t, b, bg });
     this.bfIdx.set(k, id);
     return id;
   }
@@ -214,7 +233,17 @@ function collectNode(node: ContentNode, col: StyleCollector): void {
     if (node.props.defaultStroke) col.addBorderFill(node.props.defaultStroke);
     for (const row of node.kids) {
       for (const cell of row.kids) {
-        col.addBorderFill(cell.props.top ?? node.props.defaultStroke ?? col.DEF_STROKE, cell.props.bg);
+        const defStroke = node.props.defaultStroke ?? col.DEF_STROKE;
+        const cp = cell.props;
+        if (cp.top || cp.bot || cp.left || cp.right) {
+          col.addBorderFillPerSide(
+            cp.left ?? defStroke, cp.right ?? defStroke,
+            cp.top ?? defStroke, cp.bot ?? defStroke,
+            cp.bg,
+          );
+        } else {
+          col.addBorderFill(defStroke, cp.bg);
+        }
         for (const para of cell.kids) collectNode(para, col);
       }
     }
@@ -264,7 +293,24 @@ function mkBorderFill(s: Stroke, bg?: string): Uint8Array {
   // fill: type(4) + faceColor(4) + reserved(4)
   if (bg) { w.u32(1).colorRef(bg).u32(0); }
   else    { w.u32(0).u32(0).u32(0); }
-  return w.build(); // 40 bytes
+  return w.build(); // 44 bytes
+}
+
+function mkBorderFillPerSide(
+  left: Stroke, right: Stroke, top: Stroke, bottom: Stroke, bg?: string,
+): Uint8Array {
+  const w = new BufWriter();
+  w.u16(0); // attr
+  for (const s of [left, right, top, bottom]) {
+    const t = BORDER_KIND_IDX[s.kind] ?? 1;
+    const wi = borderWidthIdx(s.pt);
+    w.u8(t).u8(wi).colorRef(s.color || '000000');
+  }
+  // diagonal (always solid thin, no color)
+  w.u8(1).u8(0).colorRef('000000');
+  if (bg) { w.u32(1).colorRef(bg).u32(0); }
+  else    { w.u32(0).u32(0).u32(0); }
+  return w.build();
 }
 
 function mkCharShape(p: TextProps, col: StyleCollector): Uint8Array {
@@ -307,7 +353,10 @@ function buildDocInfoStream(col: StyleCollector): Uint8Array {
   const chunks: Uint8Array[] = [
     mkRec(TAG_ID_MAPPINGS, 0, mkIdMappings(col)),
     ...col.fonts.map(n => mkRec(TAG_FACE_NAME, 0, mkFaceName(n))),
-    ...col.bfData.map(({ s, bg }) => mkRec(TAG_BORDER_FILL, 0, mkBorderFill(s, bg))),
+    ...col.bfData.map(entry =>
+      mkRec(TAG_BORDER_FILL, 0, entry.uniform
+        ? mkBorderFill(entry.s, entry.bg)
+        : mkBorderFillPerSide(entry.l, entry.r, entry.t, entry.b, entry.bg))),
     ...col.csProps.map(p => mkRec(TAG_CHAR_SHAPE, 0, mkCharShape(p, col))),
     ...col.psProps.map(p => mkRec(TAG_PARA_SHAPE, 0, mkParaShape(p))),
   ];
@@ -444,7 +493,10 @@ function encodeGrid(grid: GridNode, col: StyleCollector, lv: number): Uint8Array
 
   const defStroke = grid.props.defaultStroke ?? col.DEF_STROKE;
   const defBfId   = col.addBorderFill(defStroke);
-  const rowHwp    = Array.from({ length: rowCnt }, () => Metric.ptToHwp(DEFAULT_ROW_HEIGHT_PT));
+  const rowHwp = grid.kids.map(row =>
+    row.heightPt != null && row.heightPt > 0
+      ? Metric.ptToHwp(row.heightPt)
+      : Metric.ptToHwp(DEFAULT_ROW_HEIGHT_PT));
 
   records.push(mkRec(TAG_CTRL_HEADER, lv,     mkTableCtrl()));
   records.push(mkRec(TAG_TABLE_B,     lv + 1, mkTableB(rowCnt, colCnt, rowHwp, defBfId)));
@@ -454,8 +506,15 @@ function encodeGrid(grid: GridNode, col: StyleCollector, lv: number): Uint8Array
       const cell   = grid.kids[r].kids[c];
       const wHwp   = Metric.ptToHwp(cwPt[c] ?? defColPt);
       const hHwp   = rowHwp[r];
-      const stroke = cell.props.top ?? defStroke;
-      const bfId   = col.addBorderFill(stroke, cell.props.bg);
+      const cp = cell.props;
+      const hasPerSide = cp.top || cp.bot || cp.left || cp.right;
+      const bfId = hasPerSide
+        ? col.addBorderFillPerSide(
+            cp.left ?? defStroke, cp.right ?? defStroke,
+            cp.top ?? defStroke, cp.bot ?? defStroke,
+            cp.bg,
+          )
+        : col.addBorderFill(cp.top ?? defStroke, cp.bg);
       const paras  = cell.kids.length > 0 ? cell.kids : [{ tag: 'para' as const, props: {}, kids: [] }];
 
       records.push(mkRec(TAG_LIST_HEADER, lv + 1,
@@ -470,10 +529,44 @@ function encodeGrid(grid: GridNode, col: StyleCollector, lv: number): Uint8Array
   return records;
 }
 
+/** Section definition CTRL_HEADER body (47 bytes, ctrlId='secd' + zeros) */
+function mkSectionCtrl(): Uint8Array {
+  return new BufWriter().u32(CTRL_SECD).zeros(43).build();
+}
+
+/**
+ * PARA_TEXT for the section definition paragraph.
+ * Contains one inline control reference for 'secd' + para terminator.
+ * Pattern per ctrl: start(U+0002) + ctrlId_lo(u16) + ctrlId_hi(u16) + 4×U+0000 + end(U+0002)
+ */
+function mkSecdParaText(): Uint8Array {
+  const lo = CTRL_SECD & 0xFFFF;
+  const hi = (CTRL_SECD >>> 16) & 0xFFFF;
+  return new BufWriter()
+    .u16(0x0002).u16(lo).u16(hi).u16(0).u16(0).u16(0).u16(0).u16(0x0002) // 16 bytes ctrl ref
+    .u16(0x000D)                                                             // para terminator
+    .build();
+}
+
+/** Write a section definition paragraph containing PAGE_DEF + FOOTNOTE_SHAPE. */
+function buildSectionParagraph(dims: PageDims): Uint8Array[] {
+  return [
+    mkRec(TAG_PARA_HEADER,    0, mkParaHeader(0, 1)),
+    mkRec(TAG_PARA_TEXT,      1, mkSecdParaText()),
+    mkRec(TAG_PARA_CHAR_SHAPE, 1, mkParaCharShape([[0, 0]])),
+    mkRec(TAG_PARA_LINE_SEG,  1, new Uint8Array(36)),        // 36-byte line-seg (all zeros)
+    mkRec(TAG_CTRL_HEADER,    1, mkSectionCtrl()),            // 'secd' at level 1
+    mkRec(TAG_PAGE_DEF,       2, mkPageDef(dims)),            // page def at level 2
+    mkRec(TAG_FOOTNOTE_SHAPE, 2, new Uint8Array(28)),         // footnote shape (defaults)
+    mkRec(TAG_FOOTNOTE_SHAPE, 2, new Uint8Array(28)),         // endnote shape (defaults)
+  ];
+}
+
 function buildBodyTextStream(doc: DocRoot, col: StyleCollector): Uint8Array {
   const chunks: Uint8Array[] = [];
   const dims = doc.kids[0]?.dims ?? A4;
-  chunks.push(mkRec(TAG_PAGE_DEF, 0, mkPageDef(dims)));
+  // Section definition paragraph (replaces raw PAGE_DEF at level 0)
+  for (const r of buildSectionParagraph(dims)) chunks.push(r);
 
   for (const sheet of doc.kids) {
     for (const node of sheet.kids) {

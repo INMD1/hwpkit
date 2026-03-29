@@ -259,12 +259,19 @@ function parseBody(
   const recs = parseRecords(compressed ? tryInflate(raw) : raw);
   const content: ContentNode[] = [];
   let pageDims: PageDims | undefined;
-  let i = 0;
 
+  // Pre-scan for PAGE_DEF at any nesting level (real HWP stores it at level 2 inside section ctrl)
+  for (const r of recs) {
+    if (r.tag === TAG_PAGE_DEF) {
+      pageDims = shield.guard(() => parsePageDef(r.data), A4, 'hwp:pageDef');
+      break;
+    }
+  }
+
+  let i = 0;
   while (i < recs.length) {
     if (recs[i].tag === TAG_PAGE_DEF) {
-      pageDims = shield.guard(() => parsePageDef(recs[i].data), A4, 'hwp:pageDef');
-      i++;
+      i++; // already handled above; skip at top level
     } else if (recs[i].tag === TAG_PARA_HEADER) {
       const r = shield.guard(
         () => parseParagraphGroup(recs, i, di, shield),

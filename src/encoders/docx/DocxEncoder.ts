@@ -665,11 +665,16 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
       }
     }
 
-    // Header row
-    let trPr = '';
+    // Row properties: header + height
+    const trPrParts: string[] = [];
     if (ri === 0 && (gp.headerRow || look?.firstRow)) {
-      trPr = '<w:trPr><w:tblHeader/></w:trPr>';
+      trPrParts.push('<w:tblHeader/>');
     }
+    if (row.heightPt != null && row.heightPt > 0) {
+      const hDxa = Math.round(Metric.ptToDxa(row.heightPt));
+      trPrParts.push(`<w:trHeight w:val="${hDxa}" w:hRule="exact"/>`);
+    }
+    const trPr = trPrParts.length > 0 ? `<w:trPr>${trPrParts.join('')}</w:trPr>` : '';
 
     return `    <w:tr>${trPr}\n${finalCells.join('\n')}\n    </w:tr>`;
   }).join('\n');

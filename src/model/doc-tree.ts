@@ -56,7 +56,7 @@ export interface CellNode {
   kids: ParaNode[];
 }
 
-export interface RowNode  { tag: 'row'; kids: CellNode[] }
+export interface RowNode  { tag: 'row'; kids: CellNode[]; heightPt?: number }
 
 export interface GridNode {
   tag: 'grid';

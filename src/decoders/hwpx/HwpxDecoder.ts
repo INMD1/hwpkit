@@ -715,7 +715,15 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
         { cs, rs, props: cellProps },
       );
     });
-    return buildRow(cellNodes);
+    // Row height: read from the first cell's cellSz height
+    let rowHeightPt: number | undefined;
+    const firstCellForH = cellArr[0];
+    if (firstCellForH) {
+      const hSz = firstCellForH?.['hp:cellSz']?.[0]?._attr ?? {};
+      const hVal = Number(hSz.height ?? 0);
+      if (hVal > 0) rowHeightPt = Metric.hwpToPt(hVal);
+    }
+    return buildRow(cellNodes, rowHeightPt);
   });
   return buildGrid(rowNodes, gridProps);
 }

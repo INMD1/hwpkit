@@ -88,6 +88,7 @@ interface HwpxCtx {
   fonts: string[];
   fontMap: Map<string, number>;
   imgMap: WeakMap<ImgNode, string>; // ImgNode → binId (no mutation)
+  nextZOrder: number; // monotonically increasing z-order for images/objects
 }
 
 function charPrKey(p: TextProps): string {
@@ -234,6 +235,36 @@ function addBorderFill(
   return id;
 }
 
+function addBorderFillPerSide(
+  ctx: HwpxCtx,
+  top?: Stroke,
+  right?: Stroke,
+  bottom?: Stroke,
+  left?: Stroke,
+  bgColor?: string,
+): number {
+  const id = ctx.borderFills.length + 1;
+  const kindMap: Record<string, string> = {
+    solid: "SOLID", dash: "DASH", dot: "DOT", double: "DOUBLE", none: "NONE",
+  };
+  function sideXml(tag: string, s?: Stroke): string {
+    const type = s ? (kindMap[s.kind] ?? "SOLID") : "NONE";
+    const w = s ? `${(s.pt * 0.3528).toFixed(2)} mm` : "0.12 mm";
+    const c = s ? (s.color.startsWith("#") ? s.color : `#${s.color}`) : "#000000";
+    return `<hh:${tag} type="${type}" width="${w}" color="${c}"/>`;
+  }
+
+  let fill = "";
+  if (bgColor) {
+    const bc = bgColor.startsWith("#") ? bgColor : `#${bgColor}`;
+    fill = `<hc:fillBrush><hc:winBrush faceColor="${bc}" hatchColor="none" alpha="0"/></hc:fillBrush>`;
+  }
+
+  const xml = `<hh:borderFill id="${id}" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0"><hh:slash type="NONE" Crooked="0" isCounter="0"/><hh:backSlash type="NONE" Crooked="0" isCounter="0"/>${sideXml("leftBorder", left)}${sideXml("rightBorder", right)}${sideXml("topBorder", top)}${sideXml("bottomBorder", bottom)}<hh:diagonal type="SOLID" width="0.1 mm" color="#000000"/>${fill}</hh:borderFill>`;
+  ctx.borderFills.push({ id, xml });
+  return id;
+}
+
 // ─── Encoder class ──────────────────────────────────────────
 
 export class HwpxEncoder implements Encoder {
@@ -263,6 +294,7 @@ export class HwpxEncoder implements Encoder {
         fonts: [],
         fontMap: new Map(),
         imgMap: new WeakMap(),
+        nextZOrder: 0,
       };
 
       // Default borderFill (id=1, no border)
@@ -615,7 +647,8 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
   const vertOffset = layout?.yPt != null ? Metric.ptToHwp(layout.yPt) : 0;
 
   // hp:pic children must follow the exact HWPX spec order.
-  return `<hp:run charPrIDRef="${charPrId}"><hp:pic id="${ctx.nextElementId++}" zOrder="0" numberingType="PICTURE" textWrap="${textWrap}" textFlow="${textFlow}" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="0" reverse="0"><hp:offset x="0" y="0"/><hp:orgSz width="${w}" height="${h}"/><hp:curSz width="${w}" height="${h}"/><hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="${cx}" centerY="${cy}" rotateimage="1"/><hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo><hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${w}" y="0"/><hc:pt2 x="${w}" y="${h}"/><hc:pt3 x="0" y="${h}"/></hp:imgRect><hp:imgClip left="0" right="0" top="0" bottom="0"/><hp:inMargin left="0" right="0" top="0" bottom="0"/><hp:imgDim dimwidth="${w}" dimheight="${h}"/><hc:img binaryItemIDRef="${binId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/><hp:effects/><hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="${treatAsChar}" affectLSpacing="0" flowWithText="${flowWithText}" allowOverlap="${allowOverlap}" holdAnchorAndSO="0" vertRelTo="${vertRelTo}" horzRelTo="${horzRelTo}" vertAlign="${vertAlign}" horzAlign="${horzAlign}" vertOffset="${vertOffset}" horzOffset="${horzOffset}"/><hp:outMargin left="0" right="0" top="0" bottom="0"/></hp:pic><hp:t></hp:t></hp:run>`;
+  const zOrder = ctx.nextZOrder++;
+  return `<hp:run charPrIDRef="${charPrId}"><hp:pic id="${ctx.nextElementId++}" zOrder="${zOrder}" numberingType="PICTURE" textWrap="${textWrap}" textFlow="${textFlow}" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="0" reverse="0"><hp:offset x="0" y="0"/><hp:orgSz width="${w}" height="${h}"/><hp:curSz width="${w}" height="${h}"/><hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="${cx}" centerY="${cy}" rotateimage="1"/><hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo><hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${w}" y="0"/><hc:pt2 x="${w}" y="${h}"/><hc:pt3 x="0" y="${h}"/></hp:imgRect><hp:imgClip left="0" right="0" top="0" bottom="0"/><hp:inMargin left="0" right="0" top="0" bottom="0"/><hp:imgDim dimwidth="${w}" dimheight="${h}"/><hc:img binaryItemIDRef="${binId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/><hp:effects/><hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="${treatAsChar}" affectLSpacing="0" flowWithText="${flowWithText}" allowOverlap="${allowOverlap}" holdAnchorAndSO="0" vertRelTo="${vertRelTo}" horzRelTo="${horzRelTo}" vertAlign="${vertAlign}" horzAlign="${horzAlign}" vertOffset="${vertOffset}" horzOffset="${horzOffset}"/><hp:outMargin left="0" right="0" top="0" bottom="0"/></hp:pic><hp:t></hp:t></hp:run>`;
 }
 
 function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
@@ -666,12 +699,16 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
   // Pre-calculate row heights (max cell height per row)
   const rowHeights: number[] = [];
   for (const row of grid.kids) {
-    let maxH = 0;
-    for (const cell of row.kids) {
-      const h = estimateCellHeight(cell, ctx);
-      if (h > maxH) maxH = h;
+    if (row.heightPt != null && row.heightPt > 0) {
+      rowHeights.push(Metric.ptToHwp(row.heightPt));
+    } else {
+      let maxH = 0;
+      for (const cell of row.kids) {
+        const h = estimateCellHeight(cell, ctx);
+        if (h > maxH) maxH = h;
+      }
+      rowHeights.push(maxH);
     }
-    rowHeights.push(maxH);
   }
   const totalTableHeight = rowHeights.reduce((s, h) => s + h, 0);
 
@@ -685,14 +722,28 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
     for (let ci = 0; ci < row.kids.length; ci++) {
       const cell = row.kids[ci];
 
-      // Cell borderFill
+      // Cell borderFill: use per-side if any side border is specified, else fallback to table default
       let cellBfId = tblBfId;
-      if (cell.props.bg) {
-        cellBfId = addBorderFill(
-          ctx,
-          grid.props.defaultStroke ?? DEFAULT_STROKE,
-          cell.props.bg,
-        );
+      const cp = cell.props;
+      const hasPerSideBorder = cp.top || cp.bot || cp.left || cp.right;
+      if (hasPerSideBorder || cp.bg) {
+        if (hasPerSideBorder) {
+          const defStroke = grid.props.defaultStroke ?? DEFAULT_STROKE;
+          cellBfId = addBorderFillPerSide(
+            ctx,
+            cp.top ?? defStroke,
+            cp.right ?? defStroke,
+            cp.bot ?? defStroke,
+            cp.left ?? defStroke,
+            cp.bg,
+          );
+        } else {
+          cellBfId = addBorderFill(
+            ctx,
+            grid.props.defaultStroke ?? DEFAULT_STROKE,
+            cp.bg,
+          );
+        }
       }
 
       // Calculate cell width from column widths

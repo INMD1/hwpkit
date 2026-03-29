@@ -54,8 +54,10 @@ export function buildGrid(kids: RowNode[], props: GridProps = {}): GridNode {
   return { tag: 'grid', props, kids };
 }
 
-export function buildRow(kids: CellNode[]): RowNode {
-  return { tag: 'row', kids };
+export function buildRow(kids: CellNode[], heightPt?: number): RowNode {
+  const node: RowNode = { tag: 'row', kids };
+  if (heightPt != null) node.heightPt = heightPt;
+  return node;
 }
 
 export function buildCell(
