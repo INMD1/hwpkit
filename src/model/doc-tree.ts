@@ -1,4 +1,4 @@
-import type { TextProps, ParaProps, CellProps, GridProps, PageDims, DocMeta } from './doc-props';
+import type { TextProps, ParaProps, CellProps, GridProps, PageDims, DocMeta, ImgLayout } from './doc-props';
 
 // ─── 노드 종류 ─────────────────────────────────────────────
 export type BlockTag =
@@ -24,6 +24,7 @@ export interface ImgNode {
   w: number;
   h: number;
   alt?: string;
+  layout?: ImgLayout;  // 배치/위치 정보 (없으면 inline으로 취급)
 }
 
 // ─── 인라인 노드 ───────────────────────────────────────────

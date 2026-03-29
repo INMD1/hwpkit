@@ -1,4 +1,27 @@
 export type Align = 'left' | 'center' | 'right' | 'justify';
+
+// ─── 이미지 배치 ────────────────────────────────────────────
+export type ImgWrap = 'inline' | 'square' | 'tight' | 'through' | 'none' | 'behind' | 'front';
+export type ImgHorzAlign = 'left' | 'center' | 'right';
+export type ImgVertAlign = 'top' | 'center' | 'bottom';
+export type ImgHorzRelTo = 'margin' | 'column' | 'page' | 'para';
+export type ImgVertRelTo = 'margin' | 'line' | 'page' | 'para';
+
+export interface ImgLayout {
+  wrap: ImgWrap;
+  horzAlign?: ImgHorzAlign;   // 정렬 기준 (xPt 없을 때)
+  vertAlign?: ImgVertAlign;   // 정렬 기준 (yPt 없을 때)
+  horzRelTo?: ImgHorzRelTo;   // 가로 기준점
+  vertRelTo?: ImgVertRelTo;   // 세로 기준점
+  xPt?: number;               // 명시적 가로 오프셋 (pt)
+  yPt?: number;               // 명시적 세로 오프셋 (pt)
+  distT?: number;             // 텍스트와의 거리 top (pt)
+  distB?: number;
+  distL?: number;
+  distR?: number;
+  behindDoc?: boolean;        // 텍스트 뒤에 배치
+  zOrder?: number;
+}
 export type VAlign = 'top' | 'mid' | 'bot';
 export type Heading = 1 | 2 | 3 | 4 | 5 | 6;
 export type StrokeKind = 'solid' | 'dash' | 'dot' | 'double' | 'none';
@@ -100,6 +123,7 @@ export const A4_LANDSCAPE: PageDims = {
  * orient === 'portrait'일 때 wPt > hPt이면 swap하여
  * 방향과 치수가 항상 일치하도록 정규화합니다.
  */
+
 export function normalizeDims(dims: PageDims): PageDims {
   const orient = dims.orient ?? 'portrait';
   if (orient === 'landscape' && dims.wPt < dims.hPt) {

@@ -1,13 +1,28 @@
-import type { Encoder } from '../../contract/encoder';
-import type { DocRoot, ParaNode, SpanNode, GridNode, ContentNode, ImgNode, SheetNode, CellNode } from '../../model/doc-tree';
-import type { Outcome } from '../../contract/result';
-import type { PageDims, TextProps, ParaProps, CellProps, Stroke } from '../../model/doc-props';
-import { A4, DEFAULT_STROKE, normalizeDims } from '../../model/doc-props';
-import { succeed, fail } from '../../contract/result';
-import { Metric, safeFontToKr } from '../../safety/StyleBridge';
-import { ArchiveKit } from '../../toolkit/ArchiveKit';
-import { TextKit } from '../../toolkit/TextKit';
-import { registry } from '../../pipeline/registry';
+import type { Encoder } from "../../contract/encoder";
+import type {
+  DocRoot,
+  ParaNode,
+  SpanNode,
+  GridNode,
+  ContentNode,
+  ImgNode,
+  SheetNode,
+  CellNode,
+} from "../../model/doc-tree";
+import type { Outcome } from "../../contract/result";
+import type {
+  PageDims,
+  TextProps,
+  ParaProps,
+  CellProps,
+  Stroke,
+} from "../../model/doc-props";
+import { A4, DEFAULT_STROKE, normalizeDims } from "../../model/doc-props";
+import { succeed, fail } from "../../contract/result";
+import { Metric, safeFontToKr } from "../../safety/StyleBridge";
+import { ArchiveKit } from "../../toolkit/ArchiveKit";
+import { TextKit } from "../../toolkit/TextKit";
+import { registry } from "../../pipeline/registry";
 
 // ─── All HWPX namespaces ────────────────────────────────────
 const NS = [
@@ -26,7 +41,7 @@ const NS = [
   'xmlns:hwpunitchar="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar"',
   'xmlns:epub="http://www.idpf.org/2007/ops"',
   'xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"',
-].join(' ');
+].join(" ");
 
 // ─── Registries for IDRef system ────────────────────────────
 
@@ -48,13 +63,17 @@ interface ParaPrDef {
   align: string;
   listType?: string;
   listLevel?: number;
-  intentHwp: number;   // first-line indent in HWPUNIT
-  prevHwp: number;     // space before paragraph in HWPUNIT
-  nextHwp: number;     // space after paragraph in HWPUNIT
+  intentHwp: number; // first-line indent in HWPUNIT
+  prevHwp: number; // space before paragraph in HWPUNIT
+  nextHwp: number; // space after paragraph in HWPUNIT
   lineSpacing: number; // line spacing percentage (e.g., 160 = 160%)
 }
 
-interface BinEntry { id: string; name: string; data: Uint8Array }
+interface BinEntry {
+  id: string;
+  name: string;
+  data: Uint8Array;
+}
 
 interface HwpxCtx {
   charPrs: CharPrDef[];
@@ -71,15 +90,15 @@ interface HwpxCtx {
 }
 
 function charPrKey(p: TextProps): string {
-  return `${p.b ? 1 : 0}|${p.i ? 1 : 0}|${p.u ? 1 : 0}|${p.s ? 1 : 0}|${p.pt ?? 10}|${p.color ?? '000000'}|${p.font ?? ''}|${p.bg ?? ''}`;
+  return `${p.b ? 1 : 0}|${p.i ? 1 : 0}|${p.u ? 1 : 0}|${p.s ? 1 : 0}|${p.pt ?? 10}|${p.color ?? "000000"}|${p.font ?? ""}|${p.bg ?? ""}`;
 }
 
 function paraPrKey(p: ParaProps): string {
-  return `${p.align ?? 'left'}|${p.listOrd ?? ''}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}`;
+  return `${p.align ?? "left"}|${p.listOrd ?? ""}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}`;
 }
 
 function registerFont(name: string, ctx: HwpxCtx): number {
-  const n = name || '굴림체';
+  const n = name || "굴림체";
   const existing = ctx.fontMap.get(n);
   if (existing !== undefined) return existing;
   const id = ctx.fonts.length;
@@ -93,7 +112,7 @@ function registerCharPr(props: TextProps, ctx: HwpxCtx): number {
   const existing = ctx.charPrMap.get(key);
   if (existing !== undefined) return existing;
 
-  const fontName = safeFontToKr(props.font) || '굴림체';
+  const fontName = safeFontToKr(props.font) || "굴림체";
   const fontId = registerFont(fontName, ctx);
 
   const id = ctx.charPrs.length;
@@ -102,9 +121,9 @@ function registerCharPr(props: TextProps, ctx: HwpxCtx): number {
     height: Metric.ptToHHeight(props.pt ?? 10),
     bold: !!props.b,
     italic: !!props.i,
-    underline: props.u ? 'BOTTOM' : 'NONE',
-    strikeout: props.s ? 'SOLID' : 'NONE',
-    textColor: props.color ? `#${props.color}` : '#000000',
+    underline: props.u ? "BOTTOM" : "NONE",
+    strikeout: props.s ? "SOLID" : "NONE",
+    textColor: props.color ? `#${props.color}` : "#000000",
     fontName,
     fontId,
     bg: props.bg,
@@ -122,14 +141,14 @@ function registerParaPr(props: ParaProps, ctx: HwpxCtx): number {
   const id = ctx.paraPrs.length;
   const def: ParaPrDef = {
     id,
-    align: (props.align ?? 'left').toUpperCase(),
+    align: (props.align ?? "left").toUpperCase(),
     intentHwp: props.indentPt ? Metric.ptToHwp(props.indentPt) : 0,
-    prevHwp:   props.spaceBefore ? Metric.ptToHwp(props.spaceBefore) : 0,
-    nextHwp:   props.spaceAfter  ? Metric.ptToHwp(props.spaceAfter)  : 0,
+    prevHwp: props.spaceBefore ? Metric.ptToHwp(props.spaceBefore) : 0,
+    nextHwp: props.spaceAfter ? Metric.ptToHwp(props.spaceAfter) : 0,
     lineSpacing: props.lineHeight ? Math.round(props.lineHeight * 100) : 160,
   };
   if (props.listOrd !== undefined) {
-    def.listType = props.listOrd ? 'DIGIT' : 'BULLET';
+    def.listType = props.listOrd ? "DIGIT" : "BULLET";
     def.listLevel = props.listLv ?? 0;
   }
   ctx.paraPrs.push(def);
@@ -141,23 +160,25 @@ function registerParaPr(props: ParaProps, ctx: HwpxCtx): number {
 
 function scanContent(kids: ContentNode[], ctx: HwpxCtx): void {
   for (const kid of kids) {
-    if (kid.tag === 'para') scanPara(kid, ctx);
-    else if (kid.tag === 'grid') scanGrid(kid, ctx);
+    if (kid.tag === "para") scanPara(kid, ctx);
+    else if (kid.tag === "grid") scanGrid(kid, ctx);
   }
 }
 
 function scanPara(para: ParaNode, ctx: HwpxCtx): void {
   registerParaPr(para.props, ctx);
   for (const kid of para.kids) {
-    if (kid.tag === 'span') registerCharPr(kid.props, ctx);
-    else if (kid.tag === 'img') registerImage(kid, ctx);
+    if (kid.tag === "span") registerCharPr(kid.props, ctx);
+    else if (kid.tag === "img") {
+      registerImage(kid, ctx);
+      console.log(para.kids);
+    }
   }
 }
 
 function scanGrid(grid: GridNode, ctx: HwpxCtx): void {
   for (const row of grid.kids)
-    for (const cell of row.kids)
-      for (const p of cell.kids) scanPara(p, ctx);
+    for (const cell of row.kids) for (const p of cell.kids) scanPara(p, ctx);
 }
 
 function scanParas(paras: ParaNode[], ctx: HwpxCtx): void {
@@ -167,16 +188,16 @@ function scanParas(paras: ParaNode[], ctx: HwpxCtx): void {
 // ─── Image handling ─────────────────────────────────────────
 
 function mimeToExt(mime: string): string {
-  if (mime.includes('jpeg')) return 'jpg';
-  if (mime.includes('gif')) return 'gif';
-  if (mime.includes('bmp')) return 'bmp';
-  return 'png';
+  if (mime.includes("jpeg")) return "jpg";
+  if (mime.includes("gif")) return "gif";
+  if (mime.includes("bmp")) return "bmp";
+  return "png";
 }
 
 function registerImage(img: ImgNode, ctx: HwpxCtx): void {
   if ((img as any)._binId) return;
   const ext = mimeToExt(img.mime);
-  const id = `BIN${String(ctx.nextBinNum).padStart(4, '0')}`;
+  const id = `BIN${String(ctx.nextBinNum).padStart(4, "0")}`;
   const name = `${id}.${ext}`;
   ctx.nextBinNum++;
   const data = TextKit.base64Decode(img.b64);
@@ -186,17 +207,27 @@ function registerImage(img: ImgNode, ctx: HwpxCtx): void {
 
 // ─── BorderFill ─────────────────────────────────────────────
 
-function addBorderFill(ctx: HwpxCtx, stroke?: Stroke, bgColor?: string): number {
+function addBorderFill(
+  ctx: HwpxCtx,
+  stroke?: Stroke,
+  bgColor?: string,
+): number {
   const id = ctx.borderFills.length + 1;
   const s = stroke ?? DEFAULT_STROKE;
-  const kindMap: Record<string, string> = { solid: 'SOLID', dash: 'DASH', dot: 'DOT', double: 'DOUBLE', none: 'NONE' };
-  const type = kindMap[s.kind] ?? 'SOLID';
+  const kindMap: Record<string, string> = {
+    solid: "SOLID",
+    dash: "DASH",
+    dot: "DOT",
+    double: "DOUBLE",
+    none: "NONE",
+  };
+  const type = kindMap[s.kind] ?? "SOLID";
   const w = `${(s.pt * 0.3528).toFixed(2)} mm`;
-  const c = s.color.startsWith('#') ? s.color : `#${s.color}`;
+  const c = s.color.startsWith("#") ? s.color : `#${s.color}`;
 
-  let fill = '';
+  let fill = "";
   if (bgColor) {
-    const bc = bgColor.startsWith('#') ? bgColor : `#${bgColor}`;
+    const bc = bgColor.startsWith("#") ? bgColor : `#${bgColor}`;
     fill = `<hc:fillBrush><hc:winBrush faceColor="${bc}" hatchColor="none" alpha="0"/></hc:fillBrush>`;
   }
 
@@ -208,7 +239,7 @@ function addBorderFill(ctx: HwpxCtx, stroke?: Stroke, bgColor?: string): number 
 // ─── Encoder class ──────────────────────────────────────────
 
 export class HwpxEncoder implements Encoder {
-  readonly format = 'hwpx';
+  readonly format = "hwpx";
 
   async encode(doc: DocRoot): Promise<Outcome<Uint8Array>> {
     try {
@@ -216,22 +247,31 @@ export class HwpxEncoder implements Encoder {
       const dims = normalizeDims(sheet?.dims ?? A4);
 
       // Available width = page width - left margin - right margin (in HWPUNIT)
-      const availableWidth = Metric.ptToHwp(dims.wPt) - Metric.ptToHwp(dims.ml) - Metric.ptToHwp(dims.mr);
+      const availableWidth =
+        Metric.ptToHwp(dims.wPt) -
+        Metric.ptToHwp(dims.ml) -
+        Metric.ptToHwp(dims.mr);
 
       const ctx: HwpxCtx = {
-        charPrs: [], charPrMap: new Map(),
-        paraPrs: [], paraPrMap: new Map(),
-        borderFills: [], bins: [], nextBinNum: 1, nextElementId: 10000,
+        charPrs: [],
+        charPrMap: new Map(),
+        paraPrs: [],
+        paraPrMap: new Map(),
+        borderFills: [],
+        bins: [],
+        nextBinNum: 1,
+        nextElementId: 10000,
         availableWidth,
-        fonts: [], fontMap: new Map(),
+        fonts: [],
+        fontMap: new Map(),
       };
 
       // Default borderFill (id=1, no border)
-      addBorderFill(ctx, { kind: 'none', pt: 0.1, color: '000000' });
+      addBorderFill(ctx, { kind: "none", pt: 0.1, color: "000000" });
       // Table border borderFill (id=2)
       addBorderFill(ctx, DEFAULT_STROKE);
       // Default no-border for text areas (id=3)
-      addBorderFill(ctx, { kind: 'none', pt: 0.1, color: '000000' });
+      addBorderFill(ctx, { kind: "none", pt: 0.1, color: "000000" });
 
       // Register default charPr (id=0) and paraPr (id=0)
       registerCharPr({}, ctx);
@@ -251,16 +291,19 @@ export class HwpxEncoder implements Encoder {
       const headerData = TextKit.encode(headerXml(dims, doc.meta, ctx));
 
       const entries: { name: string; data: Uint8Array }[] = [
-        { name: 'mimetype',                   data: TextKit.encode('application/hwp+zip') },
-        { name: 'version.xml',                data: TextKit.encode(VERSION_XML) },
-        { name: 'Contents/header.xml',         data: headerData },
-        { name: 'Contents/section0.xml',       data: sectionData },
-        { name: 'Preview/PrvText.txt',         data: TextKit.encode(previewText) },
-        { name: 'settings.xml',               data: TextKit.encode(SETTINGS_XML) },
-        { name: 'META-INF/container.rdf',      data: TextKit.encode(CONTAINER_RDF) },
-        { name: 'Contents/content.hpf',        data: TextKit.encode(contentHpf(ctx, doc.meta)) },
-        { name: 'META-INF/container.xml',      data: TextKit.encode(CONTAINER_XML) },
-        { name: 'META-INF/manifest.xml',       data: TextKit.encode(MANIFEST_XML) },
+        { name: "mimetype", data: TextKit.encode("application/hwp+zip") },
+        { name: "version.xml", data: TextKit.encode(VERSION_XML) },
+        { name: "Contents/header.xml", data: headerData },
+        { name: "Contents/section0.xml", data: sectionData },
+        { name: "Preview/PrvText.txt", data: TextKit.encode(previewText) },
+        { name: "settings.xml", data: TextKit.encode(SETTINGS_XML) },
+        { name: "META-INF/container.rdf", data: TextKit.encode(CONTAINER_RDF) },
+        {
+          name: "Contents/content.hpf",
+          data: TextKit.encode(contentHpf(ctx, doc.meta)),
+        },
+        { name: "META-INF/container.xml", data: TextKit.encode(CONTAINER_XML) },
+        { name: "META-INF/manifest.xml", data: TextKit.encode(MANIFEST_XML) },
       ];
 
       for (const bin of ctx.bins) {
@@ -287,15 +330,23 @@ const MANIFEST_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><o
 const SETTINGS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><ha:HWPApplicationSetting xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"><ha:CaretPosition listIDRef="0" paraIDRef="0" pos="0"/><config:config-item-set name="PrintInfo"><config:config-item name="PrintMethod" type="short">0</config:config-item><config:config-item name="ZoomX" type="short">100</config:config-item><config:config-item name="ZoomY" type="short">100</config:config-item></config:config-item-set></ha:HWPApplicationSetting>`;
 
 function contentHpf(ctx: HwpxCtx, meta?: any): string {
-  const title = esc(meta?.title ?? '');
-  const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const title = esc(meta?.title ?? "");
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 
-  let items = `<opf:item id="header" href="Contents/header.xml" media-type="application/xml"/>`
-    + `<opf:item id="section0" href="Contents/section0.xml" media-type="application/xml"/>`
-    + `<opf:item id="settings" href="settings.xml" media-type="application/xml"/>`;
+  let items =
+    `<opf:item id="header" href="Contents/header.xml" media-type="application/xml"/>` +
+    `<opf:item id="section0" href="Contents/section0.xml" media-type="application/xml"/>` +
+    `<opf:item id="settings" href="settings.xml" media-type="application/xml"/>`;
   for (const bin of ctx.bins) {
-    const ext = bin.name.split('.').pop()?.toLowerCase() ?? 'png';
-    const ct = ext === 'png' ? 'image/png' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : ext === 'gif' ? 'image/gif' : 'image/bmp';
+    const ext = bin.name.split(".").pop()?.toLowerCase() ?? "png";
+    const ct =
+      ext === "png"
+        ? "image/png"
+        : ext === "jpg" || ext === "jpeg"
+          ? "image/jpeg"
+          : ext === "gif"
+            ? "image/gif"
+            : "image/bmp";
     items += `<opf:item id="${bin.id}" href="BinData/${bin.name}" media-type="${ct}" isEmbeded="1"/>`;
   }
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><opf:package ${NS} version="" unique-identifier="" id=""><opf:metadata><opf:title>${title}</opf:title><opf:language>ko</opf:language><opf:meta name="creator" content="text"/><opf:meta name="subject" content="text"/><opf:meta name="description" content="text"/><opf:meta name="CreatedDate" content="text">${now}</opf:meta><opf:meta name="ModifiedDate" content="text">${now}</opf:meta><opf:meta name="keyword" content="text"/></opf:metadata><opf:manifest>${items}</opf:manifest><opf:spine><opf:itemref idref="header" linear="yes"/><opf:itemref idref="section0" linear="yes"/></opf:spine></opf:package>`;
@@ -306,7 +357,15 @@ function contentHpf(ctx: HwpxCtx, meta?: any): string {
 function headerXml(dims: PageDims, meta: any, ctx: HwpxCtx): string {
   // Font face definitions — register all unique fonts per language group
   const fontCount = ctx.fonts.length || 1;
-  const langs = ['HANGUL', 'LATIN', 'HANJA', 'JAPANESE', 'OTHER', 'SYMBOL', 'USER'];
+  const langs = [
+    "HANGUL",
+    "LATIN",
+    "HANJA",
+    "JAPANESE",
+    "OTHER",
+    "SYMBOL",
+    "USER",
+  ];
   let fontFaces = `<hh:fontfaces itemCnt="${langs.length}">`;
   for (const lang of langs) {
     fontFaces += `<hh:fontface lang="${lang}" fontCnt="${fontCount}">`;
@@ -321,50 +380,54 @@ function headerXml(dims: PageDims, meta: any, ctx: HwpxCtx): string {
   fontFaces += `</hh:fontfaces>`;
 
   // CharPr definitions
-  let charPrXml = '';
+  let charPrXml = "";
   for (const cp of ctx.charPrs) {
-    const bold = cp.bold ? '<hh:bold/>' : '';
-    const italic = cp.italic ? '<hh:italic/>' : '';
+    const bold = cp.bold ? "<hh:bold/>" : "";
+    const italic = cp.italic ? "<hh:italic/>" : "";
     const fid = cp.fontId ?? 0;
     charPrXml += `<hh:charPr id="${cp.id}" height="${cp.height}" textColor="${cp.textColor}" shadeColor="none" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="3"><hh:fontRef hangul="${fid}" latin="${fid}" hanja="${fid}" japanese="${fid}" other="${fid}" symbol="${fid}" user="${fid}"/><hh:ratio hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100"/><hh:spacing hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/><hh:relSz hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100"/><hh:offset hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>${bold}${italic}<hh:underline type="${cp.underline}" shape="SOLID" color="#000000"/><hh:strikeout shape="${cp.strikeout}" color="#000000"/><hh:outline type="NONE"/><hh:shadow type="NONE" color="#C0C0C0" offsetX="10" offsetY="10"/></hh:charPr>`;
   }
 
   // ParaPr definitions
-  let paraPrXml = '';
+  let paraPrXml = "";
   for (const pp of ctx.paraPrs) {
     const marginSwitch = `<hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar"><hh:margin><hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="0" unit="HWPUNIT"/><hc:right value="0" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="PERCENT" value="${pp.lineSpacing}" unit="HWPUNIT"/></hp:case><hp:default><hh:margin><hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="0" unit="HWPUNIT"/><hc:right value="0" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="PERCENT" value="${pp.lineSpacing}" unit="HWPUNIT"/></hp:default></hp:switch>`;
     paraPrXml += `<hh:paraPr id="${pp.id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="0" suppressLineNumbers="0" checked="0"><hh:align horizontal="${pp.align}" vertical="BASELINE"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="BREAK_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/>${marginSwitch}<hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>`;
   }
 
   // BorderFill definitions
-  const borderFillXml = ctx.borderFills.map(bf => bf.xml).join('');
+  const borderFillXml = ctx.borderFills.map((bf) => bf.xml).join("");
 
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hh:head ${NS} version="1.4" secCnt="1"><hh:beginNum page="1" footnote="1" endnote="1" pic="1" tbl="1" equation="1"/><hh:refList>${fontFaces}<hh:borderFills itemCnt="${ctx.borderFills.length}">${borderFillXml}</hh:borderFills><hh:charProperties itemCnt="${ctx.charPrs.length}">${charPrXml}</hh:charProperties><hh:paraProperties itemCnt="${ctx.paraPrs.length}">${paraPrXml}</hh:paraProperties><hh:tabProperties itemCnt="1"><hh:tabPr id="0" autoTabLeft="0" autoTabRight="0"/></hh:tabProperties><hh:styles itemCnt="1"><hh:style id="0" type="PARA" name="바탕글" engName="Normal" paraPrIDRef="0" charPrIDRef="0" nextStyleIDRef="0" langID="1042" lockForm="0"/></hh:styles></hh:refList><hh:compatibleDocument targetProgram="HWP201X"><hh:layoutCompatibility/></hh:compatibleDocument><hh:docOption><hh:linkinfo path="" pageInherit="1" footnoteInherit="0"/></hh:docOption><hh:trackchageConfig flags="56"/></hh:head>`;
 }
 
 // ─── section0.xml ───────────────────────────────────────────
 
-function sectionXml(sheet: SheetNode | undefined, dims: PageDims, ctx: HwpxCtx): string {
+function sectionXml(
+  sheet: SheetNode | undefined,
+  dims: PageDims,
+  ctx: HwpxCtx,
+): string {
   const kids = sheet?.kids ?? [];
 
   // First paragraph includes secPr
   // WIDELY = portrait (standard), NARROWLY = landscape
-  const secPr = `<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0"><hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/><hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/><hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/><hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/><hp:pagePr landscape="${dims.orient === 'landscape' ? 'NARROWLY' : 'WIDELY'}" width="${Metric.ptToHwp(dims.wPt)}" height="${Metric.ptToHwp(dims.hPt)}" gutterType="LEFT_ONLY"><hp:margin header="2834" footer="2834" gutter="0" left="${Metric.ptToHwp(dims.ml)}" right="${Metric.ptToHwp(dims.mr)}" top="${Metric.ptToHwp(dims.mt)}" bottom="${Metric.ptToHwp(dims.mb)}"/></hp:pagePr><hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="284" belowLine="568" aboveLine="852"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr><hp:endNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="0" type="NONE" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="0" belowLine="576" aboveLine="864"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="END_OF_DOCUMENT" beneathText="0"/></hp:endNotePr><hp:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="EVEN" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="ODD" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill></hp:secPr><hp:ctrl><hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/></hp:ctrl>`;
+  const secPr = `<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0"><hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/><hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/><hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/><hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/><hp:pagePr landscape="${dims.orient === "landscape" ? "NARROWLY" : "WIDELY"}" width="${Metric.ptToHwp(dims.wPt)}" height="${Metric.ptToHwp(dims.hPt)}" gutterType="LEFT_ONLY"><hp:margin header="2834" footer="2834" gutter="0" left="${Metric.ptToHwp(dims.ml)}" right="${Metric.ptToHwp(dims.mr)}" top="${Metric.ptToHwp(dims.mt)}" bottom="${Metric.ptToHwp(dims.mb)}"/></hp:pagePr><hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="284" belowLine="568" aboveLine="852"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr><hp:endNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="0" type="NONE" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="0" belowLine="576" aboveLine="864"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="END_OF_DOCUMENT" beneathText="0"/></hp:endNotePr><hp:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="EVEN" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="ODD" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill></hp:secPr><hp:ctrl><hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/></hp:ctrl>`;
 
-  let contentXml = '';
+  let contentXml = "";
   let isFirst = true;
 
   const defaultLineseg = `<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="1000" textheight="1000" baseline="850" spacing="600" horzpos="0" horzsize="${ctx.availableWidth}" flags="393216"/></hp:linesegarray>`;
 
   for (const kid of kids) {
-    if (kid.tag === 'para') {
-      contentXml += encodePara(kid, ctx, isFirst ? secPr : '');
+    if (kid.tag === "para") {
+      contentXml += encodePara(kid, ctx, isFirst ? secPr : "");
       isFirst = false;
-    } else if (kid.tag === 'grid') {
+    } else if (kid.tag === "grid") {
       // Grid is embedded inside a paragraph's run.
       // When secPr is present, put it in a separate run (matching real HWPX structure).
       const gridXml = encodeGrid(kid, ctx);
-      const prefix = isFirst ? secPr : '';
+      const prefix = isFirst ? secPr : "";
       const runsXml = prefix
         ? `<hp:run charPrIDRef="0">${prefix}</hp:run><hp:run charPrIDRef="0">${gridXml}<hp:t></hp:t></hp:run>`
         : `<hp:run charPrIDRef="0">${gridXml}<hp:t></hp:t></hp:run>`;
@@ -374,7 +437,7 @@ function sectionXml(sheet: SheetNode | undefined, dims: PageDims, ctx: HwpxCtx):
   }
 
   // If empty, add one empty paragraph with secPr
-  if (contentXml === '') {
+  if (contentXml === "") {
     contentXml = `<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0">${secPr}<hp:t></hp:t></hp:run>${defaultLineseg}</hp:p>`;
   }
 
@@ -392,41 +455,49 @@ function estimateCellHeight(cell: CellNode, ctx: HwpxCtx): number {
     const lineSpacing = paraPr ? paraPr.lineSpacing : 160;
     const spaceBefore = paraPr ? paraPr.prevHwp : 0;
     const spaceAfter = paraPr ? paraPr.nextHwp : 0;
-    const lineHeight = Math.round(fontSize * lineSpacing / 100);
+    const lineHeight = Math.round((fontSize * lineSpacing) / 100);
     contentHeight += lineHeight + spaceBefore + spaceAfter;
   }
   if (contentHeight === 0) contentHeight = Math.round(1000 * 1.6); // 10pt @ 160%
   return contentHeight + topPad + botPad;
 }
 
-function encodePara(para: ParaNode, ctx: HwpxCtx, secPr: string = '', availWidth?: number): string {
+function encodePara(
+  para: ParaNode,
+  ctx: HwpxCtx,
+  secPr: string = "",
+  availWidth?: number,
+): string {
   const paraPrId = registerParaPr(para.props, ctx);
 
   // Detect page break: paragraph starts on new page if any span contains a pb node
   const hasPageBreak = para.kids.some(
-    k => k.tag === 'span' && k.kids.some(c => c.tag === 'pb'),
+    (k) => k.tag === "span" && k.kids.some((c) => c.tag === "pb"),
   );
 
-  let runs = '';
+  let runs = "";
   for (const kid of para.kids) {
-    if (kid.tag === 'span') {
+    if (kid.tag === "span") {
       runs += encodeRun(kid, ctx);
-    } else if (kid.tag === 'img') {
+    } else if (kid.tag === "img") {
       runs += encodeImage(kid, ctx);
     }
   }
 
   // If no runs, add default empty run
-  if (runs === '') {
+  if (runs === "") {
     runs = `<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>`;
   }
 
   // Inject secPr into first run
   if (secPr) {
     // Insert secPr after the first charPrIDRef attribute close
-    const firstRunEnd = runs.indexOf('>');
+    const firstRunEnd = runs.indexOf(">");
     if (firstRunEnd > -1) {
-      runs = runs.substring(0, firstRunEnd + 1) + secPr + runs.substring(firstRunEnd + 1);
+      runs =
+        runs.substring(0, firstRunEnd + 1) +
+        secPr +
+        runs.substring(firstRunEnd + 1);
     }
   }
 
@@ -443,13 +514,13 @@ function encodePara(para: ParaNode, ctx: HwpxCtx, secPr: string = '', availWidth
   const horzsize = availWidth ?? ctx.availableWidth;
   const linesegarray = `<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="${vertsize}" textheight="${textheight}" baseline="${baseline}" spacing="${spacing}" horzpos="0" horzsize="${horzsize}" flags="393216"/></hp:linesegarray>`;
 
-  return `<hp:p id="0" paraPrIDRef="${paraPrId}" styleIDRef="0" pageBreak="${hasPageBreak ? '1' : '0'}" columnBreak="0" merged="0">${runs}${linesegarray}</hp:p>`;
+  return `<hp:p id="0" paraPrIDRef="${paraPrId}" styleIDRef="0" pageBreak="${hasPageBreak ? "1" : "0"}" columnBreak="0" merged="0">${runs}${linesegarray}</hp:p>`;
 }
 
 /** Get the font size (in HWPX height units, 1000=10pt) for lineseg computation */
 function getFontSizeForPara(para: ParaNode, ctx: HwpxCtx): number {
   for (const kid of para.kids) {
-    if (kid.tag === 'span') {
+    if (kid.tag === "span") {
       const charPrId = ctx.charPrMap.get(charPrKey(kid.props));
       if (charPrId !== undefined && ctx.charPrs[charPrId]) {
         return ctx.charPrs[charPrId].height;
@@ -464,27 +535,45 @@ function encodeRun(span: SpanNode, ctx: HwpxCtx): string {
 
   const parts: string[] = [];
   for (const kid of span.kids) {
-    if (kid.tag === 'txt') {
+    if (kid.tag === "txt") {
       if (kid.content) {
         parts.push(`<hp:t>${esc(kid.content)}</hp:t>`);
       } else {
         parts.push(`<hp:t></hp:t>`);
       }
-    } else if (kid.tag === 'pagenum') {
-      const fmt = kid.format === 'roman' ? 'ROMAN_LOWER' : kid.format === 'romanCaps' ? 'ROMAN_UPPER' : 'DIGIT';
+    } else if (kid.tag === "pagenum") {
+      const fmt =
+        kid.format === "roman"
+          ? "ROMAN_LOWER"
+          : kid.format === "romanCaps"
+            ? "ROMAN_UPPER"
+            : "DIGIT";
       parts.push(`<hp:pageNum pageStartsOn="BOTH" formatType="${fmt}"/>`);
-    } else if (kid.tag === 'br') {
+    } else if (kid.tag === "br") {
       parts.push(`<hp:t>\n</hp:t>`);
     }
     // pb is handled at paragraph level (pageBreak attribute), skip here
   }
 
-  return `<hp:run charPrIDRef="${charPrId}">${parts.join('')}</hp:run>`;
+  return `<hp:run charPrIDRef="${charPrId}">${parts.join("")}</hp:run>`;
 }
+
+// HWPX textWrap 매핑
+const WRAP_HWPX: Record<string, string> = {
+  inline: 'TOP_AND_BOTTOM', square: 'TOP_AND_BOTTOM',
+  tight: 'BOTH_SIDES', through: 'BOTH_SIDES',
+  none: 'TOP_AND_BOTTOM', behind: 'TOP_AND_BOTTOM', front: 'TOP_AND_BOTTOM',
+};
+const HORZ_RELTO_HWPX: Record<string, string> = {
+  para: 'PARA', margin: 'MARGIN', page: 'PAGE', column: 'COLUMN',
+};
+const VERT_RELTO_HWPX: Record<string, string> = {
+  para: 'PARA', margin: 'MARGIN', page: 'PAGE', line: 'LINE',
+};
 
 function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
   const binId = (img as any)._binId;
-  if (!binId) return '';
+  if (!binId) return "";
 
   const charPrId = registerCharPr({}, ctx);
   const w = Metric.ptToHwp(img.w);
@@ -492,10 +581,26 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
   const cx = Math.round(w / 2);
   const cy = Math.round(h / 2);
 
+  const layout = img.layout;
+  const isInline = !layout || layout.wrap === 'inline';
+
+  const textWrap = layout ? (WRAP_HWPX[layout.wrap] ?? 'TOP_AND_BOTTOM') : 'TOP_AND_BOTTOM';
+  const treatAsChar = isInline ? '1' : '0';
+  const flowWithText = isInline ? '1' : '0';
+  const allowOverlap = isInline ? '0' : '1';
+
+  const horzRelTo = layout?.horzRelTo ? (HORZ_RELTO_HWPX[layout.horzRelTo] ?? 'PARA') : 'PARA';
+  const vertRelTo = layout?.vertRelTo ? (VERT_RELTO_HWPX[layout.vertRelTo] ?? 'PARA') : 'PARA';
+
+  const ALIGN_H: Record<string, string> = { left: 'LEFT', center: 'CENTER', right: 'RIGHT' };
+  const ALIGN_V: Record<string, string> = { top: 'TOP', center: 'CENTER', bottom: 'BOTTOM' };
+  const horzAlign = layout?.horzAlign ? (ALIGN_H[layout.horzAlign] ?? 'LEFT') : 'LEFT';
+  const vertAlign = layout?.vertAlign ? (ALIGN_V[layout.vertAlign] ?? 'TOP') : 'TOP';
+  const horzOffset = layout?.xPt != null ? Metric.ptToHwp(layout.xPt) : 0;
+  const vertOffset = layout?.yPt != null ? Metric.ptToHwp(layout.yPt) : 0;
+
   // hp:pic children must follow the exact HWPX spec order.
-  // Critical: image binary reference uses hc: namespace (not hp:).
-  // hp:imgRect must use hc:pt0..pt3 child elements (not flat attributes).
-  return `<hp:run charPrIDRef="${charPrId}"><hp:pic id="${ctx.nextElementId++}" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="0" reverse="0"><hp:offset x="0" y="0"/><hp:orgSz width="${w}" height="${h}"/><hp:curSz width="${w}" height="${h}"/><hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="${cx}" centerY="${cy}" rotateimage="1"/><hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo><hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${w}" y="0"/><hc:pt2 x="${w}" y="${h}"/><hc:pt3 x="0" y="${h}"/></hp:imgRect><hp:imgClip left="0" right="0" top="0" bottom="0"/><hp:inMargin left="0" right="0" top="0" bottom="0"/><hp:imgDim dimwidth="${w}" dimheight="${h}"/><hc:img binaryItemIDRef="${binId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/><hp:effects/><hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="0" right="0" top="0" bottom="0"/></hp:pic><hp:t></hp:t></hp:run>`;
+  return `<hp:run charPrIDRef="${charPrId}"><hp:pic id="${ctx.nextElementId++}" zOrder="0" numberingType="PICTURE" textWrap="${textWrap}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="0" reverse="0"><hp:offset x="0" y="0"/><hp:orgSz width="${w}" height="${h}"/><hp:curSz width="${w}" height="${h}"/><hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="${cx}" centerY="${cy}" rotateimage="1"/><hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo><hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${w}" y="0"/><hc:pt2 x="${w}" y="${h}"/><hc:pt3 x="0" y="${h}"/></hp:imgRect><hp:imgClip left="0" right="0" top="0" bottom="0"/><hp:inMargin left="0" right="0" top="0" bottom="0"/><hp:imgDim dimwidth="${w}" dimheight="${h}"/><hc:img binaryItemIDRef="${binId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/><hp:effects/><hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="${treatAsChar}" affectLSpacing="0" flowWithText="${flowWithText}" allowOverlap="${allowOverlap}" holdAnchorAndSO="0" vertRelTo="${vertRelTo}" horzRelTo="${horzRelTo}" vertAlign="${vertAlign}" horzAlign="${horzAlign}" vertOffset="${vertOffset}" horzOffset="${horzOffset}"/><hp:outMargin left="0" right="0" top="0" bottom="0"/></hp:pic><hp:t></hp:t></hp:run>`;
 }
 
 function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
@@ -517,12 +622,13 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
   if (grid.props.colWidths && grid.props.colWidths.length === colCount) {
     // Fill zero-width columns by distributing remaining space
     const srcPt = [...grid.props.colWidths];
-    const knownTotal = srcPt.filter(w => w > 0).reduce((s, w) => s + w, 0);
-    const zeroCount = srcPt.filter(w => w <= 0).length;
+    const knownTotal = srcPt.filter((w) => w > 0).reduce((s, w) => s + w, 0);
+    const zeroCount = srcPt.filter((w) => w <= 0).length;
     const remaining = Math.max(0, Metric.hwpToPt(totalWidth) - knownTotal);
     const zeroFill = zeroCount > 0 ? remaining / zeroCount : 0;
     for (let i = 0; i < srcPt.length; i++) {
-      if (srcPt[i] <= 0) srcPt[i] = zeroFill > 0 ? zeroFill : Metric.hwpToPt(defaultColW);
+      if (srcPt[i] <= 0)
+        srcPt[i] = zeroFill > 0 ? zeroFill : Metric.hwpToPt(defaultColW);
     }
     for (const wPt of srcPt) colWidths.push(Metric.ptToHwp(wPt));
   } else {
@@ -532,7 +638,8 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
   const rawTotal = colWidths.reduce((s, w) => s + w, 0);
   if (rawTotal > totalWidth * 1.05) {
     const scale = totalWidth / rawTotal;
-    for (let i = 0; i < colWidths.length; i++) colWidths[i] = Math.round(colWidths[i] * scale);
+    for (let i = 0; i < colWidths.length; i++)
+      colWidths[i] = Math.round(colWidths[i] * scale);
   }
   const actualTotal = colWidths.reduce((s, w) => s + w, 0);
 
@@ -554,11 +661,11 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
   const totalTableHeight = rowHeights.reduce((s, h) => s + h, 0);
 
   // Rows
-  let rowsXml = '';
+  let rowsXml = "";
   for (let ri = 0; ri < grid.kids.length; ri++) {
     const row = grid.kids[ri];
     const rowH = rowHeights[ri];
-    let cellsXml = '';
+    let cellsXml = "";
     let colIdx = 0;
     for (let ci = 0; ci < row.kids.length; ci++) {
       const cell = row.kids[ci];
@@ -566,56 +673,83 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
       // Cell borderFill
       let cellBfId = tblBfId;
       if (cell.props.bg) {
-        cellBfId = addBorderFill(ctx, grid.props.defaultStroke ?? DEFAULT_STROKE, cell.props.bg);
+        cellBfId = addBorderFill(
+          ctx,
+          grid.props.defaultStroke ?? DEFAULT_STROKE,
+          cell.props.bg,
+        );
       }
 
       // Calculate cell width from column widths
       let cellW = 0;
-      for (let sc = colIdx; sc < colIdx + cell.cs && sc < colWidths.length; sc++) cellW += colWidths[sc];
+      for (
+        let sc = colIdx;
+        sc < colIdx + cell.cs && sc < colWidths.length;
+        sc++
+      )
+        cellW += colWidths[sc];
       if (cellW === 0) cellW = defaultColW * cell.cs;
 
       // Cell inner width for lineseg (subtract left + right cell margins)
       const cellInnerW = Math.max(cellW - 282, 100);
 
       // Encode cell paragraphs with correct inner width
-      const parasXml = cell.kids.map(p => encodePara(p, ctx, '', cellInnerW)).join('');
+      const parasXml = cell.kids
+        .map((p) => encodePara(p, ctx, "", cellInnerW))
+        .join("");
 
-      cellsXml += `<hp:tc name="" header="0" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${cell.props.va === 'mid' ? 'CENTER' : cell.props.va === 'bot' ? 'BOTTOM' : 'TOP'}" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">${parasXml}</hp:subList><hp:cellAddr colAddr="${colIdx}" rowAddr="${ri}"/><hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/><hp:cellSz width="${cellW}" height="${rowH}"/><hp:cellMargin left="141" right="141" top="141" bottom="141"/></hp:tc>`;
+      cellsXml += `<hp:tc name="" header="0" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${cell.props.va === "mid" ? "CENTER" : cell.props.va === "bot" ? "BOTTOM" : "TOP"}" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">${parasXml}</hp:subList><hp:cellAddr colAddr="${colIdx}" rowAddr="${ri}"/><hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/><hp:cellSz width="${cellW}" height="${rowH}"/><hp:cellMargin left="141" right="141" top="141" bottom="141"/></hp:tc>`;
       colIdx += cell.cs;
     }
     rowsXml += `<hp:tr>${cellsXml}</hp:tr>`;
   }
 
-  const headerRow = grid.props.headerRow ? ' repeatHeader="1"' : '';
+  const headerRow = grid.props.headerRow ? ' repeatHeader="1"' : "";
 
   return `<hp:tbl id="${ctx.nextElementId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE"${headerRow} rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="0"><hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="${totalTableHeight}" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="138" right="138" top="138" bottom="138"/><hp:inMargin left="138" right="138" top="138" bottom="138"/>${rowsXml}</hp:tbl>`;
 }
 
 function extractPreviewText(sheet?: SheetNode): string {
-  if (!sheet) return '';
+  if (!sheet) return "";
   const lines: string[] = [];
   for (const kid of sheet.kids) {
-    if (kid.tag === 'para') {
-      const text = kid.kids.map(k => {
-        if (k.tag === 'span') return k.kids.map(c => c.tag === 'txt' ? c.content : '').join('');
-        return '';
-      }).join('');
+    if (kid.tag === "para") {
+      const text = kid.kids
+        .map((k) => {
+          if (k.tag === "span")
+            return k.kids
+              .map((c) => (c.tag === "txt" ? c.content : ""))
+              .join("");
+          return "";
+        })
+        .join("");
       if (text) lines.push(text);
-    } else if (kid.tag === 'grid') {
+    } else if (kid.tag === "grid") {
       for (const row of kid.kids) {
-        const cells = row.kids.map(cell =>
-          cell.kids.map(p => p.kids.map(k => {
-            if (k.tag === 'span') return k.kids.map(c => c.tag === 'txt' ? c.content : '').join('');
-            return '';
-          }).join('')).join('')
+        const cells = row.kids.map((cell) =>
+          cell.kids
+            .map((p) =>
+              p.kids
+                .map((k) => {
+                  if (k.tag === "span")
+                    return k.kids
+                      .map((c) => (c.tag === "txt" ? c.content : ""))
+                      .join("");
+                  return "";
+                })
+                .join(""),
+            )
+            .join(""),
         );
-        lines.push(cells.join('\t'));
+        lines.push(cells.join("\t"));
       }
     }
   }
-  return lines.join('\r\n');
+  return lines.join("\r\n");
 }
 
-function esc(s: string): string { return TextKit.escapeXml(s); }
+function esc(s: string): string {
+  return TextKit.escapeXml(s);
+}
 
 registry.registerEncoder(new HwpxEncoder());

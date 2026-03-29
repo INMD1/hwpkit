@@ -420,16 +420,84 @@ function encodeRun(span: SpanNode, _ctx: EncCtx): string {
   return parts.join('');
 }
 
-function encodeImage(img: ImgNode, _ctx: EncCtx): string {
+function encodeImage(img: ImgNode, ctx: EncCtx): string {
   const rId = (img as any)._rId;
   if (!rId) return '';
 
   const cx = Metric.ptToEmu(img.w);
   const cy = Metric.ptToEmu(img.h);
   const alt = esc(img.alt ?? '');
+  const docPrId = ctx.nextId++;
 
-  return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:docPr id="${_ctx.nextId++}" name="Image" descr="${alt}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="Image"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${rId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
+  const graphic = `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="Image"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${rId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic>`;
+
+  const layout = img.layout;
+  const isInline = !layout || layout.wrap === 'inline';
+
+  if (isInline) {
+    return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:docPr id="${docPrId}" name="Image" descr="${alt}"/>${graphic}</wp:inline></w:drawing></w:r>`;
+  }
+
+  return `<w:r><w:drawing>${encodeAnchor(img, cx, cy, alt, docPrId, graphic, layout)}</w:drawing></w:r>`;
 }
+
+function encodeAnchor(
+  _img: ImgNode, cx: number, cy: number, alt: string, docPrId: number,
+  graphic: string, layout: NonNullable<ImgNode['layout']>,
+): string {
+  const distT = Metric.ptToEmu(layout.distT ?? 0);
+  const distB = Metric.ptToEmu(layout.distB ?? 0);
+  const distL = Metric.ptToEmu(layout.distL ?? 9144);   // DOCX 기본 0.18pt
+  const distR = Metric.ptToEmu(layout.distR ?? 9144);
+  const behindDoc = layout.behindDoc ? '1' : '0';
+  const relH = layout.zOrder ?? 251658240;
+
+  // 가로 위치
+  const horzRelFrom = HORZ_RELTO_DOCX[layout.horzRelTo ?? 'column'] ?? 'column';
+  let posH: string;
+  if (layout.xPt != null) {
+    posH = `<wp:positionH relativeFrom="${horzRelFrom}"><wp:posOffset>${Metric.ptToEmu(layout.xPt)}</wp:posOffset></wp:positionH>`;
+  } else {
+    const ha = HORZ_ALIGN_DOCX[layout.horzAlign ?? 'left'] ?? 'left';
+    posH = `<wp:positionH relativeFrom="${horzRelFrom}"><wp:align>${ha}</wp:align></wp:positionH>`;
+  }
+
+  // 세로 위치
+  const vertRelFrom = VERT_RELTO_DOCX[layout.vertRelTo ?? 'para'] ?? 'paragraph';
+  let posV: string;
+  if (layout.yPt != null) {
+    posV = `<wp:positionV relativeFrom="${vertRelFrom}"><wp:posOffset>${Metric.ptToEmu(layout.yPt)}</wp:posOffset></wp:positionV>`;
+  } else {
+    const va = VERT_ALIGN_DOCX[layout.vertAlign ?? 'top'] ?? 'top';
+    posV = `<wp:positionV relativeFrom="${vertRelFrom}"><wp:align>${va}</wp:align></wp:positionV>`;
+  }
+
+  // 텍스트 감싸기
+  const wrapXml = WRAP_DOCX[layout.wrap] ?? '<wp:wrapSquare wrapText="bothSides"/>';
+
+  return `<wp:anchor distT="${distT}" distB="${distB}" distL="${distL}" distR="${distR}" simplePos="0" relativeHeight="${relH}" behindDoc="${behindDoc}" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/>${posH}${posV}<wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>${wrapXml}<wp:docPr id="${docPrId}" name="Image" descr="${alt}"/>${graphic}</wp:anchor>`;
+}
+
+const HORZ_RELTO_DOCX: Record<string, string> = {
+  margin: 'margin', column: 'column', page: 'page', para: 'paragraph',
+};
+const VERT_RELTO_DOCX: Record<string, string> = {
+  margin: 'margin', line: 'line', page: 'page', para: 'paragraph',
+};
+const HORZ_ALIGN_DOCX: Record<string, string> = {
+  left: 'left', center: 'center', right: 'right',
+};
+const VERT_ALIGN_DOCX: Record<string, string> = {
+  top: 'top', center: 'center', bottom: 'bottom',
+};
+const WRAP_DOCX: Record<string, string> = {
+  square:  '<wp:wrapSquare wrapText="bothSides"/>',
+  tight:   '<wp:wrapTight><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/><wp:lineTo x="0" y="21600"/><wp:lineTo x="21600" y="21600"/><wp:lineTo x="21600" y="0"/><wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapTight>',
+  through: '<wp:wrapThrough wrapText="bothSides"><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/><wp:lineTo x="0" y="21600"/><wp:lineTo x="21600" y="21600"/><wp:lineTo x="21600" y="0"/><wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapThrough>',
+  none:    '<wp:wrapNone/>',
+  behind:  '<wp:wrapNone/>',
+  front:   '<wp:wrapNone/>',
+};
 
 function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
   const gp = grid.props;

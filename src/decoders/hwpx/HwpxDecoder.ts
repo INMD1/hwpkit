@@ -1,7 +1,7 @@
 import type { Decoder } from '../../contract/decoder';
 import type { DocRoot, ContentNode, ParaNode, SpanNode, GridNode, ImgNode, PageNumNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
-import type { DocMeta, PageDims, TextProps, ParaProps, CellProps, GridProps, Stroke } from '../../model/doc-props';
+import type { DocMeta, PageDims, TextProps, ParaProps, CellProps, GridProps, Stroke, ImgLayout, ImgWrap, ImgHorzAlign, ImgVertAlign, ImgHorzRelTo, ImgVertRelTo } from '../../model/doc-props';
 import { A4 } from '../../model/doc-props';
 import { succeed, fail } from '../../contract/result';
 import { buildRoot, buildSheet, buildPara, buildSpan, buildImg, buildGrid, buildRow, buildCell, buildPb } from '../../model/builders';
@@ -580,10 +580,51 @@ function decodePic(pic: any, ctx: DecCtx): ImgNode | null {
       gif: 'image/gif', bmp: 'image/bmp',
     };
 
-    return buildImg(TextKit.base64Encode(imgData), mimeMap[ext] ?? 'image/png', w, h);
+    // ── hp:pos에서 layout 추출 ───────────────────────────────
+    const posAttr = pic?.['hp:pos']?.[0]?._attr ?? pic?.pos?.[0]?._attr ?? {};
+    const layout = extractHwpxLayout(posAttr, pic);
+
+    return buildImg(TextKit.base64Encode(imgData), mimeMap[ext] ?? 'image/png', w, h, undefined, layout);
   } catch {
     return null;
   }
+}
+
+function extractHwpxLayout(posAttr: any, pic: any): ImgLayout {
+  const treatAsChar = posAttr.treatAsChar === '1' || posAttr.treatAsChar === 'true';
+  if (treatAsChar) return { wrap: 'inline' };
+
+  // textWrap → wrap
+  const textWrap: string = (pic?._attr?.textWrap ?? pic?.['hp:pic']?.[0]?._attr?.textWrap ?? 'TOP_AND_BOTTOM');
+  const wrapMap: Record<string, ImgWrap> = {
+    TOP_AND_BOTTOM: 'square', BOTH_SIDES: 'tight',
+    LARGER_ONLY: 'tight', SMALLER_ONLY: 'tight',
+  };
+  const wrap: ImgWrap = wrapMap[textWrap] ?? 'square';
+
+  // 기준점
+  const horzRelToMap: Record<string, ImgHorzRelTo> = {
+    PARA: 'para', MARGIN: 'margin', PAGE: 'page', COLUMN: 'column',
+  };
+  const vertRelToMap: Record<string, ImgVertRelTo> = {
+    PARA: 'para', MARGIN: 'margin', PAGE: 'page', LINE: 'line',
+  };
+  const horzRelTo = horzRelToMap[posAttr.horzRelTo ?? ''] ?? 'para';
+  const vertRelTo = vertRelToMap[posAttr.vertRelTo ?? ''] ?? 'para';
+
+  // 정렬
+  const horzAlignMap: Record<string, ImgHorzAlign> = { LEFT: 'left', CENTER: 'center', RIGHT: 'right' };
+  const vertAlignMap: Record<string, ImgVertAlign> = { TOP: 'top', CENTER: 'center', BOTTOM: 'bottom' };
+  const horzAlign = horzAlignMap[posAttr.horzAlign ?? ''];
+  const vertAlign = vertAlignMap[posAttr.vertAlign ?? ''];
+
+  // 오프셋
+  const horzOffset = Number(posAttr.horzOffset ?? 0);
+  const vertOffset = Number(posAttr.vertOffset ?? 0);
+  const xPt = horzOffset !== 0 ? Metric.hwpToPt(horzOffset) : undefined;
+  const yPt = vertOffset !== 0 ? Metric.hwpToPt(vertOffset) : undefined;
+
+  return { wrap, horzAlign, vertAlign, horzRelTo, vertRelTo, xPt, yPt };
 }
 
 // ─── Table decoding ────────────────────────────────────────

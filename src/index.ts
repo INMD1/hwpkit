@@ -12,6 +12,7 @@ import './decoders/hwp/HwpScanner';
 import './encoders/md/MdEncoder';
 import './encoders/hwpx/HwpxEncoder';
 import './encoders/docx/DocxEncoder';
+import './encoders/hwp/HwpEncoder';
 
 // Model
 export type {

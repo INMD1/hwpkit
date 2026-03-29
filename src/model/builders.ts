@@ -2,7 +2,7 @@ import type {
   DocRoot, SheetNode, ParaNode, SpanNode, ImgNode,
   GridNode, RowNode, CellNode, ContentNode, TxtNode, PageNumNode, BrNode, PbNode,
 } from './doc-tree';
-import type { TextProps, ParaProps, CellProps, GridProps, DocMeta, PageDims } from './doc-props';
+import type { TextProps, ParaProps, CellProps, GridProps, DocMeta, PageDims, ImgLayout } from './doc-props';
 import { A4 } from './doc-props';
 
 export function buildRoot(meta: DocMeta = {}, kids: SheetNode[] = []): DocRoot {
@@ -42,8 +42,12 @@ export function buildImg(
   w: number,
   h: number,
   alt?: string,
+  layout?: ImgLayout,
 ): ImgNode {
-  return { tag: 'img', b64, mime, w, h, alt };
+  const node: ImgNode = { tag: 'img', b64, mime, w, h };
+  if (alt) node.alt = alt;
+  if (layout) node.layout = layout;
+  return node;
 }
 
 export function buildGrid(kids: RowNode[], props: GridProps = {}): GridNode {
