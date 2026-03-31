@@ -53,12 +53,6 @@ function encodePara(para: ParaNode, warns: string[]): string {
 }
 
 function encodeSpan(span: SpanNode, warns: string[]): string {
-  // Warn about properties that can't be represented in MD
-  if (span.props.font) warns.push(`[SHIELD] MD: 글꼴(${span.props.font}) 표현 불가 — 손실됨`);
-  if (span.props.pt) warns.push(`[SHIELD] MD: 글자 크기(${span.props.pt}pt) 표현 불가 — 손실됨`);
-  if (span.props.color) warns.push(`[SHIELD] MD: 글자 색상(#${span.props.color}) 표현 불가 — 손실됨`);
-  if (span.props.bg) warns.push(`[SHIELD] MD: 배경 색상(#${span.props.bg}) 표현 불가 — 손실됨`);
-
   let hasPageNum = false;
   const textParts: string[] = [];
   for (const kid of span.kids) {
@@ -72,6 +66,40 @@ function encodeSpan(span: SpanNode, warns: string[]): string {
   let r = textParts.join('');
   if (hasPageNum && r === '') r = '[페이지 번호]';
 
+  // Collect CSS styles for font/color/size/bg — use HTML span so fonts can be
+  // loaded externally via the page's stylesheet or @font-face rules.
+  const cssStyles: string[] = [];
+  if (span.props.font) cssStyles.push(`font-family: ${span.props.font}`);
+  if (span.props.pt) cssStyles.push(`font-size: ${span.props.pt}pt`);
+  if (span.props.color) cssStyles.push(`color: #${span.props.color}`);
+  if (span.props.bg) cssStyles.push(`background-color: #${span.props.bg}`);
+
+  const hasHtmlStyle = cssStyles.length > 0;
+
+  if (hasHtmlStyle) {
+    // When style properties are present, use HTML for all formatting so that
+    // markdown markers inside an HTML element don't break parsers.
+    if (span.props.b) cssStyles.push('font-weight: bold');
+    if (span.props.i) cssStyles.push('font-style: italic');
+    if (span.props.s) cssStyles.push('text-decoration: line-through');
+    if (span.props.u) {
+      // combine underline with possible line-through
+      const existing = cssStyles.find(s => s.startsWith('text-decoration:'));
+      if (existing) {
+        const idx = cssStyles.indexOf(existing);
+        cssStyles[idx] = existing.replace('line-through', 'underline line-through');
+        if (!existing.includes('line-through')) cssStyles[idx] = existing + ' underline';
+      } else {
+        cssStyles.push('text-decoration: underline');
+      }
+    }
+    const styleAttr = cssStyles.join('; ');
+    if (span.props.sup) return `<sup style="${styleAttr}">${r}</sup>`;
+    if (span.props.sub) return `<sub style="${styleAttr}">${r}</sub>`;
+    return `<span style="${styleAttr}">${r}</span>`;
+  }
+
+  // No CSS styles needed — use plain Markdown formatting
   if (span.props.b && span.props.i) r = `***${r}***`;
   else if (span.props.b) r = `**${r}**`;
   else if (span.props.i) r = `*${r}*`;

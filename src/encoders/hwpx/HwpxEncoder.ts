@@ -654,12 +654,34 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
 function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
   const rowCount = grid.kids.length;
 
-  // Compute true column count: max total colSpan across all rows
+  // Build a per-row occupancy set that tracks which column indices are already
+  // "taken" by a rowSpan cell from an earlier row.  This must be done before
+  // computing colCount so that we get the correct logical column count even for
+  // rows whose cells were skipped (vMergeContinue) in the DocRoot model.
+  const rowOccupancy: Set<number>[] = Array.from(
+    { length: rowCount },
+    () => new Set<number>(),
+  );
   let colCount = 0;
-  for (const row of grid.kids) {
-    let rowCols = 0;
-    for (const cell of row.kids) rowCols += cell.cs;
-    if (rowCols > colCount) colCount = rowCols;
+  for (let ri = 0; ri < grid.kids.length; ri++) {
+    const row = grid.kids[ri];
+    let ci = 0;
+    for (const cell of row.kids) {
+      // Advance past columns occupied by rowSpan cells from above rows
+      while (rowOccupancy[ri].has(ci)) ci++;
+      // Mark columns taken by this cell's rowSpan in subsequent rows
+      if (cell.rs > 1) {
+        for (let r = ri + 1; r < ri + cell.rs && r < rowCount; r++) {
+          for (let c = ci; c < ci + cell.cs; c++) {
+            rowOccupancy[r].add(c);
+          }
+        }
+      }
+      ci += cell.cs;
+    }
+    // Advance past any trailing occupied columns (edge case: last cell has rowSpan)
+    while (rowOccupancy[ri].has(ci)) ci++;
+    if (ci > colCount) colCount = ci;
   }
   if (colCount === 0) colCount = grid.kids[0]?.kids.length ?? 1;
 
@@ -682,7 +704,7 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
   } else {
     for (let c = 0; c < colCount; c++) colWidths.push(defaultColW);
   }
-  // Scale to fit available width
+  // Scale down to fit available width (only when table exceeds page by >5%)
   const rawTotal = colWidths.reduce((s, w) => s + w, 0);
   if (rawTotal > totalWidth * 1.05) {
     const scale = totalWidth / rawTotal;
@@ -712,7 +734,7 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
   }
   const totalTableHeight = rowHeights.reduce((s, h) => s + h, 0);
 
-  // Rows
+  // Rows — use the pre-computed rowOccupancy to get correct colAddr for each cell
   let rowsXml = "";
   for (let ri = 0; ri < grid.kids.length; ri++) {
     const row = grid.kids[ri];
@@ -721,6 +743,9 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
     let colIdx = 0;
     for (let ci = 0; ci < row.kids.length; ci++) {
       const cell = row.kids[ci];
+
+      // Skip columns occupied by rowSpan cells from above rows
+      while (rowOccupancy[ri].has(colIdx)) colIdx++;
 
       // Cell borderFill: use per-side if any side border is specified, else fallback to table default
       let cellBfId = tblBfId;
@@ -746,7 +771,7 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
         }
       }
 
-      // Calculate cell width from column widths
+      // Calculate cell width from column widths (sum colSpan columns)
       let cellW = 0;
       for (
         let sc = colIdx;
@@ -756,7 +781,7 @@ function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
         cellW += colWidths[sc];
       if (cellW === 0) cellW = defaultColW * cell.cs;
 
-      // Cell inner width for lineseg (subtract left + right cell margins)
+      // Cell inner width for lineseg (subtract left + right cell margins: 141+141=282 HWPUNIT)
       const cellInnerW = Math.max(cellW - 282, 100);
 
       // Encode cell paragraphs with correct inner width
