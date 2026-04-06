@@ -17,6 +17,7 @@ import { Metric }             from '../../safety/StyleBridge';
 import { registry }           from '../../pipeline/registry';
 import { A4 }                 from '../../model/doc-props';
 import pako                   from 'pako';
+import { Buffer }             from 'node:buffer';
 
 /* ═══════════════════════════════════════════════════════════════
    HWP 5.0 tag IDs (HWP 5.0 spec 표 13, 표 57)

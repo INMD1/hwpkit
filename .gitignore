@@ -9,3 +9,4 @@ dist
 tests
 data
 playground
+CLAUDE.*
