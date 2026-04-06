@@ -1,4 +1,24 @@
 type Align = 'left' | 'center' | 'right' | 'justify';
+type ImgWrap = 'inline' | 'square' | 'tight' | 'through' | 'none' | 'behind' | 'front';
+type ImgHorzAlign = 'left' | 'center' | 'right';
+type ImgVertAlign = 'top' | 'center' | 'bottom';
+type ImgHorzRelTo = 'margin' | 'column' | 'page' | 'para';
+type ImgVertRelTo = 'margin' | 'line' | 'page' | 'para';
+interface ImgLayout {
+    wrap: ImgWrap;
+    horzAlign?: ImgHorzAlign;
+    vertAlign?: ImgVertAlign;
+    horzRelTo?: ImgHorzRelTo;
+    vertRelTo?: ImgVertRelTo;
+    xPt?: number;
+    yPt?: number;
+    distT?: number;
+    distB?: number;
+    distL?: number;
+    distR?: number;
+    behindDoc?: boolean;
+    zOrder?: number;
+}
 type VAlign = 'top' | 'mid' | 'bot';
 type Heading = 1 | 2 | 3 | 4 | 5 | 6;
 type StrokeKind = 'solid' | 'dash' | 'dot' | 'double' | 'none';
@@ -76,6 +96,11 @@ interface DocMeta {
 }
 declare const A4: PageDims;
 declare const A4_LANDSCAPE: PageDims;
+/**
+ * orient === 'landscape'일 때 wPt < hPt이면 swap,
+ * orient === 'portrait'일 때 wPt > hPt이면 swap하여
+ * 방향과 치수가 항상 일치하도록 정규화합니다.
+ */
 declare function normalizeDims(dims: PageDims): PageDims;
 declare const DEFAULT_STROKE: Stroke;
 
@@ -101,6 +126,7 @@ interface ImgNode {
     w: number;
     h: number;
     alt?: string;
+    layout?: ImgLayout;
 }
 interface SpanNode {
     tag: 'span';
@@ -127,6 +153,7 @@ interface CellNode {
 interface RowNode {
     tag: 'row';
     kids: CellNode[];
+    heightPt?: number;
 }
 interface GridNode {
     tag: 'grid';
@@ -208,9 +235,9 @@ declare function buildBr(): BrNode;
 declare function buildPb(): PbNode;
 declare function buildPara(kids?: ParaNode['kids'], props?: ParaProps): ParaNode;
 declare function buildSpan(content: string, props?: TextProps): SpanNode;
-declare function buildImg(b64: string, mime: ImgNode['mime'], w: number, h: number, alt?: string): ImgNode;
+declare function buildImg(b64: string, mime: ImgNode['mime'], w: number, h: number, alt?: string, layout?: ImgLayout): ImgNode;
 declare function buildGrid(kids: RowNode[], props?: GridProps): GridNode;
-declare function buildRow(kids: CellNode[]): RowNode;
+declare function buildRow(kids: CellNode[], heightPt?: number): RowNode;
 declare function buildCell(kids: ParaNode[], opts?: {
     cs?: number;
     rs?: number;
@@ -314,4 +341,4 @@ declare const TextKit: {
     base64Decode(b64: string): Uint8Array;
 };
 
-export { A4, A4_LANDSCAPE, type Align, type AnyNode, ArchiveKit, BinaryKit, type BlockTag, type BrNode, type CellNode, type CellProps, type ContentNode, DEFAULT_STROKE, type Decoder, type DocMeta, type DocRoot, type Encoder, type Fail, type GridNode, type GridProps, type Heading, type ImgNode, type LinkNode, Metric, normalizeDims, type Ok, type Outcome, type PageDims, type PageNumNode, type ParaNode, type ParaProps, type PbNode, Pipeline, type RowNode, type SheetNode, ShieldedParser, type SpanNode, type Stroke, type StrokeKind, type TableLook, TextKit, type TextProps, TreeWalker, type TxtNode, type VAlign, XmlKit, buildBr, buildCell, buildGrid, buildImg, buildPageNum, buildPara, buildPb, buildRoot, buildRow, buildSheet, buildSpan, countNodes, fail, registry, safeAlign, safeFont, safeFontToKr, safeHex, safeStrokeDocx, safeStrokeHwpx, succeed, validateRoot, walkNode };
+export { A4, A4_LANDSCAPE, type Align, type AnyNode, ArchiveKit, BinaryKit, type BlockTag, type BrNode, type CellNode, type CellProps, type ContentNode, DEFAULT_STROKE, type Decoder, type DocMeta, type DocRoot, type Encoder, type Fail, type GridNode, type GridProps, type Heading, type ImgNode, type LinkNode, Metric, type Ok, type Outcome, type PageDims, type PageNumNode, type ParaNode, type ParaProps, type PbNode, Pipeline, type RowNode, type SheetNode, ShieldedParser, type SpanNode, type Stroke, type StrokeKind, type TableLook, TextKit, type TextProps, TreeWalker, type TxtNode, type VAlign, XmlKit, buildBr, buildCell, buildGrid, buildImg, buildPageNum, buildPara, buildPb, buildRoot, buildRow, buildSheet, buildSpan, countNodes, fail, normalizeDims, registry, safeAlign, safeFont, safeFontToKr, safeHex, safeStrokeDocx, safeStrokeHwpx, succeed, validateRoot, walkNode };

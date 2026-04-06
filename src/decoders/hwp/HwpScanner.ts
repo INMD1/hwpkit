@@ -1,9 +1,9 @@
 import type { Decoder } from '../../contract/decoder';
-import type { DocRoot, ContentNode, ParaNode, SpanNode } from '../../model/doc-tree';
+import type { DocRoot, ContentNode, ParaNode, SpanNode, ImgNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
 import type { Align, Stroke, StrokeKind, PageDims, TextProps, ParaProps, CellProps, GridProps } from '../../model/doc-props';
 import { succeed, fail } from '../../contract/result';
-import { buildRoot, buildSheet, buildPara, buildSpan, buildGrid, buildRow, buildCell } from '../../model/builders';
+import { buildRoot, buildSheet, buildPara, buildSpan, buildGrid, buildRow, buildCell, buildImg } from '../../model/builders';
 import { ShieldedParser } from '../../safety/ShieldedParser';
 import { BinaryKit } from '../../toolkit/BinaryKit';
 import { Metric, safeHex, safeFont } from '../../safety/StyleBridge';
@@ -37,8 +37,11 @@ const TAG_CELL_B  = HWPTAG_BEGIN + 65;  // 81
 function isTableTag(t: number) { return t === TAG_TABLE_A || t === TAG_TABLE_B; }
 function isCellTag(t: number)  { return t === TAG_CELL_A || t === TAG_CELL_B || t === TAG_LIST_HEADER; }
 
-// CTRL_HEADER ctrlId for table: ' lbt' as UINT32-LE = 0x74626C20
-const CTRL_TABLE = 0x74626C20;
+// CTRL_HEADER ctrlId values (UINT32-LE as ASCII)
+const CTRL_TABLE = 0x74626C20;  // ' lbt'
+const CTRL_IMAGE = 0x696D6720;  // 'img '
+const CTRL_OBJ   = 0x6F626A20;  // 'obj '
+const CTRL_FIG   = 0x66696720;  // 'fig '
 
 /* ═══════════════════════════════════════════════════════════════
    Types
@@ -83,7 +86,14 @@ interface DocInfo {
 }
 
 interface ParsedChar { pos: number; ch: string }
-interface ParaTextResult { chars: ParsedChar[]; controlPositions: number[] }
+interface ParsedCtrl { pos: number; ctrlId: number; objId: number; matched: boolean }
+interface ParaTextResult { chars: ParsedChar[]; controls: ParsedCtrl[] }
+
+interface OleObject {
+  id: number;
+  data: Uint8Array;
+  mimeType: string;
+}
 
 /* ═══════════════════════════════════════════════════════════════
    Low-level record parsing
@@ -111,7 +121,9 @@ function parseRecords(data: Uint8Array): HwpRecord[] {
 }
 
 function tryInflate(data: Uint8Array): Uint8Array {
-  try { return pako.inflateRaw(data); } catch { return data; }
+  try { return pako.inflate(data); } catch {
+    try { return pako.inflateRaw(data); } catch { return data; }
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -212,7 +224,7 @@ function parseParaShape(d: Uint8Array): HwpParaShape {
   if (d.length < 4) return { align: 'left', spaceBefore: 0, spaceAfter: 0, lineSpacing: 160, indent: 0 };
   const attr = BinaryKit.readU32LE(d, 0);
   return {
-    align:       ALIGN_TBL[attr & 0x7] ?? 'left',
+    align:       ALIGN_TBL[(attr >> 2) & 0x7] ?? 'left',
     indent:      d.length >= 16 ? i32(d, 12) : 0,
     spaceBefore: d.length >= 20 ? i32(d, 16) : 0,
     spaceAfter:  d.length >= 24 ? i32(d, 20) : 0,
@@ -228,20 +240,30 @@ function parseParaShape(d: Uint8Array): HwpParaShape {
     [36:4] faceColor (bgColor for solid fill)                        */
 
 const BORDER_W_PT = [0.28, 0.34, 0.43, 0.57, 0.71, 0.85, 1.13, 1.42, 1.70, 1.98, 2.84, 4.25, 5.67, 8.50, 11.34, 14.17];
-const BORDER_KIND: Record<number, StrokeKind> = { 0:'none',1:'solid',2:'dash',3:'dot',4:'dash',5:'dash',6:'dash',7:'dot',8:'double',9:'double',10:'double' };
+const BORDER_KIND: Record<number, StrokeKind> = { 0:'solid',1:'dash',2:'dash',3:'dot',4:'dash',5:'dash',6:'dash',7:'double',8:'double',9:'double',10:'none' };
 
 function parseBorderFill(d: Uint8Array): HwpBorderFill {
+  // Spec grouped format (표 23):
+  //   [0:2]   attr
+  //   [2:4]   4 border types  (left, right, top, bottom) — 1 byte each
+  //   [6:4]   4 border widths (left, right, top, bottom) — 1 byte each (index into BORDER_W_PT)
+  //   [10:16] 4 border colors (left, right, top, bottom) — 4 bytes each (COLORREF)
+  //   [26:3]  diagonal: type(1) + width(1) + color(4) = 6 bytes actually [26:6]
+  //   [32:4]  fillType
+  //   [36:4]  faceColor (bgColor for solid fill)
   const borders: HwpBorderFill['borders'] = [];
+  const BASE_TYPE  = 2;   // 4 type bytes
+  const BASE_WIDTH = 6;   // 4 width bytes
+  const BASE_COLOR = 10;  // 4 × 4-byte colors
   for (let i = 0; i < 4; i++) {
-    const b = 2 + i * 6;
-    if (b + 6 <= d.length) {
-      borders.push({ type: d[b], widthPt: BORDER_W_PT[d[b + 1]] ?? 0.5, color: colorRef(d, b + 2) });
-    } else {
-      borders.push({ type: 0, widthPt: 0.5, color: '000000' });
-    }
+    const type    = BASE_TYPE  + i     < d.length ? d[BASE_TYPE  + i]              : 0;
+    const widthPt = BASE_WIDTH + i     < d.length ? (BORDER_W_PT[d[BASE_WIDTH + i]] ?? 0.5) : 0.5;
+    const color   = BASE_COLOR + i * 4 + 4 <= d.length ? colorRef(d, BASE_COLOR + i * 4) : '000000';
+    borders.push({ type, widthPt, color });
   }
   let bgColor: string | undefined;
-  const fOff = 32;                       // after attr(2) + 5 borders(30)
+  // after attr(2) + 4 types(4) + 4 widths(4) + 4 colors(16) + diagonal(6) = offset 32
+  const fOff = 32;
   if (d.length >= fOff + 8) {
     const ft = BinaryKit.readU32LE(d, fOff);
     if (ft & 1) bgColor = colorRef(d, fOff + 4);
@@ -302,6 +324,7 @@ function parseParagraphGroup(
   let text: ParaTextResult | null = null;
   let csPairs: [number, number][] = [];
   const grids: ContentNode[] = [];
+  const ctrlHeaders: { ctrlId: number; objId: number }[] = [];
   let i = start + 1;
 
   while (i < recs.length && recs[i].level > lv) {
@@ -314,14 +337,23 @@ function parseParagraphGroup(
       csPairs = parseCharShapePairs(r.data);
       i++;
     } else if (r.tag === TAG_CTRL_HEADER && r.level === lv + 1) {
-      if (r.data.length >= 4 && BinaryKit.readU32LE(r.data, 0) === CTRL_TABLE) {
-        const tr = shield.guard(
-          () => parseTableCtrl(recs, i, di, shield),
-          { grid: null, next: skipKids(recs, i) },
-          `hwp:tbl@${i}`,
-        );
-        if (tr.grid) grids.push(tr.grid);
-        i = tr.next;
+      if (r.data.length >= 4) {
+        const ctrlId = BinaryKit.readU32LE(r.data, 0);
+        // objId at offset 4 (UINT16) - identifies the image/object in BinData
+        const objId = r.data.length >= 6 ? BinaryKit.readU16LE(r.data, 4) : 0;
+        ctrlHeaders.push({ ctrlId, objId });
+
+        if (ctrlId === CTRL_TABLE) {
+          const tr = shield.guard(
+            () => parseTableCtrl(recs, i, di, shield),
+            { grid: null, next: skipKids(recs, i) },
+            `hwp:tbl@${i}`,
+          );
+          if (tr.grid) grids.push(tr.grid);
+          i = tr.next;
+        } else {
+          i = skipKids(recs, i);
+        }
       } else {
         i = skipKids(recs, i);
       }
@@ -330,14 +362,39 @@ function parseParagraphGroup(
     }
   }
 
+  // Match extended controls with CTRL_HEADER entries
+  if (text && ctrlHeaders.length > 0) {
+    for (let ci = 0; ci < text.controls.length; ci++) {
+      if (ci < ctrlHeaders.length) {
+        text.controls[ci].ctrlId = ctrlHeaders[ci].ctrlId;
+        text.controls[ci].matched = true;
+      }
+    }
+  }
+
   const nodes: ContentNode[] = [];
 
-  // Build paragraph from text
-  if (text && text.chars.length > 0) {
-    const joined = text.chars.map(c => c.ch).join('');
-    if (joined.trim()) {
+  // Build paragraph from text and inline controls (images)
+  if (text && (text.chars.length > 0 || text.controls.length > 0)) {
+    const paraContent: (SpanNode | ContentNode)[] = [];
+
+    // Process text chars and controls together
+    if (text.chars.length > 0) {
       const spans = resolveCharShapes(text.chars, csPairs, di);
-      nodes.push(buildPara(spans, buildParaProps(ps)));
+      paraContent.push(...spans);
+    }
+
+    // Add placeholder spans for extended controls (images)
+    if (text.controls.length > 0) {
+      for (let ci = 0; ci < text.controls.length; ci++) {
+        // Create placeholder for all extended controls
+        // Image replacement will happen later in injectImagesIntoContent
+        paraContent.push(buildSpan(`__EXT_${ci}__`));
+      }
+    }
+
+    if (paraContent.length > 0) {
+      nodes.push(buildPara(paraContent as any, buildParaProps(ps)));
     }
   }
 
@@ -361,7 +418,7 @@ const INL_CTRL = new Set([4, 5, 6, 7, 8]);
 
 function decodeParaText(d: Uint8Array): ParaTextResult {
   const chars: ParsedChar[] = [];
-  const controlPositions: number[] = [];
+  const controls: ParsedCtrl[] = [];
   let i = 0, pos = 0;
 
   while (i + 1 < d.length) {
@@ -371,8 +428,14 @@ function decodeParaText(d: Uint8Array): ParaTextResult {
     if (c === 10) { chars.push({ pos, ch: '\n' }); i += 2; pos++; continue; }
 
     if (EXT_CTRL.has(c)) {
-      controlPositions.push(pos);
-      i += 16; pos += 8; continue;                       // 8 WORDs
+      // Extended control: 8 WORDs (16 bytes)
+      // WORD 4 contains objId (for images, charts, etc.)
+      let objId = 0;
+      if (i + 16 <= d.length) {
+        objId = BinaryKit.readU16LE(d, i + 8); // 4th WORD (offset 8) contains objId
+      }
+      controls.push({ pos, ctrlId: 0, objId, matched: false });
+      i += 16; pos += 8; continue;
     }
     if (INL_CTRL.has(c)) {
       i += 16; pos += 8; continue;
@@ -386,7 +449,7 @@ function decodeParaText(d: Uint8Array): ParaTextResult {
     chars.push({ pos, ch: String.fromCharCode(c) });
     i += 2; pos++;
   }
-  return { chars, controlPositions };
+  return { chars, controls };
 }
 
 /* ── PARA_CHAR_SHAPE ────────────────────────────────────────── */
@@ -771,6 +834,53 @@ export class HwpScanner implements Decoder {
         di = shield.guard(() => parseDocInfo(diRaw, compressed), di, 'hwp:docInfo');
       }
 
+      // Extract images from BinData streams
+      const imageStreams: { path: string; data: Uint8Array }[] = [];
+      for (const [path, data] of streams) {
+        if ((path.includes('BinData') || path.includes('.jpg') || path.includes('.jpeg') || path.includes('.png') || path.includes('.gif') || path.includes('.bmp'))
+            && !path.includes('FileHeader') && !path.includes('DocInfo') && !path.includes('BodyText') && !path.includes('Section')) {
+          imageStreams.push({ path, data });
+          console.log(`[HwpScanner] Image stream found: ${path} (${data.length} bytes)`);
+        }
+      }
+
+      // Create image nodes for each image stream (deduplicated by hash)
+      const objectMap = new Map<number, ImgNode>();
+      const seenHashes = new Set<string>();
+      let imgIdx = 0;
+      for (const { path, data } of imageStreams) {
+        // Determine MIME type from extension or signature
+        let mimeType = 'image/jpeg';
+        const lowerPath = path.toLowerCase();
+        if (lowerPath.includes('.png')) mimeType = 'image/png';
+        else if (lowerPath.includes('.gif')) mimeType = 'image/gif';
+        else if (lowerPath.includes('.bmp')) mimeType = 'image/bmp';
+
+        // Also check signature
+        if (data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4E && data[3] === 0x47) mimeType = 'image/png';
+        else if (data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x3538) mimeType = 'image/gif';
+        else if (data[0] === 0x42 && data[1] === 0x4D) mimeType = 'image/bmp';
+
+        const imgData = Buffer.from(data);
+        const base64 = imgData.toString('base64');
+        const hash = base64.slice(0, 20); // Use first 20 chars as simple hash
+        if (!seenHashes.has(hash)) {
+          seenHashes.add(hash);
+          objectMap.set(imgIdx++, buildImg(
+            base64,
+            mimeType as any,
+            0, // w
+            0, // h
+            `Image from ${path}`,
+          ));
+          console.log(`[HwpScanner] Added unique image: ${hash}... (${data.length} bytes)`);
+        } else {
+          console.log(`[HwpScanner] Duplicate image skipped: ${hash}...`);
+        }
+      }
+
+      console.log(`[HwpScanner] Found ${imageStreams.length} image streams, ${objectMap.size} unique images`);
+
       // Body sections
       const allContent: ContentNode[] = [];
       let pageDims: PageDims = A4;
@@ -797,6 +907,30 @@ export class HwpScanner implements Decoder {
         if (r.pageDims) pageDims = r.pageDims;
       }
 
+      // Inject images into paragraphs (only if images are available)
+      console.log(`[HwpScanner] Before injection: ${allContent.length} nodes, ${objectMap.size} images available`);
+      if (objectMap.size > 0) {
+        injectImagesIntoContent(allContent, objectMap);
+        console.log(`[HwpScanner] After injection: ${allContent.length} nodes`);
+      }
+
+      // Count images (recursively)
+      const countImages = (nodes: ContentNode[]): number => {
+        let count = 0;
+        for (const node of nodes) {
+          if ((node as any).tag === 'img') count++;
+          if ((node as any).tag === 'para' && (node as any).kids) count += countImages((node as any).kids);
+          if ((node as any).tag === 'grid' && (node as any).kids) {
+            for (const row of (node as any).kids) {
+              if (row.kids) count += countImages(row.kids);
+            }
+          }
+        }
+        return count;
+      };
+      const imgCount = countImages(allContent);
+      console.log(`[HwpScanner] Images in content: ${imgCount}`);
+
       warns.push(...shield.flush());
       const content = allContent.length > 0 ? allContent : [buildPara([buildSpan('')])];
       return succeed(buildRoot({}, [buildSheet(content, pageDims)]), warns);
@@ -811,6 +945,86 @@ function findBodySection(streams: Map<string, Uint8Array>): Uint8Array | undefin
   for (const [k, v] of streams)
     if (k.includes('Section') && !k.includes('Header') && !k.includes('Info')) return v;
   return undefined;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   OLE Object extraction (images)
+   ════════════════════════════════════════════════════════════ */
+
+function extractImagesFromOleObjectLink(data: Uint8Array): OleObject[] {
+  const objects: OleObject[] = [];
+  let off = 0;
+
+  while (off + 8 <= data.length) {
+    const objId = BinaryKit.readU32LE(data, off);
+    const dataSize = BinaryKit.readU32LE(data, off + 4);
+    const reserved = BinaryKit.readU32LE(data, off + 8);
+
+    if (objId === 0 || dataSize === 0) break;
+
+    const objOff = off + 16;
+    if (objOff + dataSize > data.length) break;
+
+    const objData = data.subarray(objOff, objOff + dataSize);
+
+    // Detect MIME type from signature
+    let mimeType = 'application/octet-stream';
+    if (objData[0] === 0xFF && objData[1] === 0xD8 && objData[2] === 0xFF) {
+      mimeType = 'image/jpeg';
+    } else if (objData[0] === 0x89 && objData[1] === 0x50 && objData[2] === 0x4E && objData[3] === 0x47) {
+      mimeType = 'image/png';
+    } else if (objData[0] === 0x47 && objData[1] === 0x49 && objData[2] === 0x46 && objData[3] === 0x3538) {
+      mimeType = 'image/gif';
+    } else if (objData[0] === 0x42 && objData[1] === 0x4D) {
+      mimeType = 'image/bmp';
+    }
+
+    objects.push({ id: objId, data: objData, mimeType });
+    off = objOff + dataSize;
+  }
+
+  return objects;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Helper to inject images into paragraph content
+   ════════════════════════════════════════════════════════════ */
+
+function injectImagesIntoContent(
+  content: ContentNode[],
+  objectMap: Map<number, ImgNode>
+): void {
+  const imageArray = Array.from(objectMap.values());
+  if (imageArray.length === 0) return;
+
+  // Get unique images (deduplicate by base64 content)
+  const uniqueImages = Array.from(new Set(imageArray.map(img => img.b64))).map(b64 => {
+    return imageArray.find(img => img.b64 === b64)!;
+  });
+  if (uniqueImages.length === 0) return;
+
+  let imgIdx = 0;
+  for (const node of content) {
+    if (node.tag === 'para' && node.kids) {
+      for (let i = 0; i < node.kids.length; i++) {
+        const kid = node.kids[i];
+        // Span node structure: { tag: 'span', props, kids: [{ tag: 'txt', content }] }
+        if (kid.tag === 'span' && kid.kids && kid.kids[0]?.tag === 'txt') {
+          const text = kid.kids[0].content;
+          // Support both __IMG_N__ and __EXT_N__ patterns
+          const match = text.match?.(/^__(?:IMG|EXT)_(\d+)__$/);
+          if (match) {
+            // Replace placeholder with next available image (round-robin)
+            const imgNode = uniqueImages[imgIdx % uniqueImages.length];
+            if (imgNode) {
+              node.kids[i] = imgNode;
+              imgIdx++;
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
 registry.registerDecoder(new HwpScanner());

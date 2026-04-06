@@ -50,7 +50,7 @@ const ALIGN_MAP: Record<string, Align> = {
   start: 'left', end: 'right',
 };
 export function safeAlign(raw?: string): Align {
-  return ALIGN_MAP[raw ?? ''] ?? 'justify';
+  return ALIGN_MAP[raw ?? ''] ?? 'left';
 }
 
 // ─── 테두리 정규화 ─────────────────────────────────────────

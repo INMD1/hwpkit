@@ -19,38 +19,56 @@ import { A4 }                 from '../../model/doc-props';
 import pako                   from 'pako';
 
 /* ═══════════════════════════════════════════════════════════════
-   HWP 5.0 tag IDs
+   HWP 5.0 tag IDs (HWP 5.0 spec 표 13, 표 57)
+   HWPTAG_BEGIN = 16 (0x10)
    ═══════════════════════════════════════════════════════════════ */
 
 const T = 16; // HWPTAG_BEGIN
-const TAG_ID_MAPPINGS    = T + 8;   // 24
-const TAG_FACE_NAME      = T + 3;   // 19
-const TAG_BORDER_FILL    = T + 4;   // 20
-const TAG_CHAR_SHAPE     = T + 5;   // 21
-const TAG_PARA_SHAPE     = T + 9;   // 25
-const TAG_PARA_HEADER    = T + 50;  // 66
-const TAG_PARA_TEXT      = T + 51;  // 67
-const TAG_PARA_CHAR_SHAPE = T + 52; // 68
-const TAG_CTRL_HEADER    = T + 55;  // 71
-const TAG_LIST_HEADER    = T + 56;  // 72
-const TAG_PAGE_DEF       = T + 57;  // 73
-const TAG_PARA_LINE_SEG  = T + 53;  // 69
-const TAG_FOOTNOTE_SHAPE = T + 58;  // 74
-const TAG_TABLE_B        = T + 64;  // 80
 
-const CTRL_TABLE = 0x74626C20; // ' lbt' as LE uint32
-const CTRL_SECD  = 0x73656364; // 'secd' section definition ctrl
+// DocInfo tags (표 13)
+const TAG_DOCUMENT_PROPERTIES = T + 0;  // 16 - HWPTAG_DOCUMENT_PROPERTIES
+const TAG_ID_MAPPINGS          = T + 1;  // 17 - HWPTAG_ID_MAPPINGS
+const TAG_FACE_NAME            = T + 3;  // 19 - HWPTAG_FACE_NAME
+const TAG_BORDER_FILL          = T + 4;  // 20 - HWPTAG_BORDER_FILL
+const TAG_CHAR_SHAPE           = T + 5;  // 21 - HWPTAG_CHAR_SHAPE
+const TAG_PARA_SHAPE           = T + 9;  // 25 - HWPTAG_PARA_SHAPE
 
-/** Border width index table (points) — matches BORDER_W_PT in HwpScanner */
+// DocInfo tags (additional)
+const TAG_BIN_DATA             = T + 2;  // 18 - HWPTAG_BIN_DATA
+
+// BodyText tags (표 57)
+const TAG_PARA_HEADER          = T + 50; // 66 - HWPTAG_PARA_HEADER
+const TAG_PARA_TEXT            = T + 51; // 67 - HWPTAG_PARA_TEXT
+const TAG_PARA_CHAR_SHAPE      = T + 52; // 68 - HWPTAG_PARA_CHAR_SHAPE
+const TAG_PARA_LINE_SEG        = T + 53; // 69 - HWPTAG_PARA_LINE_SEG
+const TAG_CTRL_HEADER          = T + 55; // 71 - HWPTAG_CTRL_HEADER
+const TAG_LIST_HEADER          = T + 56; // 72 - HWPTAG_LIST_HEADER
+const TAG_PAGE_DEF             = T + 57; // 73 - HWPTAG_PAGE_DEF
+const TAG_FOOTNOTE_SHAPE       = T + 58; // 74 - HWPTAG_FOOTNOTE_SHAPE
+const TAG_TABLE                = T + 61; // 77 - HWPTAG_TABLE (표 개체)
+const TAG_SHAPE_COMPONENT_PICTURE = T + 69; // 85 - HWPTAG_SHAPE_COMPONENT_PICTURE
+
+// Control IDs (stored as LE UINT32, MAKE_4CHID order)
+const CTRL_TABLE = 0x74626C20; // 'tbl ' table
+const CTRL_SECD  = 0x73656364; // 'secd' section definition
+const CTRL_PIC   = 0x24706963; // '$pic' picture/image
+
+/** Border width index table (points) — 표 26 테두리선 굵기 (mm→pt conversion) */
 const BORDER_W_PT = [
   0.28, 0.34, 0.43, 0.57, 0.71, 0.85,
   1.13, 1.42, 1.70, 1.98, 2.84, 4.25,
   5.67, 8.50, 11.34, 14.17,
 ];
 
+/** 표 25 테두리선 종류: 0=실선(solid), 2=점선(dash), 3=dash-dot, 7=2중선(double) */
 const BORDER_KIND_IDX: Record<string, number> = {
-  none: 0, solid: 1, dash: 2, dot: 3, double: 8,
+  solid: 0, dash: 2, dot: 3, double: 7, none: 0,
 };
+
+/**
+ * 표 44 문단 모양 속성1:
+ * bits 2-4 = 정렬 방식 (0=양쪽, 1=왼쪽, 2=오른쪽, 3=가운데)
+ */
 const ALIGN_CODE: Record<string, number> = {
   justify: 0, left: 1, right: 2, center: 3,
 };
@@ -89,6 +107,8 @@ class BufWriter {
   }
 
   i32(v: number): this { return this.u32(v < 0 ? v + 0x100000000 : v); }
+
+  i16(v: number): this { return this.u16(v < 0 ? v + 0x10000 : v); }
 
   bytes(d: Uint8Array): this { this.chunks.push(d); this._sz += d.length; return this; }
   zeros(n: number): this    { this.chunks.push(new Uint8Array(n)); this._sz += n; return this; }
@@ -203,7 +223,7 @@ class StyleCollector {
     return id;
   }
 
-  /** Returns 1-based border fill ID (HWP uses 1-based IDs for border fills) */
+  /** Returns 1-based border fill ID */
   addBorderFill(s: Stroke, bg?: string): number {
     const k = bfKey(s, bg);
     if (this.bfIdx.has(k)) return this.bfIdx.get(k)!;
@@ -254,24 +274,67 @@ function collectNode(node: ContentNode, col: StyleCollector): void {
    DocInfo record builders
    ═══════════════════════════════════════════════════════════════ */
 
-function mkIdMappings(col: StyleCollector): Uint8Array {
+/**
+ * HWPTAG_DOCUMENT_PROPERTIES (표 14 문서 속성) — 26 bytes
+ * level 0 in DocInfo
+ */
+function mkDocumentProperties(): Uint8Array {
   return new BufWriter()
-    .u32(col.fonts.length)
-    .u32(col.bfData.length)
-    .u32(col.csProps.length)
-    .u32(0) // tabDef count
-    .u32(0) // numbering count
-    .u32(0) // bullet count
-    .u32(col.psProps.length)
-    .u32(0) // style count
-    .build();
+    .u16(1)   // nSection (구역 개수)
+    .u16(1)   // pageStart (페이지 시작 번호)
+    .u16(1)   // footnoteStart (각주 시작 번호)
+    .u16(1)   // endnoteStart (미주 시작 번호)
+    .u16(1)   // pictureStart (그림 시작 번호)
+    .u16(1)   // tableStart (표 시작 번호)
+    .u16(1)   // formulaStart (수식 시작 번호)
+    .u32(0)   // listId (캐럿 위치: 리스트 아이디)
+    .u32(0)   // paraId (캐럿 위치: 문단 아이디)
+    .u32(0)   // charUnitPos (캐럿 위치: 글자 단위 위치)
+    .build(); // 26 bytes
 }
 
+/**
+ * HWPTAG_ID_MAPPINGS (표 15 아이디 매핑 헤더) — 72 bytes (INT32 array[18])
+ * 표 16 아이디 매핑 개수 인덱스:
+ *   [0]=binData, [1]=한글글꼴, [2]=영어글꼴, [3]=한자글꼴, [4]=일어글꼴,
+ *   [5]=기타글꼴, [6]=기호글꼴, [7]=사용자글꼴,
+ *   [8]=테두리/배경, [9]=글자모양, [10]=탭정의, [11]=문단번호,
+ *   [12]=글머리표, [13]=문단모양, [14]=스타일, [15]=메모모양,
+ *   [16]=변경추적, [17]=변경추적사용자
+ * level 1 in DocInfo
+ */
+function mkIdMappings(col: StyleCollector, nBinData = 0): Uint8Array {
+  const w = new BufWriter();
+  w.u32(nBinData);             // [0] nBinData
+  // [1-7]: 7 font language categories — all use same font list
+  for (let i = 0; i < 7; i++) w.u32(col.fonts.length);
+  w.u32(col.bfData.length);    // [8] nBorderFill
+  w.u32(col.csProps.length);   // [9] nCharShape
+  w.u32(0);                    // [10] nTabDef
+  w.u32(0);                    // [11] nNumbering
+  w.u32(0);                    // [12] nBullet
+  w.u32(col.psProps.length);   // [13] nParaShape
+  w.u32(0);                    // [14] nStyle
+  w.u32(0);                    // [15] nMemoShape (5.0.2.1+)
+  w.u32(0);                    // [16] nTrackChange (5.0.3.2+)
+  w.u32(0);                    // [17] nTrackChangeAuthor (5.0.3.2+)
+  return w.build(); // 18 × 4 = 72 bytes
+}
+
+/**
+ * HWPTAG_FACE_NAME (표 19 글꼴) — variable length
+ * Complete structure: attr + name + altFontType + altLen + fontTypeInfo[10] + basicLen
+ * level 1 in DocInfo
+ */
 function mkFaceName(name: string): Uint8Array {
   return new BufWriter()
-    .u8(0)          // substType
-    .u16(name.length)
-    .utf16(name)
+    .u8(0)              // attr (0 = no alt/base font available)
+    .u16(name.length)   // len1: 글꼴 이름 길이
+    .utf16(name)        // 글꼴 이름 (UTF-16LE)
+    .u8(0)              // altFontType: 대체 글꼴 유형 (0)
+    .u16(0)             // altFontLen (0 = no alt font name)
+    .zeros(10)          // fontTypeInfo[10]: 글꼴 유형 정보 (표 22)
+    .u16(0)             // basicFontLen (0 = no basic font name)
     .build();
 }
 
@@ -283,17 +346,44 @@ function borderWidthIdx(pt: number): number {
   return best;
 }
 
+/**
+ * HWPTAG_BORDER_FILL (표 23 테두리/배경) — 32+n bytes
+ * Field layout (GROUPED, not interleaved):
+ *   offset 0:  UINT16 attr
+ *   offset 2:  UINT8[4] border types  [left, right, top, bottom]
+ *   offset 6:  UINT8[4] border widths [left, right, top, bottom]
+ *   offset 10: COLORREF[4] border colors [left, right, top, bottom]
+ *   offset 26: UINT8 diagonal type
+ *   offset 27: UINT8 diagonal width
+ *   offset 28: COLORREF diagonal color
+ *   offset 32: fill info (채우기 정보, 표 28)
+ * level 1 in DocInfo
+ */
 function mkBorderFill(s: Stroke, bg?: string): Uint8Array {
   const w = new BufWriter();
-  w.u16(0); // attr
-  const t  = BORDER_KIND_IDX[s.kind] ?? 1;
+  const t  = BORDER_KIND_IDX[s.kind] ?? 0;
   const wi = borderWidthIdx(s.pt);
-  // 5 borders: left, right, top, bottom, diagonal
-  for (let i = 0; i < 5; i++) w.u8(t).u8(wi).colorRef(s.color || '000000');
-  // fill: type(4) + faceColor(4) + reserved(4)
-  if (bg) { w.u32(1).colorRef(bg).u32(0); }
-  else    { w.u32(0).u32(0).u32(0); }
-  return w.build(); // 44 bytes
+  const col = s.color || '000000';
+
+  w.u16(0); // attr (UINT16)
+  // 4 border types: [left, right, top, bottom]
+  for (let i = 0; i < 4; i++) w.u8(t);
+  // 4 border widths: [left, right, top, bottom]
+  for (let i = 0; i < 4; i++) w.u8(wi);
+  // 4 border colors: [left, right, top, bottom]
+  for (let i = 0; i < 4; i++) w.colorRef(col);
+  // diagonal: type, width, color
+  w.u8(0).u8(0).colorRef('000000');
+  // fill info (채우기 정보, 표 28): type + optional color data
+  if (bg) {
+    w.u32(1);              // type = 0x01 (단색 채우기)
+    w.colorRef(bg);        // 배경색
+    w.colorRef('FFFFFF');  // 무늬색 (no pattern = white)
+    w.u32(0);              // 무늬 종류 (0 = none)
+  } else {
+    w.u32(0);              // type = 0x00 (채우기 없음)
+  }
+  return w.build(); // 36 bytes (no fill) or 48 bytes (solid fill)
 }
 
 function mkBorderFillPerSide(
@@ -301,65 +391,214 @@ function mkBorderFillPerSide(
 ): Uint8Array {
   const w = new BufWriter();
   w.u16(0); // attr
-  for (const s of [left, right, top, bottom]) {
-    const t = BORDER_KIND_IDX[s.kind] ?? 1;
-    const wi = borderWidthIdx(s.pt);
-    w.u8(t).u8(wi).colorRef(s.color || '000000');
+  // 4 border types [left, right, top, bottom]
+  w.u8(BORDER_KIND_IDX[left.kind]   ?? 0);
+  w.u8(BORDER_KIND_IDX[right.kind]  ?? 0);
+  w.u8(BORDER_KIND_IDX[top.kind]    ?? 0);
+  w.u8(BORDER_KIND_IDX[bottom.kind] ?? 0);
+  // 4 border widths
+  w.u8(borderWidthIdx(left.pt));
+  w.u8(borderWidthIdx(right.pt));
+  w.u8(borderWidthIdx(top.pt));
+  w.u8(borderWidthIdx(bottom.pt));
+  // 4 border colors
+  w.colorRef(left.color   || '000000');
+  w.colorRef(right.color  || '000000');
+  w.colorRef(top.color    || '000000');
+  w.colorRef(bottom.color || '000000');
+  // diagonal
+  w.u8(0).u8(0).colorRef('000000');
+  // fill info
+  if (bg) {
+    w.u32(1).colorRef(bg).colorRef('FFFFFF').u32(0);
+  } else {
+    w.u32(0);
   }
-  // diagonal (always solid thin, no color)
-  w.u8(1).u8(0).colorRef('000000');
-  if (bg) { w.u32(1).colorRef(bg).u32(0); }
-  else    { w.u32(0).u32(0).u32(0); }
   return w.build();
 }
 
+/**
+ * HWPTAG_CHAR_SHAPE (표 33 글자 모양) — 72+ bytes
+ * Field layout:
+ *   offset  0: WORD[7]  faceId (언어별 글꼴 ID) — 14 bytes
+ *   offset 14: UINT8[7] ratio  (장평 50~200%)   —  7 bytes
+ *   offset 21: INT8[7]  spacing(자간 -50~50%)   —  7 bytes
+ *   offset 28: UINT8[7] relSize(상대크기 10~250%)—  7 bytes
+ *   offset 35: INT8[7]  offset (글자위치)       —  7 bytes
+ *   offset 42: INT32    height (기준크기, HWP단위 = pt×100)
+ *   offset 46: UINT32   attr   (표 35 글자 모양 속성)
+ *   offset 50: INT8     shadowX
+ *   offset 51: INT8     shadowY
+ *   offset 52: COLORREF textColor (글자 색)
+ *   offset 56: COLORREF underlineColor (밑줄 색)
+ *   offset 60: COLORREF shadeColor (음영 색)
+ *   offset 64: COLORREF shadowColor (그림자 색)
+ *   offset 68: UINT16   borderFillId (5.0.2.1+)
+ *   offset 70: COLORREF strikeColor (취소선 색, 5.0.3.0+)
+ * level 1 in DocInfo
+ */
 function mkCharShape(p: TextProps, col: StyleCollector): Uint8Array {
   const fontId = p.font ? col.font(p.font) : 0;
-  const w = new BufWriter();
-  for (let i = 0; i < 7; i++) w.u16(fontId);  // faceId[7]
-  for (let i = 0; i < 7; i++) w.u8(100);       // ratio[7]
-  for (let i = 0; i < 7; i++) w.u8(0);         // spacing[7]
-  for (let i = 0; i < 7; i++) w.u8(100);       // relSize[7]
-  for (let i = 0; i < 7; i++) w.u8(0);         // offset[7]
-  // height @ offset 42 (HWPUNIT: pt × 100)
-  w.u32(Math.round((p.pt ?? 10) * 100));
-  // attr @ offset 46
+  const height = Math.round((p.pt ?? 10) * 100); // HWP단위: pt×100
+
+  // 표 35 글자 모양 속성:
+  //  bit 0: 기울임(italic), bit 1: 진하게(bold)
+  //  bits 2-4: 밑줄 종류 (1=글자아래), bits 5-8: 밑줄 모양
+  //  bits 16-17: 위/아래 첨자 (0=없음, 1=위첨자, 2=아래첨자)
+  //  bits 18-20: 취소선 종류 (1=실선)
   let attr = 0;
-  if (p.i)   attr |= 1;          // italic  = bit 0
-  if (p.b)   attr |= 2;          // bold    = bit 1
-  if (p.u)   attr |= (1 << 2);   // ulType  = bits 2-4, set to 1
-  if (p.s)   attr |= (1 << 18);  // skType  = bits 18-20, set to 1
-  if (p.sup) attr |= (1 << 16);  // suType  = bits 16-17, value 1
-  if (p.sub) attr |= (2 << 16);  // suType  = bits 16-17, value 2
+  if (p.i)   attr |= (1 << 0);
+  if (p.b)   attr |= (1 << 1);
+  if (p.u)   attr |= (1 << 2);   // 밑줄 종류 = 1 (글자 아래)
+  if (p.s)   attr |= (1 << 18);  // 취소선 종류 = 1
+  if (p.sup) attr |= (1 << 16);  // 위 첨자
+  if (p.sub) attr |= (2 << 16);  // 아래 첨자
+
+  const textColor = p.color ?? '000000';
+
+  const w = new BufWriter();
+  // faceId[7]: WORD[7] — 언어별 글꼴 ID (한글, 영어, 한자, 일어, 기타, 기호, 사용자)
+  for (let i = 0; i < 7; i++) w.u16(fontId);
+  // ratio[7]: UINT8[7] = 100 (100%)
+  for (let i = 0; i < 7; i++) w.u8(100);
+  // spacing[7]: INT8[7] = 0 (자간 0%)
+  for (let i = 0; i < 7; i++) w.u8(0);
+  // relSize[7]: UINT8[7] = 100 (100%)
+  for (let i = 0; i < 7; i++) w.u8(100);
+  // offset[7]: INT8[7] = 0 (글자 위치 0%)
+  for (let i = 0; i < 7; i++) w.u8(0);
+  // height: INT32
+  w.i32(height);
+  // attr: UINT32
   w.u32(attr);
-  w.u8(0).u8(0); // shadowX, shadowY @ 50-51
-  w.colorRef(p.color ?? '000000'); // textColor @ 52 (4 bytes)
-  return w.build(); // 56 bytes
+  // shadowX, shadowY: INT8
+  w.u8(0).u8(0);
+  // textColor: COLORREF
+  w.colorRef(textColor);
+  // underlineColor: COLORREF (밑줄 색)
+  w.colorRef('000000');
+  // shadeColor: COLORREF (음영 색) — FFFFFF = no shade
+  w.colorRef('FFFFFF');
+  // shadowColor: COLORREF (그림자 색)
+  w.colorRef('000000');
+  // borderFillId: UINT16 (글자 테두리/배경 ID, 5.0.2.1+)
+  w.u16(0);
+  // strikeColor: COLORREF (취소선 색, 5.0.3.0+)
+  w.colorRef('000000');
+  return w.build(); // 42 + 4 + 4 + 1 + 1 + 4×4 + 2 + 4 = 74 bytes
 }
 
+/**
+ * HWPTAG_PARA_SHAPE (표 43 문단 모양) — 54 bytes
+ * Field layout:
+ *   offset  0: UINT32 attr1   (표 44 문단 모양 속성1, bits 2-4 = 정렬 방식)
+ *   offset  4: INT32  leftMargin
+ *   offset  8: INT32  rightMargin
+ *   offset 12: INT32  indent (들여/내어 쓰기)
+ *   offset 16: INT32  spaceBefore (문단 간격 위)
+ *   offset 20: INT32  spaceAfter  (문단 간격 아래)
+ *   offset 24: INT32  lineSpacing (줄 간격, 한글 2007 이하, 5.0.2.5 미만)
+ *   offset 28: UINT16 tabDefId
+ *   offset 30: UINT16 numberingId/bulletId
+ *   offset 32: UINT16 borderFillId
+ *   offset 34: INT16  borderLeft
+ *   offset 36: INT16  borderRight
+ *   offset 38: INT16  borderTop
+ *   offset 40: INT16  borderBottom
+ *   offset 42: UINT32 attr2 (5.0.1.7+)
+ *   offset 46: UINT32 attr3 (5.0.2.5+, bits 0-4 = 줄 간격 종류)
+ *   offset 50: UINT32 lineSpacing2 (5.0.2.5+, 실제 줄 간격)
+ * level 1 in DocInfo
+ */
 function mkParaShape(p: ParaProps): Uint8Array {
+  // 표 44 bits 2-4: 정렬 방식 (0=양쪽, 1=왼쪽, 2=오른쪽, 3=가운데)
+  const alignVal = ALIGN_CODE[p.align ?? 'left'] ?? 1;
+  const attr1 = (alignVal & 0x7) << 2; // alignment at bits 2-4
+
+  // 줄 간격: 비율(%) 표현, 160 = 160%
+  const lineSpacePct = p.lineHeight ? Math.round(p.lineHeight * 100) : 160;
+
   return new BufWriter()
-    .u32(ALIGN_CODE[p.align ?? 'left'] ?? 1) // attr (bits 0-2 = align)
-    .i32(Metric.ptToHwp(p.indentPt ?? 0))    // leftMargin
-    .i32(0)                                    // rightMargin
-    .i32(0)                                    // indent (first-line)
-    .i32(Metric.ptToHwp(p.spaceBefore ?? 0))
-    .i32(Metric.ptToHwp(p.spaceAfter ?? 0))
-    .i32(p.lineHeight ? Math.round(p.lineHeight * 100) : 160) // lineSpacing
-    .build(); // 28 bytes
+    .u32(attr1)                                    //  0: attr1
+    .i32(Metric.ptToHwp(p.indentPt ?? 0))          //  4: leftMargin (HWPUNIT)
+    .i32(0)                                        //  8: rightMargin
+    .i32(0)                                        // 12: indent
+    .i32(Metric.ptToHwp(p.spaceBefore ?? 0))       // 16: spaceBefore
+    .i32(Metric.ptToHwp(p.spaceAfter ?? 0))        // 20: spaceAfter
+    .i32(lineSpacePct)                             // 24: lineSpacing (old format)
+    .u16(0)                                        // 28: tabDefId
+    .u16(0)                                        // 30: numberingId
+    .u16(0)                                        // 32: borderFillId
+    .i16(0)                                        // 34: borderLeft
+    .i16(0)                                        // 36: borderRight
+    .i16(0)                                        // 38: borderTop
+    .i16(0)                                        // 40: borderBottom
+    .u32(0)                                        // 42: attr2 (5.0.1.7+)
+    .u32(0)                                        // 46: attr3 (줄 간격 종류 bits 0-4 = 0: 글자에 따라)
+    .u32(lineSpacePct)                             // 50: lineSpacing2 (5.0.2.5+)
+    .build(); // 54 bytes
 }
 
-function buildDocInfoStream(col: StyleCollector): Uint8Array {
-  const chunks: Uint8Array[] = [
-    mkRec(TAG_ID_MAPPINGS, 0, mkIdMappings(col)),
-    ...col.fonts.map(n => mkRec(TAG_FACE_NAME, 0, mkFaceName(n))),
-    ...col.bfData.map(entry =>
-      mkRec(TAG_BORDER_FILL, 0, entry.uniform
+/**
+ * HWPTAG_BIN_DATA (표 17 바이너리 데이터) — variable
+ * Storage type 2 = embedded in BinData storage
+ * level 1 in DocInfo
+ */
+function mkBinData(id: number, ext: string): Uint8Array {
+  const w = new BufWriter();
+  w.u16(0x0002);        // attr: storage type = 2 (내장 파일)
+  w.u16(id);            // binDataId (1-based)
+  w.u16(ext.length);    // extLen (number of UTF-16LE chars)
+  w.utf16(ext);         // extension string (e.g. "jpg", "png")
+  return w.build();
+}
+
+interface BinImage {
+  id: number;       // 1-based BIN ID
+  ext: string;      // file extension without dot
+  data: Uint8Array; // raw image bytes
+}
+
+function buildDocInfoStream(col: StyleCollector, images: BinImage[] = []): Uint8Array {
+  const chunks: Uint8Array[] = [];
+
+  // HWPTAG_DOCUMENT_PROPERTIES at level 0 (required first record)
+  chunks.push(mkRec(TAG_DOCUMENT_PROPERTIES, 0, mkDocumentProperties()));
+
+  // HWPTAG_ID_MAPPINGS at level 1 (child of DOCUMENT_PROPERTIES)
+  chunks.push(mkRec(TAG_ID_MAPPINGS, 1, mkIdMappings(col, images.length)));
+
+  // HWPTAG_BIN_DATA at level 1: one record per image
+  for (const img of images) {
+    chunks.push(mkRec(TAG_BIN_DATA, 1, mkBinData(img.id, img.ext)));
+  }
+
+  // HWPTAG_FACE_NAME at level 1: 7 language categories × nFonts records
+  // Order: all hangul fonts, then all english fonts, ..., then all user fonts
+  for (let cat = 0; cat < 7; cat++) {
+    for (const name of col.fonts) {
+      chunks.push(mkRec(TAG_FACE_NAME, 1, mkFaceName(name)));
+    }
+  }
+
+  // HWPTAG_BORDER_FILL at level 1
+  for (const entry of col.bfData) {
+    chunks.push(mkRec(TAG_BORDER_FILL, 1,
+      entry.uniform
         ? mkBorderFill(entry.s, entry.bg)
-        : mkBorderFillPerSide(entry.l, entry.r, entry.t, entry.b, entry.bg))),
-    ...col.csProps.map(p => mkRec(TAG_CHAR_SHAPE, 0, mkCharShape(p, col))),
-    ...col.psProps.map(p => mkRec(TAG_PARA_SHAPE, 0, mkParaShape(p))),
-  ];
+        : mkBorderFillPerSide(entry.l, entry.r, entry.t, entry.b, entry.bg)));
+  }
+
+  // HWPTAG_CHAR_SHAPE at level 1
+  for (const p of col.csProps) {
+    chunks.push(mkRec(TAG_CHAR_SHAPE, 1, mkCharShape(p, col)));
+  }
+
+  // HWPTAG_PARA_SHAPE at level 1
+  for (const p of col.psProps) {
+    chunks.push(mkRec(TAG_PARA_SHAPE, 1, mkParaShape(p)));
+  }
+
   return concatU8(chunks);
 }
 
@@ -380,27 +619,48 @@ function mkPageDef(dims: PageDims): Uint8Array {
     .build(); // 40 bytes
 }
 
-function mkParaHeader(psId: number, csCount: number): Uint8Array {
+/**
+ * HWPTAG_PARA_HEADER (표 58 문단 헤더) — 24 bytes
+ *   offset  0: UINT32 nchars       (문단 내 글자 수, 컨트롤 포함)
+ *   offset  4: UINT32 ctrlMask     (컨트롤 마스크: 1<<ctrlCode)
+ *   offset  8: UINT16 paraShapeId  (문단 모양 아이디)
+ *   offset 10: UINT8  styleId      (문단 스타일 아이디, 0=기본)
+ *   offset 11: UINT8  columnBreak  (단 나누기 종류)
+ *   offset 12: UINT16 csCount      (글자 모양 정보 수)
+ *   offset 14: UINT16 rangeTagCount(range tag 정보 수)
+ *   offset 16: UINT16 lineAlignCount(각 줄 align 정보 수)
+ *   offset 18: UINT32 instanceId   (문단 Instance ID, unique)
+ *   offset 22: UINT16 trackChange  (변경추적 병합 여부, 5.0.3.2+)
+ */
+function mkParaHeader(
+  nchars: number,
+  ctrlMask: number,
+  psId: number,
+  csCount: number,
+  lineAlignCount: number = 0,
+  instanceId: number = 0,
+): Uint8Array {
   return new BufWriter()
-    .u32(0)       // paragraphControlMask
-    .u16(0)       // styleId
-    .u8(0)        // divideAttr
-    .u8(0)
-    .u16(psId)    // paraShapeId  @ offset 8
-    .u16(csCount) // charShapeCount @ offset 10
-    .u16(0)       // rangeTagCount
-    .u16(0)       // memoCount
-    .i32(0)       // paraChangeId
-    .build(); // 20 bytes
+    .u32(nchars)        //  0: nchars
+    .u32(ctrlMask)      //  4: ctrlMask
+    .u16(psId)          //  8: paraShapeId
+    .u8(0)              // 10: styleId (0 = default)
+    .u8(0)              // 11: columnBreak (0 = none)
+    .u16(csCount)       // 12: charShapeCount
+    .u16(0)             // 14: rangeTagCount
+    .u16(lineAlignCount)// 16: lineAlignCount
+    .u32(instanceId)    // 18: instanceId (unique)
+    .u16(0)             // 22: trackChange
+    .build(); // 24 bytes
 }
 
 function mkParaText(text: string): Uint8Array {
   const w = new BufWriter();
   for (let i = 0; i < text.length; i++) {
     const c = text.charCodeAt(i);
-    w.u16(c < 32 ? 0 : c); // replace control chars
+    w.u16(c < 32 ? 0 : c);
   }
-  w.u16(13); // paragraph terminator (0x000D)
+  w.u16(13); // paragraph terminator (0x000D = para break)
   return w.build();
 }
 
@@ -410,48 +670,211 @@ function mkParaCharShape(pairs: [pos: number, id: number][]): Uint8Array {
   return w.build();
 }
 
-function encodePara(para: ParaNode, col: StyleCollector, lv: number): Uint8Array[] {
+/**
+ * PARA_TEXT for section definition paragraph.
+ * 확장 컨트롤(size=8): ctrl_code(1) + ctrlId_lo(1) + ctrlId_hi(1) + ptr[4] + ctrl_code(1)
+ * + para terminator = 9 WCHAR total → nchars = 9
+ */
+function mkSecdParaText(): Uint8Array {
+  const lo = CTRL_SECD & 0xFFFF;
+  const hi = (CTRL_SECD >>> 16) & 0xFFFF;
+  return new BufWriter()
+    .u16(0x0002).u16(lo).u16(hi).u16(0).u16(0).u16(0).u16(0).u16(0x0002) // 8 WCHAR ctrl ref
+    .u16(0x000D)  // para terminator
+    .build(); // 9 WCHAR = 18 bytes
+}
+
+/**
+ * PARA_TEXT for table container paragraph.
+ * ctrl code for 그리기 개체/표 = 11 (0x000B)
+ * 확장 컨트롤(size=8): 0x000B + tbl_lo + tbl_hi + 4×0 + 0x000B + terminator = 9 WCHAR
+ */
+function mkTableParaText(): Uint8Array {
+  const lo = CTRL_TABLE & 0xFFFF;
+  const hi = (CTRL_TABLE >>> 16) & 0xFFFF;
+  return new BufWriter()
+    .u16(0x000B).u16(lo).u16(hi).u16(0).u16(0).u16(0).u16(0).u16(0x000B) // 8 WCHAR ctrl ref
+    .u16(0x000D)  // para terminator
+    .build(); // 9 WCHAR = 18 bytes
+}
+
+/**
+ * PARA_TEXT for picture container paragraph.
+ * ctrl code for 그리기 개체/표/수식 등 = 11 (0x000B)
+ * 확장 컨트롤(size=8): 0x000B + pic_lo + pic_hi + 4×0 + 0x000B + terminator = 9 WCHAR
+ */
+function mkPicParaText(): Uint8Array {
+  const lo = CTRL_PIC & 0xFFFF;
+  const hi = (CTRL_PIC >>> 16) & 0xFFFF;
+  return new BufWriter()
+    .u16(0x000B).u16(lo).u16(hi).u16(0).u16(0).u16(0).u16(0).u16(0x000B)
+    .u16(0x000D)  // para terminator
+    .build(); // 9 WCHAR = 18 bytes
+}
+
+/**
+ * HWPTAG_SHAPE_COMPONENT_PICTURE (tag 85) — 97 bytes
+ * Contains drawing common attrs + picture-specific attrs (표 107)
+ * Critical field: BINDATA_ID at offset 87 (2 bytes)
+ */
+function mkShapeComponentPicture(binDataId: number, wHwp: number, hHwp: number): Uint8Array {
+  const w = new BufWriter();
+  // Drawing common attributes (19 bytes)
+  w.u32(CTRL_PIC);  // ctrlId: '$pic' (4)
+  w.zeros(15);      // border style, fill type (all default/none)
+  // Picture attributes (표 107, 78 bytes total = up to offset 97)
+  // Geometric region (HWPUNIT bounds)
+  w.u32(0);         // left (4)
+  w.u32(0);         // top (4)
+  w.u32(wHwp);      // right = width (4)
+  w.u32(hHwp);      // bottom = height (4)
+  // Drawing bounding box
+  w.u32(0);         // left (4)
+  w.u32(0);         // top (4)
+  w.u32(wHwp);      // right (4)
+  w.u32(hHwp);      // bottom (4)
+  // Rotation / effect (zeros = no rotation, no effect)
+  w.zeros(20);      // rotate angle, rotation center X/Y, effect flags (20)
+  // imageInfo (5 bytes at offset 87 from start)
+  // Currently at offset: 19 + 4+4+4+4 + 4+4+4+4 + 20 = 19+16+16+20 = 71... need 87
+  // Gap: 87 - 71 = 16 more bytes of zeros before binDataId
+  w.zeros(16);      // padding to reach offset 87
+  w.u16(binDataId); // BINDATA_ID (2) — which BIN stream to use
+  w.u8(0);          // image type (0 = stored in BinData storage)
+  w.u8(0);          // flags
+  w.u8(0);          // padding
+  w.zeros(5);       // remaining (to reach 97 bytes total)
+  // Total: 19+16+16+20+16+2+1+1+1+5 = 97
+  return w.build(); // 97 bytes
+}
+
+/** Encode an image node as a picture paragraph (level lv) */
+function encodePicPara(
+  imgNode: { b64: string; mime: string; w: number; h: number },
+  binDataId: number,
+  col: StyleCollector,
+  lv: number,
+  idGen: () => number,
+): Uint8Array[] {
+  const IMG_DPI  = 96; // default screen DPI
+  const PT_PER_IN = 72;
+  // Convert pixel dimensions to HWPUNIT (pt × 100)
+  const wPt = (imgNode.w / IMG_DPI) * PT_PER_IN;
+  const hPt = (imgNode.h / IMG_DPI) * PT_PER_IN;
+  const wHwp = Metric.ptToHwp(Math.max(wPt, 10));
+  const hHwp = Metric.ptToHwp(Math.max(hPt, 10));
+
+  const TABLE_CTRL_MASK = 1 << 11;
+  const instanceId = idGen();
+  const psId = col.addParaShape({});
+
+  return [
+    mkRec(TAG_PARA_HEADER,     lv,     mkParaHeader(9, TABLE_CTRL_MASK, psId, 1, 0, instanceId)),
+    mkRec(TAG_PARA_TEXT,       lv + 1, mkPicParaText()),
+    mkRec(TAG_PARA_CHAR_SHAPE, lv + 1, mkParaCharShape([[0, 0]])),
+    // $pic CTRL_HEADER (GHDR) at level lv+1
+    mkRec(TAG_CTRL_HEADER, lv + 1, mkPicCtrl(wHwp, hHwp, idGen())),
+    // SHAPE_COMPONENT_PICTURE at level lv+2
+    mkRec(TAG_SHAPE_COMPONENT_PICTURE, lv + 2, mkShapeComponentPicture(binDataId, wHwp, hHwp)),
+  ];
+}
+
+function encodePara(para: ParaNode, col: StyleCollector, lv: number, instanceId: number): Uint8Array[] {
   let text = '';
   const csPairs: [number, number][] = [];
   let pos = 0;
 
   for (const kid of para.kids) {
-    if (kid.tag !== 'span') continue;
-    const span = kid as SpanNode;
-    const csId = col.addCharShape(span.props);
-    // Only add a new pair when shape changes
-    if (csPairs.length === 0 || csPairs[csPairs.length - 1][1] !== csId) {
-      csPairs.push([pos, csId]);
-    }
-    for (const t of span.kids) {
-      if (t.tag === 'txt') { text += t.content; pos += t.content.length; }
+    if (kid.tag === 'span') {
+      const span = kid as SpanNode;
+      const csId = col.addCharShape(span.props);
+      if (csPairs.length === 0 || csPairs[csPairs.length - 1][1] !== csId) {
+        csPairs.push([pos, csId]);
+      }
+      for (const t of span.kids) {
+        if (t.tag === 'txt') { text += t.content; pos += t.content.length; }
+      }
     }
   }
 
   if (csPairs.length === 0) csPairs.push([0, 0]);
 
-  const psId = col.addParaShape(para.props);
+  const psId  = col.addParaShape(para.props);
+  const nchars = text.length + 1; // text + para terminator
+
   return [
-    mkRec(TAG_PARA_HEADER,    lv,     mkParaHeader(psId, csPairs.length)),
-    mkRec(TAG_PARA_TEXT,      lv + 1, mkParaText(text)),
+    mkRec(TAG_PARA_HEADER,     lv,     mkParaHeader(nchars, 0, psId, csPairs.length, 0, instanceId)),
+    mkRec(TAG_PARA_TEXT,       lv + 1, mkParaText(text)),
     mkRec(TAG_PARA_CHAR_SHAPE, lv + 1, mkParaCharShape(csPairs)),
   ];
 }
 
 /* ── Table encoding ─────────────────────────────────────────── */
 
-function mkTableCtrl(): Uint8Array {
-  return new BufWriter().u32(CTRL_TABLE).zeros(12).build();
+/**
+ * CTRL_HEADER for table ctrl — 46-byte GHDR (개체 공통 속성, 표 68)
+ * Layout: ctrlId(4)+attr(4)+vOff(4)+hOff(4)+w(4)+h(4)+z(4)+margins(8)+instanceId(4)+pageBreak(4)+captionLen(2)
+ */
+function mkTableCtrl(wHwp: number, hHwp: number, instanceId: number): Uint8Array {
+  return new BufWriter()
+    .u32(CTRL_TABLE)   // ctrlId: 'tbl ' (4)
+    .u32(0x082a2211)   // attr — value from real file (4)
+    .i32(0)            // vOff (4)
+    .i32(0)            // hOff (4)
+    .u32(wHwp)         // width in HWPUNIT (4)
+    .u32(hHwp)         // height in HWPUNIT (4)
+    .i32(7)            // z-order — value from real file (4)
+    .u16(140).u16(140).u16(140).u16(140) // outer margins left/right/top/bottom (8)
+    .u32(instanceId)   // instanceId (4)
+    .i32(0)            // pageBreak (4)
+    .u16(0)            // captionLen (2)
+    .build();          // 46 bytes
 }
 
-function mkTableB(rowCnt: number, colCnt: number, rowHwp: number[], bfId: number): Uint8Array {
+/**
+ * CTRL_HEADER for picture ctrl — 46-byte GHDR ($pic)
+ */
+function mkPicCtrl(wHwp: number, hHwp: number, instanceId: number): Uint8Array {
+  return new BufWriter()
+    .u32(CTRL_PIC)     // ctrlId: '$pic' (4)
+    .u32(0x082a2211)   // attr — same flags as table (4)
+    .i32(0)            // vOff (4)
+    .i32(0)            // hOff (4)
+    .u32(wHwp)         // width in HWPUNIT (4)
+    .u32(hHwp)         // height in HWPUNIT (4)
+    .i32(0)            // z-order (4)
+    .u16(0).u16(0).u16(0).u16(0) // outer margins (8)
+    .u32(instanceId)   // instanceId (4)
+    .i32(0)            // pageBreak (4)
+    .u16(0)            // captionLen (2)
+    .build();          // 46 bytes
+}
+
+/**
+ * HWPTAG_TABLE (표 75) — variable
+ * Layout (verified from real HWP file):
+ *   UINT32 attr (0x04000006)
+ *   UINT16 rowCnt
+ *   UINT16 colCnt
+ *   UINT16 cellSpacing
+ *   UINT16[4] innerMargins: left=510, right=510, top=141, bottom=141 (HWPUNIT16)
+ *   UINT16[rowCnt] rowSizes (nominal, actual height from cell LIST_HEADER)
+ *   UINT16 borderFillId
+ *   UINT16 validZoneCount
+ */
+function mkTableRecord(rowCnt: number, colCnt: number, rowHwp: number[], bfId: number): Uint8Array {
   const w = new BufWriter();
-  w.u32(0);         // attr
+  w.u32(0x04000006); // attr — from real file
   w.u16(rowCnt);
   w.u16(colCnt);
-  w.zeros(10);      // bytes 8-17: cell spacing / zone info
-  for (const h of rowHwp) w.u16(h);
-  w.u16(bfId);
+  w.u16(0);          // cellSpacing
+  w.u16(510);        // inner margin left  (0x01fe HWPUNIT16) — from real file
+  w.u16(510);        // inner margin right
+  w.u16(141);        // inner margin top   (0x008d HWPUNIT16) — from real file
+  w.u16(141);        // inner margin bottom
+  for (const h of rowHwp) w.u16(Math.max(1, h & 0xFFFF)); // row sizes as UINT16
+  w.u16(bfId);       // borderFillId
+  w.u16(0);          // validZoneCount
   return w.build();
 }
 
@@ -462,51 +885,80 @@ function mkCellListHeader(
   wHwp: number, hHwp: number,
   bfId: number,
 ): Uint8Array {
-  // Scanner reads: col = readU16LE(d, 8), row = readU16LE(d, 10)
-  // (HWP 5.0 spec: offset 8 = colAddr, offset 10 = rowAddr)
+  // 표 65 문단 리스트 헤더 (cell variant) — 47 bytes from real file:
+  // offset 0:  UINT16 paraCount
+  // offset 2:  UINT32 attr
+  // offset 6:  UINT16 (extended attr)
+  // offset 8:  UINT16 colAddr
+  // offset 10: UINT16 rowAddr
+  // offset 12: UINT16 rowSpan
+  // offset 14: UINT16 colSpan
+  // offset 16: UINT32 width
+  // offset 20: UINT32 height
+  // offset 24: UINT16 margin left  (510 = 0x01fe HWPUNIT16)
+  // offset 26: UINT16 margin right
+  // offset 28: UINT16 margin top   (141 = 0x008d HWPUNIT16)
+  // offset 30: UINT16 margin bottom
+  // offset 32: UINT16 borderFillId
+  // offset 34-46: extended (13 bytes, zeros)
   return new BufWriter()
-    .u16(paraCount) // 0-1: paraCount
-    .u32(0)         // 2-5: attr
-    .u16(0)         // 6-7: unknown
-    .u16(col)       // 8-9:  colAddr  ← col first!
-    .u16(row)       // 10-11: rowAddr ← then row
-    .u16(rs)        // 12-13: rowSpan
-    .u16(cs)        // 14-15: colSpan
-    .u32(wHwp)      // 16-19: width
-    .u32(hHwp)      // 20-23: height
-    .zeros(8)       // 24-31: padding[4]
-    .u16(bfId)      // 32-33: borderFillId
-    .build(); // 34 bytes
+    .u16(paraCount) //  0: paraCount
+    .u32(0)         //  2: attr
+    .u16(0)         //  6: extended attr
+    .u16(col)       //  8: colAddr
+    .u16(row)       // 10: rowAddr
+    .u16(rs)        // 12: rowSpan
+    .u16(cs)        // 14: colSpan
+    .u32(wHwp)      // 16: width
+    .u32(hHwp)      // 20: height
+    .u16(510)       // 24: margin left  (from real file)
+    .u16(510)       // 26: margin right
+    .u16(141)       // 28: margin top
+    .u16(141)       // 30: margin bottom
+    .u16(bfId)      // 32: borderFillId
+    .zeros(13)      // 34-46: extended fields
+    .build();       // 47 bytes
 }
 
-const DEFAULT_ROW_HEIGHT_PT = 14; // reasonable row height
+const DEFAULT_ROW_HEIGHT_PT = 14;
 
-function encodeGrid(grid: GridNode, col: StyleCollector, lv: number): Uint8Array[] {
+function encodeGrid(grid: GridNode, col: StyleCollector, lv: number, idGen: () => number): Uint8Array[] {
   const records: Uint8Array[] = [];
   const rowCnt = grid.kids.length;
   const colCnt = Math.max(1, grid.kids[0]?.kids.length ?? 1);
 
-  // Column widths
-  const cwPt = grid.props.colWidths ?? [];
-  const totalPt = cwPt.reduce((s, w) => s + w, 0) || 453; // ~A4 content width
+  const cwPt = (grid.props as any).colWidths ?? [];
+  const totalPt = cwPt.reduce((s: number, w: number) => s + w, 0) || 453;
   const defColPt = totalPt / colCnt;
 
   const defStroke = grid.props.defaultStroke ?? col.DEF_STROKE;
   const defBfId   = col.addBorderFill(defStroke);
-  const rowHwp = grid.kids.map(row =>
+
+  const rowHwp = grid.kids.map((row: any) =>
     row.heightPt != null && row.heightPt > 0
       ? Metric.ptToHwp(row.heightPt)
       : Metric.ptToHwp(DEFAULT_ROW_HEIGHT_PT));
 
-  records.push(mkRec(TAG_CTRL_HEADER, lv,     mkTableCtrl()));
-  records.push(mkRec(TAG_TABLE_B,     lv + 1, mkTableB(rowCnt, colCnt, rowHwp, defBfId)));
+  // Compute total table dimensions for GHDR
+  const totalWPt = cwPt.length > 0 ? cwPt.reduce((s: number, w: number) => s + w, 0) : totalPt;
+  const totalHPt = grid.kids.reduce((s: number, row: any) =>
+    s + (row.heightPt != null && row.heightPt > 0 ? row.heightPt : DEFAULT_ROW_HEIGHT_PT), 0);
+  const tblWHwp = Metric.ptToHwp(totalWPt);
+  const tblHHwp = Metric.ptToHwp(totalHPt);
+  const tblInstanceId = idGen();
+
+  // Table ctrl header at level lv (CTRL_HEADER for table — full 46-byte GHDR)
+  records.push(mkRec(TAG_CTRL_HEADER, lv, mkTableCtrl(tblWHwp, tblHHwp, tblInstanceId)));
+
+  // HWPTAG_TABLE at level lv+1 (child of ctrl header)
+  records.push(mkRec(TAG_TABLE, lv + 1, mkTableRecord(rowCnt, colCnt, rowHwp, defBfId)));
 
   for (let r = 0; r < grid.kids.length; r++) {
     for (let c = 0; c < grid.kids[r].kids.length; c++) {
       const cell   = grid.kids[r].kids[c];
       const wHwp   = Metric.ptToHwp(cwPt[c] ?? defColPt);
       const hHwp   = rowHwp[r];
-      const cp = cell.props;
+      const cp     = cell.props;
       const hasPerSide = cp.top || cp.bot || cp.left || cp.right;
       const bfId = hasPerSide
         ? col.addBorderFillPerSide(
@@ -514,78 +966,129 @@ function encodeGrid(grid: GridNode, col: StyleCollector, lv: number): Uint8Array
             cp.top ?? defStroke, cp.bot ?? defStroke,
             cp.bg,
           )
-        : col.addBorderFill(cp.top ?? defStroke, cp.bg);
-      const paras  = cell.kids.length > 0 ? cell.kids : [{ tag: 'para' as const, props: {}, kids: [] }];
+        : col.addBorderFill(defStroke, cp.bg);
 
+      const paras = cell.kids.length > 0
+        ? cell.kids
+        : [{ tag: 'para' as const, props: {}, kids: [] }];
+
+      // LIST_HEADER at level lv+1 (sibling of TABLE)
       records.push(mkRec(TAG_LIST_HEADER, lv + 1,
         mkCellListHeader(paras.length, r, c, cell.rs, cell.cs, wHwp, hHwp, bfId)));
 
-      // Cell paragraphs are at same level as LIST_HEADER (lv+1);
-      // their children (PARA_TEXT, PARA_CHAR_SHAPE) go to lv+2.
-      for (const para of paras) records.push(...encodePara(para, col, lv + 1));
+      // Cell paragraphs at level lv+2 (children of LIST_HEADER)
+      for (const para of paras) {
+        records.push(...encodePara(para as ParaNode, col, lv + 2, idGen()));
+      }
     }
   }
 
   return records;
 }
 
-/** Section definition CTRL_HEADER body (47 bytes, ctrlId='secd' + zeros) */
+/**
+ * CTRL_HEADER for section definition — 47 bytes (matched from real HWP files)
+ * Layout: ctrlId(4) + attr(4) + colGap(4) + u16+u16(4) + zeros(31)
+ */
 function mkSectionCtrl(): Uint8Array {
-  return new BufWriter().u32(CTRL_SECD).zeros(43).build();
+  return new BufWriter()
+    .u32(CTRL_SECD)  // ctrlId: 'secd' (4)
+    .u32(0)           // attr (4)
+    .u32(1134)        // column gap in HWPUNIT — value from real file (4)
+    .u16(0x4000)      // (2) — from real file
+    .u16(0x001f)      // (2) — from real file
+    .zeros(31)        // padding to reach 47 bytes total
+    .build();         // 4+4+4+2+2+31 = 47 bytes
 }
 
 /**
- * PARA_TEXT for the section definition paragraph.
- * Contains one inline control reference for 'secd' + para terminator.
- * Pattern per ctrl: start(U+0002) + ctrlId_lo(u16) + ctrlId_hi(u16) + 4×U+0000 + end(U+0002)
+ * Section definition paragraph structure:
+ * Level 0: PARA_HEADER (nchars=9, ctrlMask=1<<2, lineAlignCount=1)
+ * Level 1:   PARA_TEXT (secd ctrl reference + terminator, 9 WCHAR)
+ * Level 1:   PARA_CHAR_SHAPE
+ * Level 1:   PARA_LINE_SEG (36 bytes for 1 line)
+ * Level 1:   CTRL_HEADER ('secd', 4 bytes)
+ * Level 2:     PAGE_DEF (40 bytes)
+ * Level 2:     FOOTNOTE_SHAPE (28 bytes, for footnotes)
+ * Level 2:     FOOTNOTE_SHAPE (28 bytes, for endnotes)
  */
-function mkSecdParaText(): Uint8Array {
-  const lo = CTRL_SECD & 0xFFFF;
-  const hi = (CTRL_SECD >>> 16) & 0xFFFF;
-  return new BufWriter()
-    .u16(0x0002).u16(lo).u16(hi).u16(0).u16(0).u16(0).u16(0).u16(0x0002) // 16 bytes ctrl ref
-    .u16(0x000D)                                                             // para terminator
-    .build();
-}
+function buildSectionParagraph(dims: PageDims, instanceId: number): Uint8Array[] {
+  const SECD_CTRL_MASK = 1 << 2; // code 2 = 구역 정의/단 정의
+  const nchars = 9; // 8 ctrl wchars + 1 terminator
 
-/** Write a section definition paragraph containing PAGE_DEF + FOOTNOTE_SHAPE. */
-function buildSectionParagraph(dims: PageDims): Uint8Array[] {
   return [
-    mkRec(TAG_PARA_HEADER,    0, mkParaHeader(0, 1)),
-    mkRec(TAG_PARA_TEXT,      1, mkSecdParaText()),
+    mkRec(TAG_PARA_HEADER,     0, mkParaHeader(nchars, SECD_CTRL_MASK, 0, 1, 1, instanceId)),
+    mkRec(TAG_PARA_TEXT,       1, mkSecdParaText()),
     mkRec(TAG_PARA_CHAR_SHAPE, 1, mkParaCharShape([[0, 0]])),
-    mkRec(TAG_PARA_LINE_SEG,  1, new Uint8Array(36)),        // 36-byte line-seg (all zeros)
-    mkRec(TAG_CTRL_HEADER,    1, mkSectionCtrl()),            // 'secd' at level 1
-    mkRec(TAG_PAGE_DEF,       2, mkPageDef(dims)),            // page def at level 2
-    mkRec(TAG_FOOTNOTE_SHAPE, 2, new Uint8Array(28)),         // footnote shape (defaults)
-    mkRec(TAG_FOOTNOTE_SHAPE, 2, new Uint8Array(28)),         // endnote shape (defaults)
+    mkRec(TAG_PARA_LINE_SEG,   1, new Uint8Array(36)), // 1 line × 36 bytes = 36 bytes
+    mkRec(TAG_CTRL_HEADER,     1, mkSectionCtrl()),    // 'secd' at level 1
+    mkRec(TAG_PAGE_DEF,        2, mkPageDef(dims)),    // page def at level 2
+    mkRec(TAG_FOOTNOTE_SHAPE,  2, new Uint8Array(28)), // footnote shape (defaults)
+    mkRec(TAG_FOOTNOTE_SHAPE,  2, new Uint8Array(28)), // endnote shape (defaults)
   ];
 }
 
-function buildBodyTextStream(doc: DocRoot, col: StyleCollector): Uint8Array {
+function buildBodyTextStream(
+  doc: DocRoot,
+  col: StyleCollector,
+  images: BinImage[],
+): Uint8Array {
   const chunks: Uint8Array[] = [];
   const dims = doc.kids[0]?.dims ?? A4;
-  // Section definition paragraph (replaces raw PAGE_DEF at level 0)
-  for (const r of buildSectionParagraph(dims)) chunks.push(r);
+  let instanceIdCounter = 1;
+  const idGen = () => instanceIdCounter++;
+
+  // Section definition paragraph
+  for (const r of buildSectionParagraph(dims, idGen())) chunks.push(r);
+
+  const TABLE_CTRL_MASK = 1 << 11; // code 11 = 그리기 개체/표 (확장 컨트롤)
 
   for (const sheet of doc.kids) {
     for (const node of sheet.kids) {
       if (node.tag === 'para') {
-        for (const r of encodePara(node as ParaNode, col, 0)) chunks.push(r);
+        const para = node as ParaNode;
+        // Check if the paragraph contains images
+        const hasImg = para.kids.some((k: any) => k.tag === 'img');
+        if (hasImg) {
+          // Emit one image paragraph per img node found
+          for (const kid of para.kids) {
+            if ((kid as any).tag === 'img') {
+              const img = kid as any;
+              // Find matching BinImage
+              const binImg = images.find(b => b64Matches(b, img.b64));
+              if (binImg) {
+                for (const r of encodePicPara(img, binImg.id, col, 0, idGen)) chunks.push(r);
+              }
+            }
+          }
+          // Also emit any text in the paragraph (spans)
+          const textKids = para.kids.filter((k: any) => k.tag !== 'img');
+          if (textKids.length > 0) {
+            const textPara: ParaNode = { tag: 'para', props: para.props, kids: textKids as any };
+            for (const r of encodePara(textPara, col, 0, idGen())) chunks.push(r);
+          }
+        } else {
+          for (const r of encodePara(para, col, 0, idGen())) chunks.push(r);
+        }
       } else if (node.tag === 'grid') {
-        // In HWP, a table is embedded inside a "container paragraph" at level 0.
-        // CTRL_HEADER goes at level 1 (child of that paragraph).
-        // TABLE_B / LIST_HEADER / cell PARA_HEADERs go at level 2.
-        // Cell PARA_TEXT / PARA_CHAR_SHAPE go at level 3.
-        chunks.push(mkRec(TAG_PARA_HEADER, 0, mkParaHeader(0, 1)));
-        chunks.push(mkRec(TAG_PARA_TEXT, 1, mkParaText('')));
+        // Table container paragraph at level 0
+        // nchars=9 (8 ctrl wchars + terminator), ctrlMask has bit 11 set for table ctrl
+        chunks.push(mkRec(TAG_PARA_HEADER,     0, mkParaHeader(9, TABLE_CTRL_MASK, 0, 1, 0, idGen())));
+        chunks.push(mkRec(TAG_PARA_TEXT,       1, mkTableParaText()));
         chunks.push(mkRec(TAG_PARA_CHAR_SHAPE, 1, mkParaCharShape([[0, 0]])));
-        for (const r of encodeGrid(node as GridNode, col, 1)) chunks.push(r);
+        // Table ctrl at level 1, TABLE record and cells at levels 2/3
+        for (const r of encodeGrid(node as GridNode, col, 1, idGen)) chunks.push(r);
       }
     }
   }
 
   return concatU8(chunks);
+}
+
+function b64Matches(binImg: BinImage, b64: string): boolean {
+  // Compare first 100 chars of base64 for quick matching
+  const binB64 = Buffer.from(binImg.data).toString('base64');
+  return binB64.startsWith(b64.substring(0, 100)) || b64.startsWith(binB64.substring(0, 100));
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -594,29 +1097,24 @@ function buildBodyTextStream(doc: DocRoot, col: StyleCollector): Uint8Array {
 
 function buildHwpFileHeader(): Uint8Array {
   const buf = new Uint8Array(256);
+  // Signature: "HWP Document File\x00" padded to 32 bytes
   const sig = 'HWP Document File';
   for (let i = 0; i < sig.length; i++) buf[i] = sig.charCodeAt(i);
   const dv = new DataView(buf.buffer);
   dv.setUint32(32, 0x05000300, true); // version 5.0.3.0
-  dv.setUint32(36, 0x00000001, true); // flags: bit 0 = compressed
+  dv.setUint32(36, 0x00000001, true); // flags: bit 0 = compressed (zlib)
   return buf;
 }
 
 /* ═══════════════════════════════════════════════════════════════
    OLE2 / CFB container builder
-   Structure:
-     OLE2 header (512 bytes, not a sector)
-     Sector 0..fatN-1    : FAT sectors
-     Sector fatN         : Directory sector 1 (entries 0-3)
-     Sector fatN+1       : Directory sector 2 (entries 4-7)
-     Sector fatN+2 ..    : FileHeader data
-     then DocInfo data, then Section0 data
    ═══════════════════════════════════════════════════════════════ */
 
 function buildHwpOle2(
   fileHeaderData: Uint8Array,
   docInfoData:    Uint8Array,
   section0Data:   Uint8Array,
+  binImages:      BinImage[] = [],
 ): Uint8Array {
   const SS = 512;
   const ENDOFCHAIN = 0xFFFFFFFE;
@@ -631,33 +1129,45 @@ function buildHwpOle2(
     return out;
   }
 
-  const fhPad = padSector(fileHeaderData);
-  const diPad = padSector(docInfoData);
-  const s0Pad = padSector(section0Data);
-  const fhN   = fhPad.length / SS;
-  const diN   = diPad.length / SS;
-  const s0N   = s0Pad.length / SS;
-  const dirN  = 2; // always 2 dir sectors (holds 8 dir entries)
+  // Pad all data to sector boundaries
+  const fhPad  = padSector(fileHeaderData);
+  const diPad  = padSector(docInfoData);
+  const s0Pad  = padSector(section0Data);
+  const imgPads = binImages.map(img => padSector(img.data));
+
+  const fhN  = fhPad.length / SS;
+  const diN  = diPad.length / SS;
+  const s0N  = s0Pad.length / SS;
+  const imgNs = imgPads.map(p => p.length / SS);
+  const totalImgN = imgNs.reduce((s, n) => s + n, 0);
+
+  // Directory sectors: 4 entries per sector
+  // Entries: Root, FileHeader, DocInfo, BodyText, Section0 [+ BinData + images]
+  const numDirEntries = 5 + (binImages.length > 0 ? 1 + binImages.length : 0);
+  const dirN = Math.max(2, Math.ceil(numDirEntries / 4));
 
   // Compute FAT sector count iteratively
   let fatN = 1;
   for (let iter = 0; iter < 10; iter++) {
-    const total  = fatN + dirN + fhN + diN + s0N;
+    const total  = fatN + dirN + fhN + diN + s0N + totalImgN;
     const needed = Math.ceil(total / 128);
     if (needed <= fatN) break;
     fatN = needed;
   }
 
-  // Assign sector indices
-  const dir1Sec  = fatN;
-  const dir2Sec  = fatN + 1;
-  const fhSec    = fatN + dirN;
-  const diSec    = fhSec + fhN;
-  const s0Sec    = diSec + diN;
-  const totalSec = s0Sec + s0N;
+  const dir1Sec = fatN;
+  const fhSec   = fatN + dirN;
+  const diSec   = fhSec + fhN;
+  const s0Sec   = diSec + diN;
 
-  // Build FAT (fatN × 128 entries × 4 bytes = fatN × 512 bytes)
-  const fatBuf = new Uint8Array(fatN * SS).fill(0xFF); // FREESECT
+  // Image sectors come after section0
+  const imgSecs: number[] = [];
+  let curSec = s0Sec + s0N;
+  for (const n of imgNs) { imgSecs.push(curSec); curSec += n; }
+  const totalSec = curSec;
+
+  // Build FAT
+  const fatBuf = new Uint8Array(fatN * SS).fill(0xFF);
   const setFat = (i: number, v: number) => {
     fatBuf[i * 4]     = v & 0xFF;
     fatBuf[i * 4 + 1] = (v >>> 8) & 0xFF;
@@ -666,13 +1176,17 @@ function buildHwpOle2(
   };
 
   for (let i = 0; i < fatN; i++) setFat(i, FATSECT);
-  setFat(dir1Sec, dir2Sec);
-  setFat(dir2Sec, ENDOFCHAIN);
-  for (let i = 0; i < fhN; i++) setFat(fhSec + i, i + 1 < fhN ? fhSec + i + 1 : ENDOFCHAIN);
-  for (let i = 0; i < diN; i++) setFat(diSec + i, i + 1 < diN ? diSec + i + 1 : ENDOFCHAIN);
-  for (let i = 0; i < s0N; i++) setFat(s0Sec + i, i + 1 < s0N ? s0Sec + i + 1 : ENDOFCHAIN);
+  for (let i = 0; i < dirN; i++) setFat(dir1Sec + i, i + 1 < dirN ? dir1Sec + i + 1 : ENDOFCHAIN);
+  for (let i = 0; i < fhN;  i++) setFat(fhSec  + i, i + 1 < fhN  ? fhSec  + i + 1 : ENDOFCHAIN);
+  for (let i = 0; i < diN;  i++) setFat(diSec  + i, i + 1 < diN  ? diSec  + i + 1 : ENDOFCHAIN);
+  for (let i = 0; i < s0N;  i++) setFat(s0Sec  + i, i + 1 < s0N  ? s0Sec  + i + 1 : ENDOFCHAIN);
+  for (let ii = 0; ii < imgNs.length; ii++) {
+    const start = imgSecs[ii];
+    const n = imgNs[ii];
+    for (let i = 0; i < n; i++) setFat(start + i, i + 1 < n ? start + i + 1 : ENDOFCHAIN);
+  }
 
-  // Build directory (8 entries × 128 bytes = dirN × SS)
+  // Build directory
   const dirBuf = new Uint8Array(dirN * SS);
   const dv     = new DataView(dirBuf.buffer);
 
@@ -684,25 +1198,40 @@ function buildHwpOle2(
     const base = idx * 128;
     const nl   = Math.min(name.length, 31);
     for (let i = 0; i < nl; i++) dv.setUint16(base + i * 2, name.charCodeAt(i), true);
-    dv.setUint16(base + 64, (nl + 1) * 2, true); // name size (incl. null)
+    dv.setUint16(base + 64, (nl + 1) * 2, true);
     dirBuf[base + 66] = type;
     dirBuf[base + 67] = 1; // color = black
-    dv.setInt32(base + 68, left,  true); // left sibling
-    dv.setInt32(base + 72, right, true); // right sibling
-    dv.setInt32(base + 76, child, true); // child
+    dv.setInt32(base + 68, left,  true);
+    dv.setInt32(base + 72, right, true);
+    dv.setInt32(base + 76, child, true);
     dv.setUint32(base + 116, startSec >>> 0, true);
     dv.setUint32(base + 120, size >>> 0,     true);
   }
 
-  // Use right-skewed sibling chain (no left siblings) to avoid cycles in CFB parsers.
-  // Root.child → FileHeader → DocInfo → BodyText (via sibRight).
-  // BodyText.child → Section0.
-  writeDirEntry(0, 'Root Entry', 5, -1, -1,  1, ENDOFCHAIN, 0);
-  writeDirEntry(1, 'FileHeader', 2, -1,  2, -1, fhSec, fileHeaderData.length);
-  writeDirEntry(2, 'DocInfo',   2,  -1,  3, -1, diSec, docInfoData.length);
-  writeDirEntry(3, 'BodyText',  1,  -1, -1,  4, ENDOFCHAIN, 0);
-  writeDirEntry(4, 'Section0',  2,  -1, -1, -1, s0Sec, section0Data.length);
-  // Entries 5-7: type=0 (empty), everything else zeroed
+  if (binImages.length > 0) {
+    // Tree: Root(0)→FileHeader(1)→DocInfo(2)→BodyText(3)→Section0(4)
+    //                                          BodyText sibling=BinData(5)
+    //       BinData(5)→BIN0001.xxx(6)→BIN0002.xxx(7)→...
+    writeDirEntry(0, 'Root Entry', 5, -1, -1,  1, ENDOFCHAIN, 0);
+    writeDirEntry(1, 'FileHeader', 2, -1,  2, -1, fhSec, fileHeaderData.length);
+    writeDirEntry(2, 'DocInfo',    2, -1,  3, -1, diSec, docInfoData.length);
+    writeDirEntry(3, 'BodyText',   1, -1,  5,  4, ENDOFCHAIN, 0); // sibling=BinData(5)
+    writeDirEntry(4, 'Section0',   2, -1, -1, -1, s0Sec, section0Data.length);
+    writeDirEntry(5, 'BinData',    1, -1, -1,  6, ENDOFCHAIN, 0); // child=first image(6)
+    for (let ii = 0; ii < binImages.length; ii++) {
+      const img = binImages[ii];
+      const streamName = `BIN${String(img.id).padStart(4, '0')}.${img.ext}`;
+      const sibling = ii + 1 < binImages.length ? 7 + ii : -1;
+      writeDirEntry(6 + ii, streamName, 2, -1, sibling, -1, imgSecs[ii], img.data.length);
+    }
+  } else {
+    // No images — original 5-entry structure
+    writeDirEntry(0, 'Root Entry', 5, -1, -1,  1, ENDOFCHAIN, 0);
+    writeDirEntry(1, 'FileHeader', 2, -1,  2, -1, fhSec, fileHeaderData.length);
+    writeDirEntry(2, 'DocInfo',    2, -1,  3, -1, diSec, docInfoData.length);
+    writeDirEntry(3, 'BodyText',   1, -1, -1,  4, ENDOFCHAIN, 0);
+    writeDirEntry(4, 'Section0',   2, -1, -1, -1, s0Sec, section0Data.length);
+  }
 
   // Build OLE2 file header (512 bytes)
   const hdr  = new Uint8Array(SS);
@@ -714,16 +1243,6 @@ function buildHwpOle2(
   hdv.setUint16(28, 0xFFFE, true); // byte order (LE)
   hdv.setUint16(30, 9,      true); // sector size = 2^9 = 512
   hdv.setUint16(32, 6,      true); // mini sector size = 2^6 = 64
-  // OLE2 v3 header field layout (see ECMA-376 or MS-CFB spec):
-  //   40-43: num dir sectors    (must be 0 for v3)
-  //   44-47: num FAT sectors
-  //   48-51: first dir sector
-  //   52-55: transaction sig    (0)
-  //   56-59: mini stream cutoff (4096)
-  //   60-63: first mini FAT     (ENDOFCHAIN if none)
-  //   64-67: num mini FAT       (0)
-  //   68-71: first DIFAT ext    (ENDOFCHAIN if none)
-  //   72-75: num DIFAT ext      (0)
   hdv.setUint32(40, 0,          true); // num dir sectors (0 for v3)
   hdv.setUint32(44, fatN,       true); // num FAT sectors
   hdv.setUint32(48, dir1Sec,    true); // first directory sector
@@ -733,7 +1252,6 @@ function buildHwpOle2(
   hdv.setUint32(64, 0,          true); // num mini FAT sectors (0)
   hdv.setUint32(68, ENDOFCHAIN, true); // first DIFAT extension (none)
   hdv.setUint32(72, 0,          true); // num DIFAT extensions (0)
-  // DIFAT[0..108]: first fatN entries = FAT sector numbers
   for (let i = 0; i < 109; i++) {
     hdv.setUint32(76 + i * 4, i < fatN ? i : FREESECT, true);
   }
@@ -741,17 +1259,18 @@ function buildHwpOle2(
   // Assemble output
   const out = new Uint8Array(SS + totalSec * SS);
   out.set(hdr, 0);
-  // FAT sectors
   for (let i = 0; i < fatN; i++) {
     out.set(fatBuf.subarray(i * SS, (i + 1) * SS), SS + i * SS);
   }
-  // Directory sectors
-  out.set(dirBuf.subarray(0, SS),    SS + dir1Sec * SS);
-  out.set(dirBuf.subarray(SS, 2*SS), SS + dir2Sec * SS);
-  // Stream data
+  for (let i = 0; i < dirN; i++) {
+    out.set(dirBuf.subarray(i * SS, (i + 1) * SS), SS + (dir1Sec + i) * SS);
+  }
   out.set(fhPad, SS + fhSec * SS);
   out.set(diPad, SS + diSec * SS);
   out.set(s0Pad, SS + s0Sec * SS);
+  for (let ii = 0; ii < imgPads.length; ii++) {
+    out.set(imgPads[ii], SS + imgSecs[ii] * SS);
+  }
   return out;
 }
 
@@ -782,17 +1301,50 @@ export class HwpEncoder implements Encoder {
         for (const node of sheet.kids) collectNode(node, col);
       }
 
-      // Build streams
-      const docInfoRaw  = buildDocInfoStream(col);
-      const bodyRaw     = buildBodyTextStream(doc, col);
+      // Collect images from all paragraphs
+      const images: BinImage[] = [];
+      const seenB64 = new Set<string>();
+      let binIdCounter = 1;
 
-      // Compress (HWP flags bit 0 = compressed)
-      const docInfoCmp = pako.deflateRaw(docInfoRaw);
-      const bodyCmp    = pako.deflateRaw(bodyRaw);
+      function collectImages(node: any): void {
+        if (node.tag === 'para') {
+          for (const kid of node.kids) {
+            if (kid.tag === 'img') {
+              const key = kid.b64.substring(0, 50);
+              if (!seenB64.has(key)) {
+                seenB64.add(key);
+                const raw = Buffer.from(kid.b64, 'base64');
+                let ext = 'jpg';
+                if (kid.mime === 'image/png') ext = 'png';
+                else if (kid.mime === 'image/gif') ext = 'gif';
+                else if (kid.mime === 'image/bmp') ext = 'bmp';
+                images.push({ id: binIdCounter++, ext, data: new Uint8Array(raw) });
+              }
+            }
+          }
+        } else if (node.tag === 'grid') {
+          for (const row of node.kids) {
+            for (const cell of row.kids) {
+              for (const para of cell.kids) collectImages(para);
+            }
+          }
+        }
+      }
+      for (const sheet of doc.kids) {
+        for (const node of sheet.kids) collectImages(node);
+      }
 
-      // Assemble OLE2 file
+      // Build streams (raw, uncompressed)
+      const docInfoRaw = buildDocInfoStream(col, images);
+      const bodyRaw    = buildBodyTextStream(doc, col, images);
+
+      // Compress with zlib (HWP uses zlib deflate for DocInfo and BodyText streams)
+      const docInfoCmp = pako.deflate(docInfoRaw);
+      const bodyCmp    = pako.deflate(bodyRaw);
+
+      // Assemble OLE2 file (images go as raw streams in BinData storage, NOT compressed)
       const fileHdr = buildHwpFileHeader();
-      const hwp     = buildHwpOle2(fileHdr, docInfoCmp, bodyCmp);
+      const hwp     = buildHwpOle2(fileHdr, docInfoCmp, bodyCmp, images);
 
       return succeed(hwp);
     } catch (e: any) {

@@ -60,8 +60,21 @@ export class Pipeline {
 }
 
 function detectFormat(data: Uint8Array): string {
-  if (data[0] === 0x50 && data[1] === 0x4B) return 'zip';
+  // HWP 파일 (OLE Compound Document)
   if (data[0] === 0xD0 && data[1] === 0xCF && data[2] === 0x11 && data[3] === 0xE0) return 'hwp';
+
+  // ZIP 기반 파일 (DOCX, HWPX)
+  if (data[0] === 0x50 && data[1] === 0x4B) {
+    // DOCX 는 [Content_Types].xml 에 application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml 이 있음
+    // HWPX 는 application/ha-xml-core-document
+    const str = new TextDecoder('utf-8', { fatal: false }).decode(data.slice(0, 4096));
+    if (str.includes('wordprocessingml')) return 'docx';
+    if (str.includes('ha-xml')) return 'hwpx';
+    if (str.includes('hwpml/')) return 'hwpx';
+    if (str.includes('word/')) return 'docx';
+    return 'hwpx'; // 기본값
+  }
+
   return 'md';
 }
 
