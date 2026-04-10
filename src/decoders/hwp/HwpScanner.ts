@@ -675,8 +675,8 @@ function parseCellRec(
     // offset 8: colAddr, offset 10: rowAddr (HWP 5.0 spec)
     col = BinaryKit.readU16LE(d, 8);
     row = BinaryKit.readU16LE(d, 10);
-    rs  = Math.max(1, BinaryKit.readU16LE(d, 12));
-    cs  = Math.max(1, BinaryKit.readU16LE(d, 14));
+    cs  = Math.max(1, BinaryKit.readU16LE(d, 12));
+    rs  = Math.max(1, BinaryKit.readU16LE(d, 14));
     widthHwp = BinaryKit.readU32LE(d, 16);
 
     const bfId = d.length >= 34 ? BinaryKit.readU16LE(d, 32) : 0;

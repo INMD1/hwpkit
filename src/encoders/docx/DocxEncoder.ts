@@ -17,8 +17,8 @@ export class DocxEncoder implements Encoder {
   async encode(doc: DocRoot): Promise<Outcome<Uint8Array>> {
     try {
       const sheet = doc.kids[0];
-      const dims  = normalizeDims(sheet?.dims ?? A4);
-      const kids  = sheet?.kids ?? [];
+      const dims = normalizeDims(sheet?.dims ?? A4);
+      const kids = sheet?.kids ?? [];
 
       const images: ImageEntry[] = [];
       const ctx: EncCtx = { images, nextId: 10, nextImgNum: 1, warns: [], imgMap: new WeakMap() };
@@ -43,14 +43,14 @@ export class DocxEncoder implements Encoder {
       const numInfo = collectNumbering(kids);
 
       const entries: { name: string; data: Uint8Array }[] = [
-        { name: '[Content_Types].xml',            data: TextKit.encode(contentTypes(images, hasHeader, hasFooter)) },
-        { name: '_rels/.rels',                    data: TextKit.encode(pkgRels()) },
-        { name: 'word/document.xml',              data: TextKit.encode(documentXml(kids, dims, ctx, headerRId, footerRId)) },
-        { name: 'word/styles.xml',                data: TextKit.encode(stylesXml()) },
-        { name: 'word/settings.xml',              data: TextKit.encode(settingsXml()) },
-        { name: 'word/_rels/document.xml.rels',   data: TextKit.encode(docRels(images, headerRId, footerRId, numInfo.hasLists)) },
-        { name: 'docProps/app.xml',               data: TextKit.encode(appXml()) },
-        { name: 'docProps/core.xml',              data: TextKit.encode(coreXml(doc.meta)) },
+        { name: '[Content_Types].xml', data: TextKit.encode(contentTypes(images, hasHeader, hasFooter)) },
+        { name: '_rels/.rels', data: TextKit.encode(pkgRels()) },
+        { name: 'word/document.xml', data: TextKit.encode(documentXml(kids, dims, ctx, headerRId, footerRId)) },
+        { name: 'word/styles.xml', data: TextKit.encode(stylesXml()) },
+        { name: 'word/settings.xml', data: TextKit.encode(settingsXml()) },
+        { name: 'word/_rels/document.xml.rels', data: TextKit.encode(docRels(images, headerRId, footerRId, numInfo.hasLists)) },
+        { name: 'docProps/app.xml', data: TextKit.encode(appXml()) },
+        { name: 'docProps/core.xml', data: TextKit.encode(coreXml(doc.meta)) },
       ];
 
       // Add numbering.xml if needed
@@ -366,8 +366,8 @@ function encodeParaInner(para: ParaNode, ctx: EncCtx): string {
   if (spaceBefore !== undefined || spaceAfter !== undefined || lineHeight !== undefined) {
     const parts: string[] = [];
     if (spaceBefore !== undefined) parts.push(`w:before="${Metric.ptToDxa(spaceBefore)}"`);
-    if (spaceAfter  !== undefined) parts.push(`w:after="${Metric.ptToDxa(spaceAfter)}"`);
-    if (lineHeight  !== undefined) parts.push(`w:line="${Math.round(lineHeight * 240)}" w:lineRule="auto"`);
+    if (spaceAfter !== undefined) parts.push(`w:after="${Metric.ptToDxa(spaceAfter)}"`);
+    if (lineHeight !== undefined) parts.push(`w:line="${Math.round(lineHeight * 240)}" w:lineRule="auto"`);
     spacingXml = `<w:spacing ${parts.join(' ')}/>`;
   }
 
@@ -491,12 +491,12 @@ const VERT_ALIGN_DOCX: Record<string, string> = {
   top: 'top', center: 'center', bottom: 'bottom',
 };
 const WRAP_DOCX: Record<string, string> = {
-  square:  '<wp:wrapSquare wrapText="bothSides"/>',
-  tight:   '<wp:wrapTight><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/><wp:lineTo x="0" y="21600"/><wp:lineTo x="21600" y="21600"/><wp:lineTo x="21600" y="0"/><wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapTight>',
+  square: '<wp:wrapSquare wrapText="bothSides"/>',
+  tight: '<wp:wrapTight><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/><wp:lineTo x="0" y="21600"/><wp:lineTo x="21600" y="21600"/><wp:lineTo x="21600" y="0"/><wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapTight>',
   through: '<wp:wrapThrough wrapText="bothSides"><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/><wp:lineTo x="0" y="21600"/><wp:lineTo x="21600" y="21600"/><wp:lineTo x="21600" y="0"/><wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapThrough>',
-  none:    '<wp:wrapNone/>',
-  behind:  '<wp:wrapNone/>',
-  front:   '<wp:wrapNone/>',
+  none: '<wp:wrapNone/>',
+  behind: '<wp:wrapNone/>',
+  front: '<wp:wrapNone/>',
 };
 
 function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
@@ -504,168 +504,157 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
   const look = gp.look;
 
   // tblLook attributes
-  const firstRow  = look?.firstRow  ? '1' : '0';
-  const lastRow   = look?.lastRow   ? '1' : '0';
-  const firstCol  = look?.firstCol  ? '1' : '0';
-  const lastCol   = look?.lastCol   ? '1' : '0';
-  const noHBand   = look?.bandedRows ? '0' : '1';
-  const noVBand   = look?.bandedCols ? '0' : '1';
+  const firstRow = look?.firstRow ? '1' : '0';
+  const lastRow = look?.lastRow ? '1' : '0';
+  const firstCol = look?.firstCol ? '1' : '0';
+  const lastCol = look?.lastCol ? '1' : '0';
+  const noHBand = look?.bandedRows ? '0' : '1';
+  const noVBand = look?.bandedCols ? '0' : '1';
 
-  // Determine actual grid column count from colWidths or by scanning all rows
   const d = dims ?? A4;
   const availDxa = Metric.ptToDxa(d.wPt - d.ml - d.mr);
 
-  // Compute true column count: max total colSpan across all rows
+  // 1단계: 표의 가상 2D 맵핑 (Virtual Table Map) 생성
+  interface CellMap {
+    type: 'real' | 'continue' | 'empty';
+    cell?: any;
+    width?: number;
+  }
+  const tableMap: CellMap[][] = Array.from({ length: grid.kids.length }, () => []);
   let colCount = 0;
-  for (const row of grid.kids) {
-    let rowCols = 0;
-    for (const cell of row.kids) rowCols += cell.cs;
-    if (rowCols > colCount) colCount = rowCols;
+
+  for (let ri = 0; ri < grid.kids.length; ri++) {
+    let c = 0;
+    for (const cell of grid.kids[ri].kids) {
+      // 이미 위에서 병합되어 자리가 차지된 곳은 건너뜀
+      while (tableMap[ri][c]) c++;
+
+      // 실제 데이터 셀 배치
+      tableMap[ri][c] = { type: 'real', cell, width: cell.cs };
+
+      // 병합 영역(colspan, rowspan) 예약 처리
+      for (let rr = 0; rr < cell.rs; rr++) {
+        for (let cc = 0; cc < cell.cs; cc++) {
+          if (rr === 0 && cc === 0) continue; // 원본 위치
+          if (!tableMap[ri + rr]) tableMap[ri + rr] = [];
+
+          if (rr > 0 && cc === 0) {
+            // 세로 병합의 첫 번째 열은 <w:vMerge/> 처리용 셀
+            tableMap[ri + rr][c + cc] = { type: 'continue', width: cell.cs };
+          } else {
+            // 가로 병합으로 흡수된 열은 아예 렌더링하지 않음
+            tableMap[ri + rr][c + cc] = { type: 'empty' };
+          }
+        }
+      }
+      c += cell.cs;
+    }
+    if (c > colCount) colCount = c;
   }
   if (colCount === 0) colCount = grid.kids[0]?.kids.length ?? 1;
 
-  const defaultColDxa = Math.round(availDxa / colCount);
-
-  // Use actual column widths if available from source format
-  const colWidthsDxa: number[] = [];
-  if (grid.props.colWidths && grid.props.colWidths.length === colCount) {
-    // Fill zero-width columns by distributing remaining space
-    const srcPt = [...grid.props.colWidths];
-    const knownTotal = srcPt.filter(w => w > 0).reduce((s, w) => s + w, 0);
-    const zeroCount = srcPt.filter(w => w <= 0).length;
-    const remaining = Math.max(0, Metric.dxaToPt(availDxa) - knownTotal);
-    const zeroFill = zeroCount > 0 ? remaining / zeroCount : 0;
-    for (let i = 0; i < srcPt.length; i++) {
-      if (srcPt[i] <= 0) srcPt[i] = zeroFill > 0 ? zeroFill : Metric.dxaToPt(defaultColDxa);
+  // 빈 배열 빈칸 채우기 방어 로직
+  for (let ri = 0; ri < grid.kids.length; ri++) {
+    for (let c = 0; c < colCount; c++) {
+      if (!tableMap[ri][c]) tableMap[ri][c] = { type: 'empty' };
     }
-    const srcWidths = srcPt.map(w => Metric.ptToDxa(w));
-    const srcTotal = srcWidths.reduce((s, w) => s + w, 0);
-    // Normalize to fit available page width if source widths exceed it
-    const scale = srcTotal > availDxa ? availDxa / srcTotal : 1;
-    for (const w of srcWidths) colWidthsDxa.push(Math.round(w * scale));
+  }
+
+  // 2단계: 컬럼 너비(dxa) 계산
+  // 2단계: 컬럼 너비(dxa) 계산 (수정된 부분)
+  const defaultColDxa = Math.round(availDxa / colCount);
+  let colWidthsDxa: number[] = [];
+
+  if (grid.props.colWidths && grid.props.colWidths.length > 0) {
+    // 배열 길이가 colCount와 달라도 원본 너비를 버리지 않고 최대한 활용함
+    const srcPt = [...grid.props.colWidths];
+
+    // 계산된 컬럼 수보다 데이터가 부족하면 빈 공간(0)으로 채워 넣음
+    while (srcPt.length < colCount) {
+      srcPt.push(0);
+    }
+    // 데이터가 너무 많으면 colCount 크기에 맞춰 잘라냄
+    srcPt.length = colCount;
+
+    const knownTotalPt = srcPt.filter(w => w > 0).reduce((s, w) => s + w, 0);
+    const zeroCount = srcPt.filter(w => w <= 0).length;
+    const availPt = Metric.dxaToPt(availDxa);
+
+    // 페이지 전체 너비에서 이미 값이 있는 컬럼들의 너비를 빼고 남은 공간 계산
+    const remainingPt = Math.max(0, availPt - knownTotalPt);
+    const zeroFillPt = zeroCount > 0 ? remainingPt / zeroCount : 0;
+
+    for (let i = 0; i < srcPt.length; i++) {
+      if (srcPt[i] <= 0) {
+        srcPt[i] = zeroFillPt > 0 ? zeroFillPt : (availPt / colCount);
+      }
+    }
+
+    // 포인트(Pt) 단위를 Word의 DXA 단위로 변환
+    colWidthsDxa = srcPt.map(w => Math.round(Metric.ptToDxa(w)));
+
+    // 전체 너비가 페이지 너비를 초과하면 페이지 너비에 맞춰 비율 축소
+    const computedTotalDxa = colWidthsDxa.reduce((s, w) => s + w, 0);
+    if (computedTotalDxa > availDxa) {
+      const scale = availDxa / computedTotalDxa;
+      colWidthsDxa = colWidthsDxa.map(w => Math.round(w * scale));
+    }
   } else {
+    // 너비 정보가 아예 없는 경우에만 균등 분배
     for (let c = 0; c < colCount; c++) colWidthsDxa.push(defaultColDxa);
   }
+
   const totalDxa = colWidthsDxa.reduce((s, w) => s + w, 0);
+  const gridCols = colWidthsDxa.map(w => `<w:gridCol w:w="${w}"/>`).join('');
 
-  // Grid columns
-  const gridCols = colWidthsDxa.map(w => `<w:gridCol w:w="${Math.round(w)}"/>`).join('');
-
-  // Pre-compute vMerge map: for each (ri, colIdx), track if a cell with rs>1 spans into this row
-  // Key: "ri,colIdx", Value: 'restart' | 'continue'
-  const vMergeMap = new Map<string, 'restart' | 'continue'>();
-  for (let ri = 0; ri < grid.kids.length; ri++) {
-    let colIdx = 0;
-    for (const cell of grid.kids[ri].kids) {
-      if (cell.rs > 1) {
-        vMergeMap.set(`${ri},${colIdx}`, 'restart');
-        for (let sr = 1; sr < cell.rs; sr++) {
-          vMergeMap.set(`${ri + sr},${colIdx}`, 'continue');
-        }
-      }
-      colIdx += cell.cs;
-    }
-  }
-
+  // 3단계: XML 렌더링
   const rows = grid.kids.map((row, ri) => {
-    let colIdx = 0;
-
-    // Build actual cells including continuation cells for vMerge
     const cellXmls: string[] = [];
-    let srcCellIdx = 0;
 
-    // Walk through grid columns, emitting either real cells or vMerge continue cells
-    while (srcCellIdx < row.kids.length) {
-      const cell = row.kids[srcCellIdx];
-      const mergeType = vMergeMap.get(`${ri},${colIdx}`);
+    for (let c = 0; c < colCount; c++) {
+      const mapEntry = tableMap[ri][c];
+      if (mapEntry.type === 'empty') continue; // colspan 흡수된 자리 건너뜀
 
-      const cp = cell.props;
-      const tcPrParts: string[] = [];
-
-      // Cell width in DXA (sum of spanned columns)
-      let cellW = 0;
-      for (let sc = colIdx; sc < colIdx + cell.cs && sc < colWidthsDxa.length; sc++) cellW += colWidthsDxa[sc];
-      if (cellW === 0) cellW = defaultColDxa * cell.cs;
-      tcPrParts.push(`<w:tcW w:w="${Math.round(cellW)}" w:type="dxa"/>`);
-
-      if (cell.cs > 1) tcPrParts.push(`<w:gridSpan w:val="${cell.cs}"/>`);
-
-      // vMerge
-      if (cell.rs > 1) {
-        tcPrParts.push(`<w:vMerge w:val="restart"/>`);
-      }
-
-      // Cell borders
-      const borders = encodeCellBorders(cp);
-      if (borders) tcPrParts.push(borders);
-
-      // Cell background
-      if (cp.bg) tcPrParts.push(`<w:shd w:val="clear" w:color="auto" w:fill="${cp.bg}"/>`);
-
-      // Vertical alignment
-      if (cp.va) {
-        const vaMap: Record<string, string> = { top: 'top', mid: 'center', bot: 'bottom' };
-        tcPrParts.push(`<w:vAlign w:val="${vaMap[cp.va] ?? 'top'}"/>`);
-      }
-
-      const tcPr = `<w:tcPr>${tcPrParts.join('')}</w:tcPr>`;
-      cellXmls.push(`      <w:tc>${tcPr}${cell.kids.map(p => encodeParaInner(p, ctx)).join('')}</w:tc>`);
-      colIdx += cell.cs;
-      srcCellIdx++;
-    }
-
-    // Now emit vMerge continue cells for rows that are spanned into
-    // We need to check if any cells from rows above span into this row
-    // Re-walk grid columns looking for continue cells not covered by this row's cells
-    const finalCells: string[] = [];
-    let finalColIdx = 0;
-    let cellIter = 0;
-
-    // Use the computed colCount (max across all rows)
-    const totalGridCols = colCount;
-
-    // Re-check: we need to interleave vMerge continue cells
-    // The current row may have fewer cells because the model already skipped continuation cells
-    // So we need to insert continuation cells where vMergeMap says 'continue' for this row
-    finalColIdx = 0;
-    cellIter = 0;
-    for (let gc = 0; gc < totalGridCols; ) {
-      const mergeType = vMergeMap.get(`${ri},${gc}`);
-      if (mergeType === 'continue') {
-        // Find the original cell's cs from the restart row
-        let origCs = 1;
-        for (let sr = ri - 1; sr >= 0; sr--) {
-          const mt = vMergeMap.get(`${sr},${gc}`);
-          if (mt === 'restart') {
-            // Find the cell at this column in that row
-            let col = 0;
-            for (const c of grid.kids[sr].kids) {
-              if (col === gc) { origCs = c.cs; break; }
-              col += c.cs;
-            }
-            break;
-          }
-        }
+      // 세로 병합되어 내려온 빈 셀 처리
+      if (mapEntry.type === 'continue') {
         let cw = 0;
-        for (let sc = gc; sc < gc + origCs && sc < colWidthsDxa.length; sc++) cw += colWidthsDxa[sc];
-        if (cw === 0) cw = defaultColDxa * origCs;
+        for (let sc = c; sc < c + mapEntry.width! && sc < colWidthsDxa.length; sc++) cw += colWidthsDxa[sc];
+        if (cw === 0) cw = defaultColDxa * mapEntry.width!;
+
         let contParts = `<w:tcW w:w="${Math.round(cw)}" w:type="dxa"/>`;
-        if (origCs > 1) contParts += `<w:gridSpan w:val="${origCs}"/>`;
+        if (mapEntry.width! > 1) contParts += `<w:gridSpan w:val="${mapEntry.width!}"/>`;
         contParts += `<w:vMerge/>`;
-        finalCells.push(`      <w:tc><w:tcPr>${contParts}</w:tcPr><w:p><w:pPr/></w:p></w:tc>`);
-        gc += origCs;
-      } else {
-        if (cellIter < cellXmls.length) {
-          finalCells.push(cellXmls[cellIter]);
-          gc += row.kids[cellIter]?.cs ?? 1;
-          cellIter++;
-        } else {
-          gc++;
+
+        cellXmls.push(`      <w:tc><w:tcPr>${contParts}</w:tcPr><w:p><w:pPr/></w:p></w:tc>`);
+      }
+
+      // 실제 내용이 들어있는 셀 처리
+      if (mapEntry.type === 'real') {
+        const cell = mapEntry.cell!;
+        const cp = cell.props;
+        const tcPrParts: string[] = [];
+
+        let cellW = 0;
+        for (let sc = c; sc < c + cell.cs && sc < colWidthsDxa.length; sc++) cellW += colWidthsDxa[sc];
+        if (cellW === 0) cellW = defaultColDxa * cell.cs;
+
+        tcPrParts.push(`<w:tcW w:w="${Math.round(cellW)}" w:type="dxa"/>`);
+        if (cell.cs > 1) tcPrParts.push(`<w:gridSpan w:val="${cell.cs}"/>`);
+        if (cell.rs > 1) tcPrParts.push(`<w:vMerge w:val="restart"/>`);
+
+        const borders = encodeCellBorders(cp);
+        if (borders) tcPrParts.push(borders);
+        if (cp.bg) tcPrParts.push(`<w:shd w:val="clear" w:color="auto" w:fill="${cp.bg}"/>`);
+        if (cp.va) {
+          const vaMap: Record<string, string> = { top: 'top', mid: 'center', bot: 'bottom' };
+          tcPrParts.push(`<w:vAlign w:val="${vaMap[cp.va] ?? 'top'}"/>`);
         }
+
+        const tcPr = `<w:tcPr>${tcPrParts.join('')}</w:tcPr>`;
+        cellXmls.push(`      <w:tc>${tcPr}${cell.kids.map((p: any) => encodeParaInner(p, ctx)).join('')}</w:tc>`);
       }
     }
 
-    // Row properties: header + height
     const trPrParts: string[] = [];
     if (ri === 0 && (gp.headerRow || look?.firstRow)) {
       trPrParts.push('<w:tblHeader/>');
@@ -676,10 +665,10 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
     }
     const trPr = trPrParts.length > 0 ? `<w:trPr>${trPrParts.join('')}</w:trPr>` : '';
 
-    return `    <w:tr>${trPr}\n${finalCells.join('\n')}\n    </w:tr>`;
+    return `    <w:tr>${trPr}\n${cellXmls.join('\n')}\n    </w:tr>`;
   }).join('\n');
 
-  // Table borders from defaultStroke
+  // 4단계: 테두리 및 최종 테이블 XML 조립
   let tblBorders = '';
   if (gp.defaultStroke) {
     const s = gp.defaultStroke;
@@ -696,7 +685,6 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
 ${rows}
     </w:tbl>`;
 }
-
 function encodeCellBorders(cp: CellProps): string {
   if (!cp.top && !cp.bot && !cp.left && !cp.right) return '';
   const strokeKindMap: Record<string, string> = { solid: 'single', dash: 'dash', dot: 'dot', double: 'double', none: 'none' };
@@ -710,6 +698,19 @@ function encodeCellBorders(cp: CellProps): string {
   return `<w:tcBorders>${encode(cp.top, 'top')}${encode(cp.bot, 'bottom')}${encode(cp.left, 'left')}${encode(cp.right, 'right')}</w:tcBorders>`;
 }
 
-function esc(s: string): string { return TextKit.escapeXml(s); }
+function esc(s: string): string {
+  if (!s) return '';
+  // 1. 내부 처리용 플레이스홀더(__EXT_0__ 등) 제거
+  s = s.replace(/__EXT_\d+__/g, '');
+
+  // 2. 글자 깨짐을 유발하는 쓰레기값 및 BOM 기호 명시적 제거 (이 부분 추가!)
+  s = s.replace(/湰灧/g, '');
+  s = s.replace(/\uFEFF/g, '');
+
+  // 3. DOCX(XML 1.0)에서 허용하지 않는 보이지 않는 제어문자 모두 제거
+  s = s.replace(/[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD]/g, '');
+
+  return TextKit.escapeXml(s);
+}
 
 registry.registerEncoder(new DocxEncoder());
