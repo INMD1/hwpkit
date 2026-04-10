@@ -18,6 +18,7 @@ import type {
   CellProps,
   GridProps,
   TableLook,
+  Stroke,
   ImgLayout,
   ImgHorzAlign,
   ImgVertAlign,
@@ -90,6 +91,17 @@ export class DocxDecoder implements Decoder {
         }
       }
 
+      // Parse styles.xml for tblStyle defaults
+      let stylesMap: StylesMap = new Map();
+      const stylesXml = files.get("word/styles.xml");
+      if (stylesXml) {
+        try {
+          stylesMap = await parseStylesMap(TextKit.decode(stylesXml));
+        } catch {
+          /* non-fatal */
+        }
+      }
+
       const docStr = TextKit.decode(docXml);
       const docObj: any = await XmlKit.parseStrict(docStr);
 
@@ -97,7 +109,7 @@ export class DocxDecoder implements Decoder {
       const dims = extractDims(body) ?? { ...A4 };
       const elements = getBodyElements(body);
 
-      const decCtx: DecCtx = { relsMap, files, shield, numMap, warns };
+      const decCtx: DecCtx = { relsMap, files, shield, numMap, warns, stylesMap };
 
       const kids: ContentNode[] = [];
       for (const el of elements) {
@@ -153,12 +165,30 @@ export class DocxDecoder implements Decoder {
 
 // ─── types ─────────────────────────────────────────────────
 
+interface TblBorderDef {
+  top?: Stroke;
+  bottom?: Stroke;
+  left?: Stroke;
+  right?: Stroke;
+  insideH?: Stroke;
+  insideV?: Stroke;
+}
+
+/** Parsed tblStyle defaults from styles.xml */
+interface TblStyleDef {
+  tblBorders?: TblBorderDef;
+  cellBg?: string; // default cell background
+}
+
+type StylesMap = Map<string, TblStyleDef>; // styleId → defaults
+
 interface DecCtx {
   relsMap: Map<string, string>;
   files: Map<string, Uint8Array>;
   shield: ShieldedParser;
   numMap: NumMap;
   warns: string[];
+  stylesMap: StylesMap;
 }
 
 // numId → { abstractNumId, levels: Map<ilvl, { fmt, isOrdered }> }
@@ -679,6 +709,85 @@ function decodeRun(run: any, ctx: DecCtx): SpanNode {
   return buildSpan(content, props);
 }
 
+/** Parse all 6 border sides from a w:tblBorders or w:tcBorders node */
+function parseBorderDef(bdrNode: any): TblBorderDef {
+  const sides: [string, keyof TblBorderDef][] = [
+    ["top", "top"], ["bottom", "bottom"], ["left", "left"], ["right", "right"],
+    ["insideH", "insideH"], ["insideV", "insideV"],
+  ];
+  const result: TblBorderDef = {};
+  for (const [xml, prop] of sides) {
+    const bdr = bdrNode?.["w:" + xml]?.[0]?._attr ?? bdrNode?.[xml]?.[0]?._attr;
+    if (!bdr) continue;
+    const val = bdr?.["w:val"] ?? bdr?.val;
+    if (val === "none" || val === "nil") continue; // explicit none → skip (no border)
+    result[prop] = safeStrokeDocx(
+      val,
+      Number(bdr?.["w:sz"] ?? bdr?.sz ?? 4),
+      bdr?.["w:color"] ?? bdr?.color,
+    );
+  }
+  return result;
+}
+
+/** Parse styles.xml and build a map of tblStyle defaults */
+async function parseStylesMap(xml: string): Promise<StylesMap> {
+  const map: StylesMap = new Map();
+  try {
+    const obj: any = await XmlKit.parseStrict(xml);
+    const stylesRoot = obj?.["w:styles"]?.[0] ?? obj?.styles?.[0] ?? obj;
+    const styleArr = toArr(stylesRoot?.["w:style"] ?? stylesRoot?.style);
+    for (const style of styleArr) {
+      const attr = style?._attr ?? {};
+      const type = attr?.["w:type"] ?? attr?.type;
+      if (type !== "table") continue;
+      const id = attr?.["w:styleId"] ?? attr?.styleId;
+      if (!id) continue;
+      const tblPr = style?.["w:tblPr"]?.[0] ?? style?.tblPr?.[0];
+      const tblBdrNode = tblPr?.["w:tblBorders"]?.[0] ?? tblPr?.tblBorders?.[0];
+      const tblBorders = tblBdrNode ? parseBorderDef(tblBdrNode) : undefined;
+      // tcStyle > tcBdr for default cell borders
+      const tcStyle = style?.["w:tcStyle"]?.[0] ?? style?.tcStyle?.[0];
+      const tcBdrNode = tcStyle?.["w:tcBdr"]?.[0] ?? tcStyle?.tcBdr?.[0];
+      if (tcBdrNode) {
+        const cellDef = parseBorderDef(tcBdrNode);
+        // merge into tblBorders as inner/outer defaults
+        if (!tblBorders) {
+          map.set(id, { tblBorders: cellDef });
+        } else {
+          map.set(id, { tblBorders: { ...cellDef, ...tblBorders } });
+        }
+      } else if (tblBorders) {
+        map.set(id, { tblBorders });
+      }
+    }
+  } catch {
+    /* non-fatal */
+  }
+  return map;
+}
+
+/** Resolve final CellProps borders using 3-level priority chain */
+function resolveCellBorders(
+  cp: CellProps,
+  ri: number, ci: number, rs: number, cs: number,
+  rowCount: number, colCount: number,
+  tblBdr: TblBorderDef,
+): CellProps {
+  const isTopEdge    = ri === 0;
+  const isBottomEdge = ri + rs >= rowCount;
+  const isLeftEdge   = ci === 0;
+  const isRightEdge  = ci + cs >= colCount;
+
+  // Apply tblBorders only where no explicit tcBorder was set
+  const resolved: CellProps = { ...cp };
+  if (!resolved.top)   resolved.top   = isTopEdge    ? tblBdr.top    : tblBdr.insideH;
+  if (!resolved.bot)   resolved.bot   = isBottomEdge ? tblBdr.bottom : tblBdr.insideH;
+  if (!resolved.left)  resolved.left  = isLeftEdge   ? tblBdr.left   : tblBdr.insideV;
+  if (!resolved.right) resolved.right = isRightEdge  ? tblBdr.right  : tblBdr.insideV;
+  return resolved;
+}
+
 function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
   // Parse tblPr for table styles
   const tblPr = tbl?.["w:tblPr"]?.[0] ?? tbl?.tblPr?.[0] ?? {};
@@ -700,21 +809,20 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
     bandedCols: tblLookAttr?.["w:noVBand"] === "0" || undefined,
   };
 
-  // Parse table borders for defaultStroke
-  const tblBorders = tblPr?.["w:tblBorders"]?.[0] ?? tblPr?.tblBorders?.[0];
-  let defaultStroke = undefined;
-  if (tblBorders) {
-    const top =
-      tblBorders?.["w:top"]?.[0]?._attr ?? tblBorders?.top?.[0]?._attr;
-    if (top) {
-      defaultStroke = safeStrokeDocx(
-        top?.["w:val"] ?? top?.val,
-        Number(top?.["w:sz"] ?? top?.sz ?? 4),
-        top?.["w:color"] ?? top?.color,
-      );
-    }
+  // ① tblStyle 기본값 로드
+  const tblStyleId = (tblPr?.["w:tblStyle"]?.[0]?._attr ?? tblPr?.tblStyle?.[0]?._attr)?.["w:val"];
+  const styleDef = tblStyleId ? ctx.stylesMap.get(tblStyleId) : undefined;
+  let tblBdr: TblBorderDef = styleDef?.tblBorders ?? {};
+
+  // ② tblBorders 재정의 (tblStyle보다 우선)
+  const tblBordersNode = tblPr?.["w:tblBorders"]?.[0] ?? tblPr?.tblBorders?.[0];
+  if (tblBordersNode) {
+    const parsed = parseBorderDef(tblBordersNode);
+    tblBdr = { ...tblBdr, ...parsed };
   }
 
+  // defaultStroke for HWPX/HWP encoders: use insideH (inner horizontal border)
+  const defaultStroke = tblBdr.insideH ?? tblBdr.top;
   const gridProps: GridProps = { look, defaultStroke };
 
   // Read column widths from w:tblGrid
@@ -811,24 +919,25 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
       const bgAttr = tcPr?.["w:shd"]?.[0]?._attr ?? {};
       const bg = safeHex(bgAttr?.["w:fill"] ?? bgAttr?.fill);
 
-      // Cell borders
-      const tcBorders = tcPr?.["w:tcBorders"]?.[0] ?? tcPr?.tcBorders?.[0];
+      // ③ tcBorders 셀 수준 재정의 (우선순위 가장 높음)
+      const tcBordersNode = tcPr?.["w:tcBorders"]?.[0] ?? tcPr?.tcBorders?.[0];
       const cp: CellProps = { bg, isHeader: isHeaderRow || undefined };
 
-      if (tcBorders) {
+      if (tcBordersNode) {
         const dirs: Array<[string, "top" | "bot" | "left" | "right"]> = [
-          ["top", "top"],
-          ["bottom", "bot"],
-          ["left", "left"],
-          ["right", "right"],
+          ["top", "top"], ["bottom", "bot"], ["left", "left"], ["right", "right"],
         ];
         for (const [xmlTag, propKey] of dirs) {
           const bdr =
-            tcBorders?.["w:" + xmlTag]?.[0]?._attr ??
-            tcBorders?.[xmlTag]?.[0]?._attr;
-          if (bdr) {
+            tcBordersNode?.["w:" + xmlTag]?.[0]?._attr ??
+            tcBordersNode?.[xmlTag]?.[0]?._attr;
+          if (!bdr) continue;
+          const val = bdr?.["w:val"] ?? bdr?.val;
+          if (val === "none" || val === "nil") {
+            // explicit none: keep as undefined (no border)
+          } else {
             cp[propKey] = safeStrokeDocx(
-              bdr?.["w:val"] ?? bdr?.val,
+              val,
               Number(bdr?.["w:sz"] ?? bdr?.sz ?? 4),
               bdr?.["w:color"] ?? bdr?.color,
             );
@@ -842,14 +951,22 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
       const vaVal = vaAttr?.["w:val"] ?? vaAttr?.val;
       if (vaVal) {
         const vaMap: Record<string, "top" | "mid" | "bot"> = {
-          top: "top",
-          center: "mid",
-          bottom: "bot",
+          top: "top", center: "mid", bottom: "bot",
         };
         cp.va = vaMap[vaVal];
       }
 
       const rs = rsMap.get(`${ri},${ci}`) ?? 1;
+
+      // Compute logical column index for this cell
+      let gridColIdx = 0;
+      for (let prevCi = 0; prevCi < ci; prevCi++) {
+        if (!rawRow[prevCi].vMergeContinue) gridColIdx += rawRow[prevCi].gridSpan;
+      }
+
+      // Apply 3-level border resolution (tblStyle → tblBorders → tcBorders already in cp)
+      const colCount = gridProps.colWidths?.length ?? rawGrid[0]?.reduce((s, c) => s + c.gridSpan, 0) ?? 1;
+      const resolvedCp = resolveCellBorders(cp, ri, gridColIdx, rs, rc.gridSpan, rawGrid.length, colCount, tblBdr);
 
       const paras = toArr(cell?.["w:p"] ?? cell?.p).map((p: any) =>
         decodePara(p, ctx),
@@ -858,7 +975,7 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
         buildCell(paras.length > 0 ? paras : [buildPara([buildSpan("")])], {
           cs: rc.gridSpan,
           rs,
-          props: cp,
+          props: resolvedCp,
         }),
       );
     }

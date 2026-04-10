@@ -1,6 +1,7 @@
 import type { Encoder } from '../../contract/encoder';
 import type { DocRoot, ParaNode, SpanNode, GridNode, ContentNode, ImgNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
+import type { Stroke } from '../../model/doc-props';
 import { succeed, fail } from '../../contract/result';
 import { TextKit } from '../../toolkit/TextKit';
 import { registry } from '../../pipeline/registry';
@@ -115,22 +116,75 @@ function encodeImage(img: ImgNode): string {
   return `![${img.alt ?? ''}](data:${img.mime};base64,${img.b64})`;
 }
 
+/** pt → CSS border shorthand (only if stroke is visible) */
+function strokeToCss(s?: Stroke): string | undefined {
+  if (!s || s.kind === 'none' || s.pt <= 0) return undefined;
+  const kindMap: Record<string, string> = { solid: 'solid', dash: 'dashed', dot: 'dotted', double: 'double', none: 'none' };
+  const style = kindMap[s.kind] ?? 'solid';
+  const px = Math.max(1, Math.round(s.pt * 96 / 72));
+  const color = s.color.startsWith('#') ? s.color : `#${s.color}`;
+  return `${px}px ${style} ${color}`;
+}
+
 function encodeGrid(grid: GridNode, warns: string[]): string {
   if (grid.kids.length === 0) return '';
 
-  // Warn about table style loss
-  if (grid.props.look) warns.push('[SHIELD] MD: 표 스타일(색상, 테두리, 머리행 강조) 표현 불가 — 손실됨');
+  // HTML 테이블로 출력 — 테두리/배경색을 인라인 스타일로 유지
+  const rowCount = grid.kids.length;
 
-  const rows = grid.kids.map(row =>
-    `| ${row.kids.map(cell => cell.kids.map(p => encodePara(p, warns)).join(' ')).join(' | ')} |`,
-  );
-
-  if (rows.length > 0) {
-    const cols = grid.kids[0].kids.length;
-    rows.splice(1, 0, `| ${Array(cols).fill('---').join(' | ')} |`);
+  // Build occupancy map for rowspan
+  const occupancy: Set<number>[] = Array.from({ length: rowCount }, () => new Set());
+  let colCount = 0;
+  for (let ri = 0; ri < rowCount; ri++) {
+    const row = grid.kids[ri];
+    let ci = 0;
+    for (const cell of row.kids) {
+      while (occupancy[ri].has(ci)) ci++;
+      if (cell.rs > 1) {
+        for (let r = ri + 1; r < ri + cell.rs && r < rowCount; r++) {
+          for (let c = ci; c < ci + cell.cs; c++) occupancy[r].add(c);
+        }
+      }
+      ci += cell.cs;
+    }
+    while (occupancy[ri].has(ci)) ci++;
+    if (ci > colCount) colCount = ci;
   }
 
-  return rows.join('\n');
+  let rows = '';
+  for (let ri = 0; ri < rowCount; ri++) {
+    const row = grid.kids[ri];
+    let cells = '';
+    let colIdx = 0;
+
+    for (const cell of row.kids) {
+      while (occupancy[ri].has(colIdx)) colIdx++;
+
+      const cs = cell.cs > 1 ? ` colspan="${cell.cs}"` : '';
+      const rs = cell.rs > 1 ? ` rowspan="${cell.rs}"` : '';
+
+      const styles: string[] = ['padding:4px 6px', 'vertical-align:top'];
+      const top    = strokeToCss(cell.props.top);
+      const bot    = strokeToCss(cell.props.bot);
+      const left   = strokeToCss(cell.props.left);
+      const right  = strokeToCss(cell.props.right);
+      if (top)   styles.push(`border-top:${top}`);
+      if (bot)   styles.push(`border-bottom:${bot}`);
+      if (left)  styles.push(`border-left:${left}`);
+      if (right) styles.push(`border-right:${right}`);
+      if (cell.props.bg) styles.push(`background-color:#${cell.props.bg}`);
+      if (cell.props.va === 'mid') styles[1] = 'vertical-align:middle';
+      else if (cell.props.va === 'bot') styles[1] = 'vertical-align:bottom';
+
+      const tag = (grid.props.headerRow && ri === 0) || cell.props.isHeader ? 'th' : 'td';
+      const content = cell.kids.map(p => encodePara(p, warns)).join('\n');
+      cells += `<${tag}${cs}${rs} style="${styles.join(';')}">${content}</${tag}>`;
+      colIdx += cell.cs;
+    }
+    rows += `<tr>${cells}</tr>\n`;
+  }
+
+  return `<table style="border-collapse:collapse;width:100%">\n<tbody>\n${rows}</tbody>\n</table>\n`;
 }
 
 registry.registerEncoder(new MdEncoder());

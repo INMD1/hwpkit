@@ -683,7 +683,7 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
   let tblBorders = '';
   if (gp.defaultStroke) {
     const s = gp.defaultStroke;
-    const strokeKindMap: Record<string, string> = { solid: 'single', dash: 'dashed', dot: 'dotted', double: 'double', none: 'none' };
+    const strokeKindMap: Record<string, string> = { solid: 'single', dash: 'dash', dot: 'dot', double: 'double', none: 'none' };
     const val = strokeKindMap[s.kind] ?? 'single';
     const sz = Math.round(s.pt * 8);
     const bdr = `w:val="${val}" w:sz="${sz}" w:space="0" w:color="${s.color}"`;
@@ -699,7 +699,7 @@ ${rows}
 
 function encodeCellBorders(cp: CellProps): string {
   if (!cp.top && !cp.bot && !cp.left && !cp.right) return '';
-  const strokeKindMap: Record<string, string> = { solid: 'single', dash: 'dashed', dot: 'dotted', double: 'double', none: 'none' };
+  const strokeKindMap: Record<string, string> = { solid: 'single', dash: 'dash', dot: 'dot', double: 'double', none: 'none' };
 
   const encode = (s?: { kind: string; pt: number; color: string }, tag?: string) => {
     if (!s || !tag) return '';

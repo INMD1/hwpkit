@@ -10,6 +10,7 @@ import './decoders/hwpx/HwpxDecoder';
 import './decoders/docx/DocxDecoder';
 import './decoders/hwp/HwpScanner';
 import './encoders/md/MdEncoder';
+import './encoders/html/HtmlEncoder';
 import './encoders/hwpx/HwpxEncoder';
 import './encoders/docx/DocxEncoder';
 import './encoders/hwp/HwpEncoder';

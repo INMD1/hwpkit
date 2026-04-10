@@ -17,7 +17,7 @@ import { Metric }             from '../../safety/StyleBridge';
 import { registry }           from '../../pipeline/registry';
 import { A4 }                 from '../../model/doc-props';
 import pako                   from 'pako';
-import { Buffer }             from 'node:buffer';
+import { TextKit }            from '../../toolkit/TextKit';
 
 /* ═══════════════════════════════════════════════════════════════
    HWP 5.0 tag IDs (HWP 5.0 spec 표 13, 표 57)
@@ -757,13 +757,9 @@ function encodePicPara(
   lv: number,
   idGen: () => number,
 ): Uint8Array[] {
-  const IMG_DPI  = 96; // default screen DPI
-  const PT_PER_IN = 72;
-  // Convert pixel dimensions to HWPUNIT (pt × 100)
-  const wPt = (imgNode.w / IMG_DPI) * PT_PER_IN;
-  const hPt = (imgNode.h / IMG_DPI) * PT_PER_IN;
-  const wHwp = Metric.ptToHwp(Math.max(wPt, 10));
-  const hHwp = Metric.ptToHwp(Math.max(hPt, 10));
+  // imgNode.w / imgNode.h are in pt (set by all decoders)
+  const wHwp = Metric.ptToHwp(Math.max(imgNode.w, 10));
+  const hHwp = Metric.ptToHwp(Math.max(imgNode.h, 10));
 
   const TABLE_CTRL_MASK = 1 << 11;
   const instanceId = idGen();
@@ -1087,9 +1083,9 @@ function buildBodyTextStream(
 }
 
 function b64Matches(binImg: BinImage, b64: string): boolean {
-  // Compare first 100 chars of base64 for quick matching
-  const binB64 = Buffer.from(binImg.data).toString('base64');
-  return binB64.startsWith(b64.substring(0, 100)) || b64.startsWith(binB64.substring(0, 100));
+  const a = TextKit.base64Encode(binImg.data).replace(/\s/g, '');
+  const b = b64.replace(/\s/g, '');
+  return a === b;
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1314,7 +1310,7 @@ export class HwpEncoder implements Encoder {
               const key = kid.b64.substring(0, 50);
               if (!seenB64.has(key)) {
                 seenB64.add(key);
-                const raw = Buffer.from(kid.b64, 'base64');
+                const raw = TextKit.base64Decode(kid.b64);
                 let ext = 'jpg';
                 if (kid.mime === 'image/png') ext = 'png';
                 else if (kid.mime === 'image/gif') ext = 'gif';
