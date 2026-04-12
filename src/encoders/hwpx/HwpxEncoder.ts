@@ -654,149 +654,124 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
 function encodeGrid(grid: GridNode, ctx: HwpxCtx): string {
   const rowCount = grid.kids.length;
 
-  // Build a per-row occupancy set that tracks which column indices are already
-  // "taken" by a rowSpan cell from an earlier row.  This must be done before
-  // computing colCount so that we get the correct logical column count even for
-  // rows whose cells were skipped (vMergeContinue) in the DocRoot model.
-  const rowOccupancy: Set<number>[] = Array.from(
-    { length: rowCount },
-    () => new Set<number>(),
-  );
-  let colCount = 0;
-  for (let ri = 0; ri < grid.kids.length; ri++) {
-    const row = grid.kids[ri];
+  // 1단계: 가상 2D 맵핑 (Virtual Table Map) 생성
+  interface CellMap {
+    type: 'real' | 'absorbed';
+    cell?: CellNode;
+  }
+  const tableMap: CellMap[][] = Array.from({ length: rowCount }, () => []);
+
+  for (let ri = 0; ri < rowCount; ri++) {
     let ci = 0;
-    for (const cell of row.kids) {
-      // Advance past columns occupied by rowSpan cells from above rows
-      while (rowOccupancy[ri].has(ci)) ci++;
-      // Mark columns taken by this cell's rowSpan in subsequent rows
-      if (cell.rs > 1) {
-        for (let r = ri + 1; r < ri + cell.rs && r < rowCount; r++) {
-          for (let c = ci; c < ci + cell.cs; c++) {
-            rowOccupancy[r].add(c);
-          }
+    for (const cell of grid.kids[ri].kids) {
+      while (tableMap[ri][ci]) ci++; // 이미 점유된 자리 건너뜀
+
+      tableMap[ri][ci] = { type: 'real', cell };
+
+      // 병합 영역 예약
+      for (let rr = 0; rr < cell.rs; rr++) {
+        const targetRi = ri + rr;
+        if (targetRi >= rowCount) break;
+        if (!tableMap[targetRi]) tableMap[targetRi] = [];
+        for (let cc = 0; cc < cell.cs; cc++) {
+          if (rr === 0 && cc === 0) continue;
+          tableMap[targetRi][ci + cc] = { type: 'absorbed' };
         }
       }
       ci += cell.cs;
     }
-    // Advance past any trailing occupied columns (edge case: last cell has rowSpan)
-    while (rowOccupancy[ri].has(ci)) ci++;
-    if (ci > colCount) colCount = ci;
   }
-  if (colCount === 0) colCount = grid.kids[0]?.kids.length ?? 1;
 
-  // Calculate column widths in HWPUNIT
+  // 정확한 전체 열 개수 계산
+  let colCount = 0;
+  for (let ri = 0; ri < rowCount; ri++) {
+    colCount = Math.max(colCount, tableMap[ri].length);
+  }
+  if (colCount === 0) colCount = 1;
+
+  // 2단계: 컬럼 너비 계산
   const totalWidth = ctx.availableWidth;
-  const defaultColW = Math.round(totalWidth / (colCount || 1));
+  const defaultColW = Math.round(totalWidth / colCount);
   const colWidths: number[] = [];
   if (grid.props.colWidths && grid.props.colWidths.length === colCount) {
-    // Fill zero-width columns by distributing remaining space
     const srcPt = [...grid.props.colWidths];
     const knownTotal = srcPt.filter((w) => w > 0).reduce((s, w) => s + w, 0);
     const zeroCount = srcPt.filter((w) => w <= 0).length;
-    const remaining = Math.max(0, Metric.hwpToPt(totalWidth) - knownTotal);
+    const availPt = Metric.hwpToPt(totalWidth);
+    const remaining = Math.max(0, availPt - knownTotal);
     const zeroFill = zeroCount > 0 ? remaining / zeroCount : 0;
     for (let i = 0; i < srcPt.length; i++) {
-      if (srcPt[i] <= 0)
-        srcPt[i] = zeroFill > 0 ? zeroFill : Metric.hwpToPt(defaultColW);
+      if (srcPt[i] <= 0) srcPt[i] = zeroFill > 0 ? zeroFill : Metric.hwpToPt(defaultColW);
     }
     for (const wPt of srcPt) colWidths.push(Metric.ptToHwp(wPt));
   } else {
     for (let c = 0; c < colCount; c++) colWidths.push(defaultColW);
   }
-  // Scale down to fit available width (only when table exceeds page by >5%)
+
   const rawTotal = colWidths.reduce((s, w) => s + w, 0);
   if (rawTotal > totalWidth * 1.05) {
     const scale = totalWidth / rawTotal;
-    for (let i = 0; i < colWidths.length; i++)
-      colWidths[i] = Math.round(colWidths[i] * scale);
+    for (let i = 0; i < colWidths.length; i++) colWidths[i] = Math.round(colWidths[i] * scale);
   }
   const actualTotal = colWidths.reduce((s, w) => s + w, 0);
 
-  // Table borderFillIDRef
-  const tblBfId = grid.props.defaultStroke
-    ? addBorderFill(ctx, grid.props.defaultStroke)
-    : 2; // default table border
-
-  // Pre-calculate row heights (max cell height per row)
+  // 3단계: 행 높이 계산
   const rowHeights: number[] = [];
-  for (const row of grid.kids) {
+  for (let ri = 0; ri < rowCount; ri++) {
+    const row = grid.kids[ri];
     if (row.heightPt != null && row.heightPt > 0) {
       rowHeights.push(Metric.ptToHwp(row.heightPt));
     } else {
       let maxH = 0;
-      for (const cell of row.kids) {
-        const h = estimateCellHeight(cell, ctx);
-        if (h > maxH) maxH = h;
+      for (let ci = 0; ci < colCount; ci++) {
+        const entry = tableMap[ri][ci];
+        if (entry?.type === 'real') {
+          const h = estimateCellHeight(entry.cell!, ctx);
+          if (h > maxH) maxH = h;
+        }
       }
-      rowHeights.push(maxH);
+      rowHeights.push(maxH || Math.round(1000 * 1.6));
     }
   }
   const totalTableHeight = rowHeights.reduce((s, h) => s + h, 0);
 
-  // Rows — use the pre-computed rowOccupancy to get correct colAddr for each cell
+  // 4단계: XML 조립
+  const tblBfId = grid.props.defaultStroke ? addBorderFill(ctx, grid.props.defaultStroke) : 2;
   let rowsXml = "";
-  for (let ri = 0; ri < grid.kids.length; ri++) {
-    const row = grid.kids[ri];
-    const rowH = rowHeights[ri];
+
+  for (let ri = 0; ri < rowCount; ri++) {
     let cellsXml = "";
-    let colIdx = 0;
-    for (let ci = 0; ci < row.kids.length; ci++) {
-      const cell = row.kids[ci];
+    for (let ci = 0; ci < colCount; ci++) {
+      const entry = tableMap[ri][ci];
+      if (!entry || entry.type === 'absorbed') continue;
 
-      // Skip columns occupied by rowSpan cells from above rows
-      while (rowOccupancy[ri].has(colIdx)) colIdx++;
-
-      // Cell borderFill: use per-side if any side border is specified, else fallback to table default
-      let cellBfId = tblBfId;
+      const cell = entry.cell!;
       const cp = cell.props;
+      let cellBfId = tblBfId;
+
       const hasPerSideBorder = cp.top || cp.bot || cp.left || cp.right;
       if (hasPerSideBorder || cp.bg) {
-        if (hasPerSideBorder) {
-          const defStroke = grid.props.defaultStroke ?? DEFAULT_STROKE;
-          cellBfId = addBorderFillPerSide(
-            ctx,
-            cp.top ?? defStroke,
-            cp.right ?? defStroke,
-            cp.bot ?? defStroke,
-            cp.left ?? defStroke,
-            cp.bg,
-          );
-        } else {
-          cellBfId = addBorderFill(
-            ctx,
-            grid.props.defaultStroke ?? DEFAULT_STROKE,
-            cp.bg,
-          );
-        }
+        const defStroke = grid.props.defaultStroke ?? DEFAULT_STROKE;
+        cellBfId = hasPerSideBorder 
+          ? addBorderFillPerSide(ctx, cp.top ?? defStroke, cp.right ?? defStroke, cp.bot ?? defStroke, cp.left ?? defStroke, cp.bg)
+          : addBorderFill(ctx, defStroke, cp.bg);
       }
 
-      // Calculate cell width from column widths (sum colSpan columns)
       let cellW = 0;
-      for (
-        let sc = colIdx;
-        sc < colIdx + cell.cs && sc < colWidths.length;
-        sc++
-      )
-        cellW += colWidths[sc];
+      for (let sc = ci; sc < ci + cell.cs && sc < colWidths.length; sc++) cellW += colWidths[sc];
       if (cellW === 0) cellW = defaultColW * cell.cs;
 
-      // Cell inner width for lineseg (subtract left + right cell margins: 141+141=282 HWPUNIT)
       const cellInnerW = Math.max(cellW - 282, 100);
+      const parasXml = cell.kids.map((p) => encodePara(p, ctx, "", cellInnerW)).join("");
 
-      // Encode cell paragraphs with correct inner width
-      const parasXml = cell.kids
-        .map((p) => encodePara(p, ctx, "", cellInnerW))
-        .join("");
-
-      cellsXml += `<hp:tc name="" header="0" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${cell.props.va === "mid" ? "CENTER" : cell.props.va === "bot" ? "BOTTOM" : "TOP"}" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">${parasXml}</hp:subList><hp:cellAddr colAddr="${colIdx}" rowAddr="${ri}"/><hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/><hp:cellSz width="${cellW}" height="${rowH}"/><hp:cellMargin left="141" right="141" top="141" bottom="141"/></hp:tc>`;
-      colIdx += cell.cs;
+      cellsXml += `<hp:tc name="" header="0" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}">` +
+                  `<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${cp.va === "mid" ? "CENTER" : cp.va === "bot" ? "BOTTOM" : "TOP"}" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">${parasXml}</hp:subList>` +
+                  `<hp:cellAddr colAddr="${ci}" rowAddr="${ri}"/><hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/><hp:cellSz width="${cellW}" height="${rowHeights[ri]}"/><hp:cellMargin left="141" right="141" top="141" bottom="141"/></hp:tc>`;
     }
     rowsXml += `<hp:tr>${cellsXml}</hp:tr>`;
   }
 
   const headerRow = grid.props.headerRow ? ' repeatHeader="1"' : "";
-
   return `<hp:tbl id="${ctx.nextElementId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE"${headerRow} rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="0"><hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="${totalTableHeight}" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="138" right="138" top="138" bottom="138"/><hp:inMargin left="138" right="138" top="138" bottom="138"/>${rowsXml}</hp:tbl>`;
 }
 
@@ -840,6 +815,15 @@ function extractPreviewText(sheet?: SheetNode): string {
 }
 
 function esc(s: string): string {
+  if (!s) return "";
+  // 1. 내부 처리용 플레이스홀더(__EXT_0__ 등) 제거
+  s = s.replace(/__EXT_\d+__/g, "");
+  // 2. 글자 깨짐을 유발하는 쓰레기값 및 BOM 기호 명시적 제거
+  s = s.replace(/湰灧/g, "");
+  s = s.replace(/\uFEFF/g, "");
+  // 3. XML 1.0에서 허용하지 않는 보이지 않는 제어문자 모두 제거
+  s = s.replace(/[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD]/g, "");
+
   return TextKit.escapeXml(s);
 }
 
