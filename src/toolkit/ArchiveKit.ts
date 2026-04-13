@@ -1,6 +1,12 @@
 import pako from 'pako';
+import * as CFB from 'cfb';
 
 interface ZipEntry {
+  name: string;
+  data: Uint8Array;
+}
+
+interface OleEntry {
   name: string;
   data: Uint8Array;
 }
@@ -127,6 +133,31 @@ export const ArchiveKit = {
     ev.setUint16(20, 0, true);
 
     return concat([...localHeaders, centralDir, eocd]);
+  },
+
+  async ole(entries: OleEntry[]): Promise<Uint8Array> {
+    const cfb = CFB.utils.cfb_new();
+    for (const e of entries) {
+      CFB.utils.cfb_add(cfb, e.name, e.data);
+    }
+    // Set HWP Root CLSID: {C0E3E920-3546-11CF-8D81-00AA00389B71}
+    if (cfb.FileIndex[0]) {
+      cfb.FileIndex[0].clsid = 'c0e3e920-3546-11cf-8d81-00aa00389b71';
+    }
+    const output = CFB.write(cfb, { type: 'array' });
+    return new Uint8Array(output);
+  },
+
+  async unole(data: Uint8Array): Promise<Map<string, Uint8Array>> {
+    const cfb = CFB.read(data, { type: 'array' });
+    const files = new Map<string, Uint8Array>();
+    for (const name of cfb.FullPaths) {
+      const file = cfb.FileIndex.find(f => f.name === name || '/' + f.name === name);
+      if (file && file.type === 2) { // stream
+        files.set(name, new Uint8Array(file.content as any));
+      }
+    }
+    return files;
   },
 };
 

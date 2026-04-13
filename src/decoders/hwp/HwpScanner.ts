@@ -6,6 +6,7 @@ import { succeed, fail } from '../../contract/result';
 import { buildRoot, buildSheet, buildPara, buildSpan, buildGrid, buildRow, buildCell, buildImg } from '../../model/builders';
 import { ShieldedParser } from '../../safety/ShieldedParser';
 import { BinaryKit } from '../../toolkit/BinaryKit';
+import { TextKit } from '../../toolkit/TextKit';
 import { Metric, safeHex, safeFont } from '../../safety/StyleBridge';
 import { registry } from '../../pipeline/registry';
 import { A4 } from '../../model/doc-props';
@@ -861,8 +862,7 @@ export class HwpScanner implements Decoder {
         else if (data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x3538) mimeType = 'image/gif';
         else if (data[0] === 0x42 && data[1] === 0x4D) mimeType = 'image/bmp';
 
-        const imgData = Buffer.from(data);
-        const base64 = imgData.toString('base64');
+        const base64 = TextKit.base64Encode(data);
         const hash = base64.slice(0, 20); // Use first 20 chars as simple hash
         if (!seenHashes.has(hash)) {
           seenHashes.add(hash);

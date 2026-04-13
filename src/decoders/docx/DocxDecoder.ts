@@ -91,12 +91,15 @@ export class DocxDecoder implements Decoder {
         }
       }
 
-      // Parse styles.xml for tblStyle defaults
+      // Parse styles.xml for table and paragraph/character style defaults
       let stylesMap: StylesMap = new Map();
+      let paraStyleMap: ParaStyleMap = new Map();
       const stylesXml = files.get("word/styles.xml");
       if (stylesXml) {
         try {
-          stylesMap = await parseStylesMap(TextKit.decode(stylesXml));
+          const stylesStr = TextKit.decode(stylesXml);
+          stylesMap = await parseStylesMap(stylesStr);
+          paraStyleMap = await parseParaStyleMap(stylesStr);
         } catch {
           /* non-fatal */
         }
@@ -109,7 +112,7 @@ export class DocxDecoder implements Decoder {
       const dims = extractDims(body) ?? { ...A4 };
       const elements = getBodyElements(body);
 
-      const decCtx: DecCtx = { relsMap, files, shield, numMap, warns, stylesMap };
+      const decCtx: DecCtx = { relsMap, files, shield, numMap, warns, stylesMap, paraStyleMap };
 
       const kids: ContentNode[] = [];
       for (const el of elements) {
@@ -180,7 +183,29 @@ interface TblStyleDef {
   cellBg?: string; // default cell background
 }
 
-type StylesMap = Map<string, TblStyleDef>; // styleId → defaults
+/** Parsed paragraph/character style defaults */
+interface ParaStyleDef {
+  rPr?: {
+    b?: boolean;
+    i?: boolean;
+    u?: boolean;
+    s?: boolean;
+    pt?: number;
+    color?: string;
+    font?: string;
+  };
+  pPr?: {
+    align?: string;
+    spaceBefore?: number;
+    spaceAfter?: number;
+    lineHeight?: number;
+    indentPt?: number;
+  };
+  basedOn?: string; // parent style id
+}
+
+type StylesMap = Map<string, TblStyleDef>; // styleId → table style defaults
+type ParaStyleMap = Map<string, ParaStyleDef>; // styleId → para/char style defaults
 
 interface DecCtx {
   relsMap: Map<string, string>;
@@ -189,6 +214,7 @@ interface DecCtx {
   numMap: NumMap;
   warns: string[];
   stylesMap: StylesMap;
+  paraStyleMap: ParaStyleMap;
 }
 
 // numId → { abstractNumId, levels: Map<ilvl, { fmt, isOrdered }> }
@@ -441,34 +467,41 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   const pPr = p?.["w:pPr"]?.[0] ?? {};
   const alignVal =
     pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ?? pPr?.["w:jc"]?.[0]?._attr?.val;
-  const headStyle =
+  const pStyleId =
     pPr?.["w:pStyle"]?.[0]?._attr?.["w:val"] ??
     pPr?.["w:pStyle"]?.[0]?._attr?.val ??
     "";
 
+  // Resolve paragraph style inheritance chain
+  const styleInherited = resolveParaStyle(pStyleId || undefined, ctx.paraStyleMap);
+
   const props: ParaProps = {
     align: safeAlign(alignVal),
-    heading: parseHeading(headStyle),
+    heading: parseHeading(pStyleId),
   };
 
-  // Spacing (before/after/line height)
+  // Spacing (before/after/line height) — inline pPr wins over style
   const spacingAttr =
     pPr?.["w:spacing"]?.[0]?._attr ?? pPr?.spacing?.[0]?._attr ?? {};
-  const beforeVal = Number(
-    spacingAttr?.["w:before"] ?? spacingAttr?.before ?? 0,
-  );
+  const beforeVal = Number(spacingAttr?.["w:before"] ?? spacingAttr?.before ?? 0);
   const afterVal = Number(spacingAttr?.["w:after"] ?? spacingAttr?.after ?? 0);
   const lineVal = Number(spacingAttr?.["w:line"] ?? spacingAttr?.line ?? 0);
-  const lineRule =
-    spacingAttr?.["w:lineRule"] ?? spacingAttr?.lineRule ?? "auto";
+  const lineRule = spacingAttr?.["w:lineRule"] ?? spacingAttr?.lineRule ?? "auto";
   if (beforeVal > 0) props.spaceBefore = Metric.dxaToPt(beforeVal);
+  else if (styleInherited.pPr?.spaceBefore) props.spaceBefore = styleInherited.pPr.spaceBefore;
   if (afterVal > 0) props.spaceAfter = Metric.dxaToPt(afterVal);
+  else if (styleInherited.pPr?.spaceAfter) props.spaceAfter = styleInherited.pPr.spaceAfter;
   if (lineVal > 0 && lineRule === "auto") props.lineHeight = lineVal / 240;
+  else if (styleInherited.pPr?.lineHeight) props.lineHeight = styleInherited.pPr.lineHeight;
 
   // Indentation
   const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
   const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
   if (leftVal > 0) props.indentPt = Metric.dxaToPt(leftVal);
+  else if (styleInherited.pPr?.indentPt) props.indentPt = styleInherited.pPr.indentPt;
+
+  // Alignment from style if not set inline
+  if (!alignVal && styleInherited.pPr?.align) props.align = safeAlign(styleInherited.pPr.align);
 
   // List/numbering
   const numPr = pPr?.["w:numPr"]?.[0] ?? pPr?.numPr?.[0];
@@ -486,7 +519,6 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
       const lvlInfo = numEntry.levels.get(ilvl) ?? numEntry.levels.get(0);
       props.listOrd = lvlInfo?.isOrdered ?? false;
     } else {
-      // Fallback: numId=1 is typically bullet, numId=2 is numbered
       props.listOrd = numId >= 2;
     }
   }
@@ -498,11 +530,11 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
 
   const runs = toArr(p?.["w:r"] ?? p?.r);
 
-  // 3/28 이미지 태크를 찾을수 있기 때문에 별도 함수 구현
+  // 3/28 이미지 태그를 찾을수 있기 때문에 별도 함수 구현
   const kids: (SpanNode | ImgNode)[] = ctx.shield.guardAll(
     runs,
     (run: any) =>
-      hasDrawingDeep(run) ? decodeRunOrImage(run, ctx) : decodeRun(run, ctx),
+      hasDrawingDeep(run) ? decodeRunOrImage(run, ctx) : decodeRun(run, ctx, styleInherited.rPr),
     () => buildSpan(""),
     "docx:run",
   );
@@ -619,7 +651,7 @@ function decodeDrawing(drawing: any, ctx: DecCtx): ImgNode | null {
   }
 }
 
-function decodeRun(run: any, ctx: DecCtx): SpanNode {
+function decodeRun(run: any, ctx: DecCtx, styleRpr?: ParaStyleDef['rPr']): SpanNode {
   const rPr = run?.["w:rPr"]?.[0] ?? run?.rPr?.[0] ?? {};
 
   const szAttr = rPr?.["w:sz"]?.[0]?._attr ?? rPr?.sz?.[0]?._attr ?? {};
@@ -665,16 +697,17 @@ function decodeRun(run: any, ctx: DecCtx): SpanNode {
     sNode != null &&
     (sNode?._attr?.["w:val"] ?? sNode?._attr?.val ?? "1") !== "0";
 
+  // Run-level properties: run wins, then fall back to paragraph style inheritance
   const props: TextProps = {
-    b: isBold || undefined,
-    i: isItalic || undefined,
-    u: underVal && underVal !== "none" ? true : undefined,
-    s: isStrike || undefined,
+    b: (bNode != null ? isBold : styleRpr?.b) || undefined,
+    i: (iNode != null ? isItalic : styleRpr?.i) || undefined,
+    u: (underVal ? underVal !== "none" : styleRpr?.u) || undefined,
+    s: (sNode != null ? isStrike : styleRpr?.s) || undefined,
     sup: vertAlignVal === "superscript" || undefined,
     sub: vertAlignVal === "subscript" || undefined,
-    pt: szVal ? Metric.halfPtToPt(Number(szVal)) : undefined,
-    color: safeHex(colorVal),
-    font: fontName ? safeFont(fontName) : undefined,
+    pt: szVal ? Metric.halfPtToPt(Number(szVal)) : styleRpr?.pt,
+    color: safeHex(colorVal) ?? styleRpr?.color,
+    font: fontName ? safeFont(fontName) : styleRpr?.font,
     bg: bgVal,
   };
 
@@ -765,6 +798,100 @@ async function parseStylesMap(xml: string): Promise<StylesMap> {
     /* non-fatal */
   }
   return map;
+}
+
+/** Parse styles.xml and build a map of paragraph/character style defaults */
+async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
+  const map: ParaStyleMap = new Map();
+  try {
+    const obj: any = await XmlKit.parseStrict(xml);
+    const stylesRoot = obj?.["w:styles"]?.[0] ?? obj?.styles?.[0] ?? obj;
+    const styleArr = toArr(stylesRoot?.["w:style"] ?? stylesRoot?.style);
+    for (const style of styleArr) {
+      const attr = style?._attr ?? {};
+      const type = attr?.["w:type"] ?? attr?.type;
+      if (type !== "paragraph" && type !== "character") continue;
+      const id = attr?.["w:styleId"] ?? attr?.styleId;
+      if (!id) continue;
+      const basedOn = (style?.["w:basedOn"]?.[0]?._attr ?? style?.basedOn?.[0]?._attr)?.["w:val"];
+
+      const def: ParaStyleDef = { basedOn };
+
+      // rPr from run properties
+      const rPr = style?.["w:rPr"]?.[0] ?? style?.rPr?.[0];
+      if (rPr) {
+        const szAttr = rPr?.["w:sz"]?.[0]?._attr ?? rPr?.sz?.[0]?._attr ?? {};
+        const szVal = szAttr?.["w:val"] ?? szAttr?.val;
+        const colorAttr = rPr?.["w:color"]?.[0]?._attr ?? rPr?.color?.[0]?._attr ?? {};
+        const colorVal = colorAttr?.["w:val"] ?? colorAttr?.val;
+        const fontAttr = rPr?.["w:rFonts"]?.[0]?._attr ?? rPr?.rFonts?.[0]?._attr ?? {};
+        const fontName = fontAttr?.["w:ascii"] ?? fontAttr?.ascii ?? fontAttr?.["w:eastAsia"] ?? fontAttr?.eastAsia;
+        const bNode = rPr?.["w:b"]?.[0] ?? rPr?.b?.[0];
+        const isBold = bNode != null && (bNode?._attr?.["w:val"] ?? bNode?._attr?.val ?? "1") !== "0";
+        const iNode = rPr?.["w:i"]?.[0] ?? rPr?.i?.[0];
+        const isItalic = iNode != null && (iNode?._attr?.["w:val"] ?? iNode?._attr?.val ?? "1") !== "0";
+        const underVal = rPr?.["w:u"]?.[0]?._attr?.["w:val"] ?? rPr?.["w:u"]?.[0]?._attr?.val;
+        const sNode = rPr?.["w:strike"]?.[0] ?? rPr?.strike?.[0];
+        const isStrike = sNode != null && (sNode?._attr?.["w:val"] ?? sNode?._attr?.val ?? "1") !== "0";
+        def.rPr = {
+          b: isBold || undefined,
+          i: isItalic || undefined,
+          u: underVal && underVal !== "none" ? true : undefined,
+          s: isStrike || undefined,
+          pt: szVal ? Metric.halfPtToPt(Number(szVal)) : undefined,
+          color: safeHex(colorVal),
+          font: fontName ? safeFont(fontName) : undefined,
+        };
+      }
+
+      // pPr from paragraph properties
+      const pPr = style?.["w:pPr"]?.[0] ?? style?.pPr?.[0];
+      if (pPr) {
+        const spacingAttr = pPr?.["w:spacing"]?.[0]?._attr ?? pPr?.spacing?.[0]?._attr ?? {};
+        const beforeVal = Number(spacingAttr?.["w:before"] ?? spacingAttr?.before ?? 0);
+        const afterVal = Number(spacingAttr?.["w:after"] ?? spacingAttr?.after ?? 0);
+        const lineVal = Number(spacingAttr?.["w:line"] ?? spacingAttr?.line ?? 0);
+        const lineRule = spacingAttr?.["w:lineRule"] ?? spacingAttr?.lineRule ?? "auto";
+        const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
+        const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
+        const alignVal = pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ?? pPr?.["w:jc"]?.[0]?._attr?.val;
+        def.pPr = {
+          align: alignVal,
+          spaceBefore: beforeVal > 0 ? Metric.dxaToPt(beforeVal) : undefined,
+          spaceAfter: afterVal > 0 ? Metric.dxaToPt(afterVal) : undefined,
+          lineHeight: lineVal > 0 && lineRule === "auto" ? lineVal / 240 : undefined,
+          indentPt: leftVal > 0 ? Metric.dxaToPt(leftVal) : undefined,
+        };
+      }
+
+      map.set(id, def);
+    }
+  } catch {
+    /* non-fatal */
+  }
+  return map;
+}
+
+/** Resolve inherited rPr by walking the basedOn chain (max 8 levels) */
+function resolveParaStyle(styleId: string | undefined, map: ParaStyleMap): ParaStyleDef {
+  const seen = new Set<string>();
+  let merged: ParaStyleDef = {};
+  let id: string | undefined = styleId;
+  while (id && !seen.has(id)) {
+    seen.add(id);
+    const def = map.get(id);
+    if (!def) break;
+    // Merge: current style wins over parent
+    if (def.rPr) {
+      merged.rPr = { ...def.rPr, ...merged.rPr };
+    }
+    if (def.pPr) {
+      merged.pPr = { ...def.pPr, ...merged.pPr };
+    }
+    id = def.basedOn;
+    if (seen.size > 8) break;
+  }
+  return merged;
 }
 
 /** Resolve final CellProps borders using 3-level priority chain */
