@@ -13,7 +13,11 @@ import { TextKit } from '../../toolkit/TextKit';
 import { registry } from '../../pipeline/registry';
 
 interface BorderFillInfo {
-  stroke?: Stroke;
+  stroke?: Stroke;   // uniform fallback (used when all sides are the same)
+  top?: Stroke;
+  right?: Stroke;
+  bottom?: Stroke;
+  left?: Stroke;
   bgColor?: string;
 }
 
@@ -186,14 +190,28 @@ function extractBorderFills(headObj: any): Map<number, BorderFillInfo> {
 
       const info: BorderFillInfo = {};
 
-      // Parse border (take top as representative)
-      const top = bf?.['hh:topBorder']?.[0]?._attr ?? bf?.['hh:top']?.[0]?._attr ?? bf?.top?.[0]?._attr;
-      if (top) {
-        // width is in mm (e.g. "0.18 mm"), convert mm → pt (1mm ≈ 2.835pt), then pt → hwp (*100) for safeStrokeHwpx
-        const mmVal = parseFloat(top.width) || undefined;
+      // Helper: parse a border element into a Stroke
+      const parseBorderEl = (el: any): Stroke | undefined => {
+        if (!el) return undefined;
+        const a = el?._attr ?? {};
+        const mmVal = parseFloat(a.width) || undefined;
         const hwpVal = mmVal != null ? mmVal * 2.835 * 100 : undefined;
-        info.stroke = safeStrokeHwpx(top.type, hwpVal, top.color);
-      }
+        return safeStrokeHwpx(a.type, hwpVal, a.color);
+      };
+
+      // Parse all four sides
+      const topEl    = bf?.['hh:topBorder']?.[0]    ?? bf?.['hh:top']?.[0]    ?? bf?.top?.[0];
+      const rightEl  = bf?.['hh:rightBorder']?.[0]  ?? bf?.['hh:right']?.[0]  ?? bf?.right?.[0];
+      const bottomEl = bf?.['hh:bottomBorder']?.[0] ?? bf?.['hh:bottom']?.[0] ?? bf?.bottom?.[0];
+      const leftEl   = bf?.['hh:leftBorder']?.[0]   ?? bf?.['hh:left']?.[0]   ?? bf?.left?.[0];
+
+      info.top    = parseBorderEl(topEl);
+      info.right  = parseBorderEl(rightEl);
+      info.bottom = parseBorderEl(bottomEl);
+      info.left   = parseBorderEl(leftEl);
+
+      // Set uniform stroke fallback = top border (for defaultStroke etc.)
+      info.stroke = info.top ?? info.left ?? info.right ?? info.bottom;
 
       // Parse fill (real HWPX uses hc:fillBrush, not hh:fillBrush)
       const fillBrush = bf?.['hc:fillBrush']?.[0] ?? bf?.['hh:fillBrush']?.[0] ?? bf?.['hh:fill']?.[0] ?? bf?.fill?.[0] ?? bf?.fillBrush?.[0];
@@ -210,12 +228,41 @@ function extractBorderFills(headObj: any): Map<number, BorderFillInfo> {
   return map;
 }
 
+function buildFontIdMap(headObj: any): Map<number, string> {
+  const fontMap = new Map<number, string>();
+  try {
+    const root = headObj?.['hh:head']?.[0] ?? headObj?.['hh:HEAD']?.[0] ?? headObj?.HEAD?.[0] ?? headObj;
+    const refList = root?.['hh:refList']?.[0] ?? root?.['hh:REFLIST']?.[0] ?? root?.REFLIST?.[0];
+    if (!refList) return fontMap;
+
+    const fontfaces = refList?.['hh:fontfaces']?.[0] ?? refList?.['hh:FONTFACES']?.[0];
+    if (!fontfaces) return fontMap;
+
+    // Try each fontface group (HANGUL, LATIN, etc.) — use the first group that has entries
+    const ffGroups = getTag(fontfaces, 'hh:fontface', 'hh:FONTFACE');
+    for (const ff of ffGroups) {
+      const fonts = getTag(ff, 'hh:font', 'hh:FONT');
+      for (const font of fonts) {
+        const fa = font?._attr ?? {};
+        const fid = Number(fa.id ?? -1);
+        const name = fa.face ?? fa.name ?? fa.Face ?? '';
+        if (fid >= 0 && name && !fontMap.has(fid)) fontMap.set(fid, name);
+      }
+      if (fontMap.size > 0) break; // use first group (usually HANGUL)
+    }
+  } catch { /* non-fatal */ }
+  return fontMap;
+}
+
 function extractCharPrs(headObj: any): Map<number, CharPrInfo> {
   const map = new Map<number, CharPrInfo>();
   try {
     const root = headObj?.['hh:head']?.[0] ?? headObj?.['hh:HEAD']?.[0] ?? headObj?.HEAD?.[0] ?? headObj;
     const refList = root?.['hh:refList']?.[0] ?? root?.['hh:REFLIST']?.[0] ?? root?.REFLIST?.[0];
     if (!refList) return map;
+
+    // Build font id → name map from fontfaces
+    const fontIdMap = buildFontIdMap(headObj);
 
     const cpList = refList?.['hh:charProperties']?.[0] ?? refList?.['hh:CHARPROPERTIES']?.[0];
     if (!cpList) return map;
@@ -248,8 +295,13 @@ function extractCharPrs(headObj: any): Map<number, CharPrInfo> {
       const stAttr = cp?.['hh:strikeout']?.[0]?._attr;
       if (stAttr?.shape && stAttr.shape !== 'NONE' && stAttr.shape !== '3D') info.s = true;
 
-      // font — from fontRef + fontface
-      // (simplified: just store what we find)
+      // font name — resolve from fontRef.hangul → fontfaces
+      const fontRefAttr = cp?.['hh:fontRef']?.[0]?._attr ?? cp?.['hh:FONTREF']?.[0]?._attr;
+      if (fontRefAttr) {
+        const fid = Number(fontRefAttr.hangul ?? fontRefAttr.latin ?? fontRefAttr.Hangul ?? 0);
+        const name = fontIdMap.get(fid);
+        if (name) info.font = safeFont(name);
+      }
 
       map.set(id, info);
     }
@@ -399,26 +451,38 @@ function decodeSection(sec: any, dims: PageDims, ctx: DecCtx) {
   );
 }
 
+function parseSecPrDims(secPr: any): PageDims | null {
+  const pagePr = secPr?.['hp:pagePr']?.[0]?._attr ?? secPr?.['hp:PAGEPR']?.[0]?._attr;
+  if (!pagePr) return null;
+  const margin = secPr?.['hp:pagePr']?.[0]?.['hp:margin']?.[0]?._attr
+    ?? secPr?.['hp:PAGEPR']?.[0]?.['hp:MARGIN']?.[0]?._attr ?? {};
+  return {
+    wPt:    Metric.hwpToPt(Number(pagePr.width ?? 59528)),
+    hPt:    Metric.hwpToPt(Number(pagePr.height ?? 84188)),
+    mt:     Metric.hwpToPt(Number(margin.top ?? 5670)),
+    mb:     Metric.hwpToPt(Number(margin.bottom ?? 4252)),
+    ml:     Metric.hwpToPt(Number(margin.left ?? 8504)),
+    mr:     Metric.hwpToPt(Number(margin.right ?? 8504)),
+    orient: pagePr.landscape === 'NARROWLY' ? 'landscape' : 'portrait',
+  };
+}
+
 function extractSecPrDims(p: any): PageDims | null {
   if (!p) return null;
   try {
+    // Primary: hp:secPr is a DIRECT child of hp:p (as generated by HwpxEncoder)
+    const secPrDirect = p?.['hp:secPr']?.[0] ?? p?.['hp:SECPR']?.[0];
+    if (secPrDirect) {
+      const dims = parseSecPrDims(secPrDirect);
+      if (dims) return dims;
+    }
+    // Fallback: legacy format may nest hp:secPr inside hp:run
     const runs = getTag(p, 'hp:run', 'hp:RUN');
     for (const run of runs) {
       const secPr = run?.['hp:secPr']?.[0] ?? run?.['hp:SECPR']?.[0];
       if (!secPr) continue;
-      const pagePr = secPr?.['hp:pagePr']?.[0]?._attr ?? secPr?.['hp:PAGEPR']?.[0]?._attr;
-      if (!pagePr) continue;
-      const margin = secPr?.['hp:pagePr']?.[0]?.['hp:margin']?.[0]?._attr
-        ?? secPr?.['hp:PAGEPR']?.[0]?.['hp:MARGIN']?.[0]?._attr ?? {};
-      return {
-        wPt:    Metric.hwpToPt(Number(pagePr.width ?? 59528)),
-        hPt:    Metric.hwpToPt(Number(pagePr.height ?? 84188)),
-        mt:     Metric.hwpToPt(Number(margin.top ?? 5670)),
-        mb:     Metric.hwpToPt(Number(margin.bottom ?? 4252)),
-        ml:     Metric.hwpToPt(Number(margin.left ?? 8504)),
-        mr:     Metric.hwpToPt(Number(margin.right ?? 8504)),
-        orient: pagePr.landscape === 'NARROWLY' ? 'landscape' : 'portrait',
-      };
+      const dims = parseSecPrDims(secPr);
+      if (dims) return dims;
     }
   } catch { /* ignore */ }
   return null;
@@ -679,11 +743,11 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
         bg: cellBf?.bgColor ?? safeHex(ca.BgColor),
       };
 
-      if (cellBf?.stroke) {
-        cellProps.top = cellBf.stroke;
-        cellProps.bot = cellBf.stroke;
-        cellProps.left = cellBf.stroke;
-        cellProps.right = cellBf.stroke;
+      if (cellBf) {
+        cellProps.top   = cellBf.top    ?? cellBf.stroke;
+        cellProps.bot   = cellBf.bottom ?? cellBf.stroke;
+        cellProps.left  = cellBf.left   ?? cellBf.stroke;
+        cellProps.right = cellBf.right  ?? cellBf.stroke;
       }
 
       // Vertical alignment from subList

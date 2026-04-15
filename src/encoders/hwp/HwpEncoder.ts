@@ -18,7 +18,6 @@ import { registry }           from '../../pipeline/registry';
 import { A4 }                 from '../../model/doc-props';
 import pako                   from 'pako';
 import { TextKit }            from '../../toolkit/TextKit';
-import { ArchiveKit }         from '../../toolkit/ArchiveKit';
 
 /* ═══════════════════════════════════════════════════════════════
    HWP 5.0 tag IDs (HWP 5.0 spec 표 13, 표 57)
@@ -148,9 +147,9 @@ class BufWriter {
 function mkRec(tag: number, level: number, data: Uint8Array): Uint8Array {
   const sz = data.length;
   const enc = Math.min(sz, 0xFFF);
-  const hdr = (((enc << 20) >>> 0) | ((level & 0x3FF) << 10) | (tag & 0x3FF)) >>> 0;
+  const hdr = (enc << 20) | ((level & 0x3FF) << 10) | (tag & 0x3FF);
   const w = new BufWriter().u32(hdr);
-  if (enc === 0xFFF) w.u32(sz);
+  if (enc >= 0xFFF) w.u32(sz);
   w.bytes(data);
   return w.build();
 }
@@ -164,8 +163,8 @@ function csKey(p: TextProps): string {
     p.s ? 1 : 0, p.sup ? 1 : 0, p.sub ? 1 : 0, p.color ?? '000000'].join('|');
 }
 function psKey(p: ParaProps): string {
-  return [p.align ?? 'left', p.indentPt ?? 0, p.spaceBefore ?? 0,
-    p.spaceAfter ?? 0, p.lineHeight ?? 1].join('|');
+  return [p.align ?? 'left', p.indentPt ?? 0, p.firstLineIndentPt ?? 0,
+    p.spaceBefore ?? 0, p.spaceAfter ?? 0, p.lineHeight ?? 1].join('|');
 }
 function bfKey(s: Stroke, bg?: string): string {
   return `${s.kind}|${s.pt}|${s.color}|${bg ?? ''}`;
@@ -524,7 +523,7 @@ function mkParaShape(p: ParaProps): Uint8Array {
     .u32(attr1)                                    //  0: attr1
     .i32(Metric.ptToHwp(p.indentPt ?? 0))          //  4: leftMargin (HWPUNIT)
     .i32(0)                                        //  8: rightMargin
-    .i32(0)                                        // 12: indent
+    .i32(Metric.ptToHwp(p.firstLineIndentPt ?? 0)) // 12: indent (첫 줄 들여/내어쓰기)
     .i32(Metric.ptToHwp(p.spaceBefore ?? 0))       // 16: spaceBefore
     .i32(Metric.ptToHwp(p.spaceAfter ?? 0))        // 20: spaceAfter
     .i32(lineSpacePct)                             // 24: lineSpacing (old format)
@@ -536,7 +535,7 @@ function mkParaShape(p: ParaProps): Uint8Array {
     .i16(0)                                        // 38: borderTop
     .i16(0)                                        // 40: borderBottom
     .u32(0)                                        // 42: attr2 (5.0.1.7+)
-    .u32(0)                                        // 46: attr3 (줄 간격 종류 bits 0-4 = 0: 글자에 따라)
+    .u32(4)                                        // 46: attr3 (bits 0-4 = 4: 백분율 줄 간격)
     .u32(lineSpacePct)                             // 50: lineSpacing2 (5.0.2.5+)
     .build(); // 54 bytes
 }
@@ -804,7 +803,7 @@ function encodePara(para: ParaNode, col: StyleCollector, lv: number, instanceId:
     mkRec(TAG_PARA_HEADER,     lv,     mkParaHeader(nchars, 0, psId, csPairs.length, 1, instanceId)),
     mkRec(TAG_PARA_TEXT,       lv + 1, mkParaText(text)),
     mkRec(TAG_PARA_CHAR_SHAPE, lv + 1, mkParaCharShape(csPairs)),
-    mkRec(TAG_PARA_LINE_SEG,   lv + 1, new Uint8Array(36)),
+    mkRec(TAG_PARA_LINE_SEG,   lv + 1, new Uint8Array(36)), // layout cache (1 line × 36 bytes)
   ];
 }
 
@@ -1107,6 +1106,198 @@ function buildHwpFileHeader(): Uint8Array {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   OLE2 / CFB container builder
+   ═══════════════════════════════════════════════════════════════ */
+
+function buildHwpOle2(
+  fileHeaderData: Uint8Array,
+  docInfoData:    Uint8Array,
+  section0Data:   Uint8Array,
+  binImages:      BinImage[] = [],
+): Uint8Array {
+  const SS = 512;
+  const ENDOFCHAIN = 0xFFFFFFFE;
+  const FREESECT   = 0xFFFFFFFF;
+  const FATSECT    = 0xFFFFFFFD;
+
+  function padSector(d: Uint8Array): Uint8Array {
+    const n = Math.ceil(Math.max(d.length, 1) / SS) * SS;
+    if (d.length === n) return d;
+    const out = new Uint8Array(n);
+    out.set(d);
+    return out;
+  }
+
+  // Pad all data to sector boundaries
+  const fhPad  = padSector(fileHeaderData);
+  const diPad  = padSector(docInfoData);
+  const s0Pad  = padSector(section0Data);
+  const imgPads = binImages.map(img => padSector(img.data));
+
+  const fhN  = fhPad.length / SS;
+  const diN  = diPad.length / SS;
+  const s0N  = s0Pad.length / SS;
+  const imgNs = imgPads.map(p => p.length / SS);
+  const totalImgN = imgNs.reduce((s, n) => s + n, 0);
+
+  // Directory sectors: 4 entries per sector
+  // Entries: Root, FileHeader, DocInfo, BodyText, Section0 [+ BinData + images]
+  const numDirEntries = 5 + (binImages.length > 0 ? 1 + binImages.length : 0);
+  const dirN = Math.max(2, Math.ceil(numDirEntries / 4));
+
+  // Compute FAT sector count iteratively
+  let fatN = 1;
+  for (let iter = 0; iter < 10; iter++) {
+    const total  = fatN + dirN + fhN + diN + s0N + totalImgN;
+    const needed = Math.ceil(total / 128);
+    if (needed <= fatN) break;
+    fatN = needed;
+  }
+
+  const dir1Sec = fatN;
+  const fhSec   = fatN + dirN;
+  const diSec   = fhSec + fhN;
+  const s0Sec   = diSec + diN;
+
+  // Image sectors come after section0
+  const imgSecs: number[] = [];
+  let curSec = s0Sec + s0N;
+  for (const n of imgNs) { imgSecs.push(curSec); curSec += n; }
+  const totalSec = curSec;
+
+  // Build FAT
+  const fatBuf = new Uint8Array(fatN * SS).fill(0xFF);
+  const setFat = (i: number, v: number) => {
+    fatBuf[i * 4]     = v & 0xFF;
+    fatBuf[i * 4 + 1] = (v >>> 8) & 0xFF;
+    fatBuf[i * 4 + 2] = (v >>> 16) & 0xFF;
+    fatBuf[i * 4 + 3] = (v >>> 24) & 0xFF;
+  };
+
+  for (let i = 0; i < fatN; i++) setFat(i, FATSECT);
+  for (let i = 0; i < dirN; i++) setFat(dir1Sec + i, i + 1 < dirN ? dir1Sec + i + 1 : ENDOFCHAIN);
+  for (let i = 0; i < fhN;  i++) setFat(fhSec  + i, i + 1 < fhN  ? fhSec  + i + 1 : ENDOFCHAIN);
+  for (let i = 0; i < diN;  i++) setFat(diSec  + i, i + 1 < diN  ? diSec  + i + 1 : ENDOFCHAIN);
+  for (let i = 0; i < s0N;  i++) setFat(s0Sec  + i, i + 1 < s0N  ? s0Sec  + i + 1 : ENDOFCHAIN);
+  for (let ii = 0; ii < imgNs.length; ii++) {
+    const start = imgSecs[ii];
+    const n = imgNs[ii];
+    for (let i = 0; i < n; i++) setFat(start + i, i + 1 < n ? start + i + 1 : ENDOFCHAIN);
+  }
+
+  // Build directory
+  const dirBuf = new Uint8Array(dirN * SS);
+  const dv     = new DataView(dirBuf.buffer);
+
+  function writeDirEntry(
+    idx: number, name: string, type: number,
+    left: number, right: number, child: number,
+    startSec: number, size: number,
+  ) {
+    const base = idx * 128;
+    const nl   = Math.min(name.length, 31);
+    for (let i = 0; i < nl; i++) dv.setUint16(base + i * 2, name.charCodeAt(i), true);
+    dv.setUint16(base + 64, (nl + 1) * 2, true);
+    dirBuf[base + 66] = type;
+    dirBuf[base + 67] = 1; // color = black
+    dv.setInt32(base + 68, left,  true);
+    dv.setInt32(base + 72, right, true);
+    dv.setInt32(base + 76, child, true);
+    dv.setUint32(base + 116, startSec >>> 0, true);
+    dv.setUint32(base + 120, size >>> 0,     true);
+  }
+
+  // Prefill all unused dir entry slots with NOSTREAM (-1) for left/right/child
+  // so parsers don't follow zero-valued pointers to Root Entry.
+  for (let i = 0; i < dirN * 4; i++) {
+    const base = i * 128;
+    dv.setInt32(base + 68, -1, true); // left sibling = NOSTREAM
+    dv.setInt32(base + 72, -1, true); // right sibling = NOSTREAM
+    dv.setInt32(base + 76, -1, true); // child = NOSTREAM
+  }
+
+  if (binImages.length > 0) {
+    // Valid BST for Root Entry children (ascending alphabetical order):
+    //   BinData(5) < BodyText(3) < DocInfo(2) < FileHeader(1)
+    // Chain: BinData→right=BodyText→right=DocInfo→right=FileHeader
+    // Root Entry child = 5 (BinData, alphabetically smallest)
+    writeDirEntry(0, 'Root Entry', 5, -1, -1,  5, ENDOFCHAIN, 0);
+    writeDirEntry(1, 'FileHeader', 2, -1, -1, -1, fhSec, fileHeaderData.length); // leaf
+    writeDirEntry(2, 'DocInfo',    2, -1,  1, -1, diSec, docInfoData.length);    // right=FileHeader(1)
+    writeDirEntry(3, 'BodyText',   1, -1,  2,  4, ENDOFCHAIN, 0); // right=DocInfo(2), child=Section0(4)
+    writeDirEntry(4, 'Section0',   2, -1, -1, -1, s0Sec, section0Data.length);   // leaf
+    writeDirEntry(5, 'BinData',    1, -1,  3,  6, ENDOFCHAIN, 0); // right=BodyText(3), child=first image(6)
+    for (let ii = 0; ii < binImages.length; ii++) {
+      const img = binImages[ii];
+      const streamName = `BIN${String(img.id).padStart(4, '0')}.${img.ext}`;
+      // Images named BIN0001, BIN0002, ... are ascending alphabetically — chain via right sibling
+      const sibling = ii + 1 < binImages.length ? 7 + ii : -1;
+      writeDirEntry(6 + ii, streamName, 2, -1, sibling, -1, imgSecs[ii], img.data.length);
+    }
+  } else {
+    // Valid BST for Root Entry children (ascending alphabetical order):
+    //   BodyText(3) < DocInfo(2) < FileHeader(1)
+    // Root Entry child = 3 (BodyText, alphabetically smallest)
+    writeDirEntry(0, 'Root Entry', 5, -1, -1,  3, ENDOFCHAIN, 0);
+    writeDirEntry(1, 'FileHeader', 2, -1, -1, -1, fhSec, fileHeaderData.length); // leaf
+    writeDirEntry(2, 'DocInfo',    2, -1,  1, -1, diSec, docInfoData.length);    // right=FileHeader(1)
+    writeDirEntry(3, 'BodyText',   1, -1,  2,  4, ENDOFCHAIN, 0); // right=DocInfo(2), child=Section0(4)
+    writeDirEntry(4, 'Section0',   2, -1, -1, -1, s0Sec, section0Data.length);   // leaf
+  }
+
+  // Set HWP Root Entry CLSID: {C0E3E920-3546-11CF-8D81-00AA00389B71}
+  // Required for Hangul Office to recognise this as an HWP document.
+  // GUID wire format: Data1(LE u32), Data2(LE u16), Data3(LE u16), Data4(8 bytes BE)
+  const HWP_CLSID = [
+    0x20, 0xE9, 0xE3, 0xC0, // C0E3E920 little-endian
+    0x46, 0x35,             // 3546     little-endian
+    0xCF, 0x11,             // 11CF     little-endian
+    0x8D, 0x81, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71, // 8D81-00AA00389B71 as-is
+  ];
+  for (let i = 0; i < 16; i++) dirBuf[80 + i] = HWP_CLSID[i];
+
+  // Build OLE2 file header (512 bytes)
+  const hdr  = new Uint8Array(SS);
+  const hdv  = new DataView(hdr.buffer);
+  const MAGIC = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+  MAGIC.forEach((b, i) => { hdr[i] = b; });
+  hdv.setUint16(24, 0x003E, true); // minor version
+  hdv.setUint16(26, 0x0003, true); // major version
+  hdv.setUint16(28, 0xFFFE, true); // byte order (LE)
+  hdv.setUint16(30, 9,      true); // sector size = 2^9 = 512
+  hdv.setUint16(32, 6,      true); // mini sector size = 2^6 = 64
+  hdv.setUint32(40, 0,          true); // num dir sectors (0 for v3)
+  hdv.setUint32(44, fatN,       true); // num FAT sectors
+  hdv.setUint32(48, dir1Sec,    true); // first directory sector
+  hdv.setUint32(52, 0,          true); // transaction signature (0)
+  hdv.setUint32(56, 0x1000,     true); // mini stream cutoff = 4096
+  hdv.setUint32(60, ENDOFCHAIN, true); // first mini FAT sector (none)
+  hdv.setUint32(64, 0,          true); // num mini FAT sectors (0)
+  hdv.setUint32(68, ENDOFCHAIN, true); // first DIFAT extension (none)
+  hdv.setUint32(72, 0,          true); // num DIFAT extensions (0)
+  for (let i = 0; i < 109; i++) {
+    hdv.setUint32(76 + i * 4, i < fatN ? i : FREESECT, true);
+  }
+
+  // Assemble output
+  const out = new Uint8Array(SS + totalSec * SS);
+  out.set(hdr, 0);
+  for (let i = 0; i < fatN; i++) {
+    out.set(fatBuf.subarray(i * SS, (i + 1) * SS), SS + i * SS);
+  }
+  for (let i = 0; i < dirN; i++) {
+    out.set(dirBuf.subarray(i * SS, (i + 1) * SS), SS + (dir1Sec + i) * SS);
+  }
+  out.set(fhPad, SS + fhSec * SS);
+  out.set(diPad, SS + diSec * SS);
+  out.set(s0Pad, SS + s0Sec * SS);
+  for (let ii = 0; ii < imgPads.length; ii++) {
+    out.set(imgPads[ii], SS + imgSecs[ii] * SS);
+  }
+  return out;
+}
+
+/* ═══════════════════════════════════════════════════════════════
    Utility
    ═══════════════════════════════════════════════════════════════ */
 
@@ -1176,18 +1367,7 @@ export class HwpEncoder implements Encoder {
 
       // Assemble OLE2 file (images go as raw streams in BinData storage, NOT compressed)
       const fileHdr = buildHwpFileHeader();
-      const entries = [
-        { name: 'FileHeader', data: fileHdr },
-        { name: 'DocInfo',    data: docInfoCmp },
-        { name: 'BodyText/Section0', data: bodyCmp },
-      ];
-      if (images.length > 0) {
-        for (const img of images) {
-          const streamName = `BIN${String(img.id).padStart(4, '0')}.${img.ext}`;
-          entries.push({ name: `BinData/${streamName}`, data: img.data });
-        }
-      }
-      const hwp = await ArchiveKit.ole(entries);
+      const hwp     = buildHwpOle2(fileHdr, docInfoCmp, bodyCmp, images);
 
       return succeed(hwp);
     } catch (e: any) {

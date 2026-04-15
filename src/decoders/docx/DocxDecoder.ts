@@ -200,6 +200,7 @@ interface ParaStyleDef {
     spaceAfter?: number;
     lineHeight?: number;
     indentPt?: number;
+    firstLineIndentPt?: number;
   };
   basedOn?: string; // parent style id
 }
@@ -467,17 +468,17 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   const pPr = p?.["w:pPr"]?.[0] ?? {};
   const alignVal =
     pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ?? pPr?.["w:jc"]?.[0]?._attr?.val;
-  const pStyleId =
+  const headStyle =
     pPr?.["w:pStyle"]?.[0]?._attr?.["w:val"] ??
     pPr?.["w:pStyle"]?.[0]?._attr?.val ??
     "";
 
   // Resolve paragraph style inheritance chain
-  const styleInherited = resolveParaStyle(pStyleId || undefined, ctx.paraStyleMap);
+  const styleInherited = resolveParaStyle(headStyle || undefined, ctx.paraStyleMap);
 
   const props: ParaProps = {
     align: safeAlign(alignVal),
-    heading: parseHeading(pStyleId),
+    heading: parseHeading(headStyle),
   };
 
   // Spacing (before/after/line height) — inline pPr wins over style
@@ -486,7 +487,8 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   const beforeVal = Number(spacingAttr?.["w:before"] ?? spacingAttr?.before ?? 0);
   const afterVal = Number(spacingAttr?.["w:after"] ?? spacingAttr?.after ?? 0);
   const lineVal = Number(spacingAttr?.["w:line"] ?? spacingAttr?.line ?? 0);
-  const lineRule = spacingAttr?.["w:lineRule"] ?? spacingAttr?.lineRule ?? "auto";
+  const lineRule =
+    spacingAttr?.["w:lineRule"] ?? spacingAttr?.lineRule ?? "auto";
   if (beforeVal > 0) props.spaceBefore = Metric.dxaToPt(beforeVal);
   else if (styleInherited.pPr?.spaceBefore) props.spaceBefore = styleInherited.pPr.spaceBefore;
   if (afterVal > 0) props.spaceAfter = Metric.dxaToPt(afterVal);
@@ -497,8 +499,13 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   // Indentation
   const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
   const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
+  const firstLineVal = Number(indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0);
+  const hangingVal = Number(indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0);
   if (leftVal > 0) props.indentPt = Metric.dxaToPt(leftVal);
   else if (styleInherited.pPr?.indentPt) props.indentPt = styleInherited.pPr.indentPt;
+  if (firstLineVal > 0) props.firstLineIndentPt = Metric.dxaToPt(firstLineVal);
+  else if (hangingVal > 0) props.firstLineIndentPt = -Metric.dxaToPt(hangingVal);
+  else if (styleInherited.pPr?.firstLineIndentPt) props.firstLineIndentPt = styleInherited.pPr.firstLineIndentPt;
 
   // Alignment from style if not set inline
   if (!alignVal && styleInherited.pPr?.align) props.align = safeAlign(styleInherited.pPr.align);
@@ -519,6 +526,7 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
       const lvlInfo = numEntry.levels.get(ilvl) ?? numEntry.levels.get(0);
       props.listOrd = lvlInfo?.isOrdered ?? false;
     } else {
+      // Fallback: numId=1 is typically bullet, numId=2 is numbered
       props.listOrd = numId >= 2;
     }
   }
@@ -530,7 +538,7 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
 
   const runs = toArr(p?.["w:r"] ?? p?.r);
 
-  // 3/28 이미지 태그를 찾을수 있기 때문에 별도 함수 구현
+  // 3/28 이미지 태크를 찾을수 있기 때문에 별도 함수 구현
   const kids: (SpanNode | ImgNode)[] = ctx.shield.guardAll(
     runs,
     (run: any) =>
@@ -854,6 +862,8 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
         const lineRule = spacingAttr?.["w:lineRule"] ?? spacingAttr?.lineRule ?? "auto";
         const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
         const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
+        const firstLineVal = Number(indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0);
+        const hangingVal = Number(indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0);
         const alignVal = pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ?? pPr?.["w:jc"]?.[0]?._attr?.val;
         def.pPr = {
           align: alignVal,
@@ -861,6 +871,8 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
           spaceAfter: afterVal > 0 ? Metric.dxaToPt(afterVal) : undefined,
           lineHeight: lineVal > 0 && lineRule === "auto" ? lineVal / 240 : undefined,
           indentPt: leftVal > 0 ? Metric.dxaToPt(leftVal) : undefined,
+          firstLineIndentPt: firstLineVal > 0 ? Metric.dxaToPt(firstLineVal)
+            : hangingVal > 0 ? -Metric.dxaToPt(hangingVal) : undefined,
         };
       }
 
@@ -872,24 +884,23 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
   return map;
 }
 
-/** Resolve inherited rPr by walking the basedOn chain (max 8 levels) */
+/** Resolve paragraph style inheritance chain (max depth 8) */
 function resolveParaStyle(styleId: string | undefined, map: ParaStyleMap): ParaStyleDef {
-  const seen = new Set<string>();
   let merged: ParaStyleDef = {};
-  let id: string | undefined = styleId;
-  while (id && !seen.has(id)) {
-    seen.add(id);
-    const def = map.get(id);
+  const visited = new Set<string>();
+  let cur = styleId;
+  while (cur && !visited.has(cur)) {
+    visited.add(cur);
+    const def = map.get(cur);
     if (!def) break;
-    // Merge: current style wins over parent
+    // Merge: child values win over parent
     if (def.rPr) {
       merged.rPr = { ...def.rPr, ...merged.rPr };
     }
     if (def.pPr) {
       merged.pPr = { ...def.pPr, ...merged.pPr };
     }
-    id = def.basedOn;
-    if (seen.size > 8) break;
+    cur = def.basedOn;
   }
   return merged;
 }

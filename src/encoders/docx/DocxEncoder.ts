@@ -373,8 +373,17 @@ function encodeParaInner(para: ParaNode, ctx: EncCtx): string {
 
   // Indentation
   let indentXml = '';
-  if (para.props.indentPt !== undefined) {
-    indentXml = `<w:ind w:left="${Metric.ptToDxa(para.props.indentPt)}"/>`;
+  const leftDxa  = para.props.indentPt !== undefined ? Metric.ptToDxa(para.props.indentPt) : 0;
+  const firstPt  = para.props.firstLineIndentPt;
+  if (leftDxa > 0 || firstPt !== undefined) {
+    const parts: string[] = [];
+    if (leftDxa > 0) parts.push(`w:left="${leftDxa}"`);
+    if (firstPt !== undefined) {
+      const dxa = Metric.ptToDxa(Math.abs(firstPt));
+      if (firstPt >= 0) parts.push(`w:firstLine="${dxa}"`);
+      else              parts.push(`w:hanging="${dxa}"`);
+    }
+    if (parts.length > 0) indentXml = `<w:ind ${parts.join(' ')}/>`;
   }
 
   const runs = para.kids.map(k => {

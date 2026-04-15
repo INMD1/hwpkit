@@ -31,7 +31,6 @@
     "playground": "vite --config playground/vite.config.ts"
   },
   "dependencies": {
-    "cfb": "^1.2.2",
     "fs": "^0.0.1-security",
     "pako": "^2.1.0",
     "path": "^0.12.7",

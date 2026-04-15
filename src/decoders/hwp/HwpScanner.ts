@@ -71,6 +71,7 @@ interface HwpParaShape {
   spaceBefore: number;
   spaceAfter: number;
   lineSpacing: number;
+  leftMargin: number;
   indent: number;
 }
 
@@ -222,11 +223,12 @@ function parseCharShape(d: Uint8Array): HwpCharShape {
 const ALIGN_TBL: Record<number, Align> = { 0: 'justify', 1: 'left', 2: 'right', 3: 'center', 4: 'justify' };
 
 function parseParaShape(d: Uint8Array): HwpParaShape {
-  if (d.length < 4) return { align: 'left', spaceBefore: 0, spaceAfter: 0, lineSpacing: 160, indent: 0 };
+  if (d.length < 4) return { align: 'left', spaceBefore: 0, spaceAfter: 0, lineSpacing: 160, leftMargin: 0, indent: 0 };
   const attr = BinaryKit.readU32LE(d, 0);
   return {
     align:       ALIGN_TBL[(attr >> 2) & 0x7] ?? 'left',
-    indent:      d.length >= 16 ? i32(d, 12) : 0,
+    leftMargin:  d.length >= 8  ? i32(d, 4)  : 0,  // offset 4: leftMargin (들여쓰기)
+    indent:      d.length >= 16 ? i32(d, 12) : 0,  // offset 12: first-line indent
     spaceBefore: d.length >= 20 ? i32(d, 16) : 0,
     spaceAfter:  d.length >= 24 ? i32(d, 20) : 0,
     lineSpacing: d.length >= 28 ? i32(d, 24) : 160,
@@ -804,7 +806,10 @@ function buildParaProps(ps?: HwpParaShape): ParaProps {
   if (ps.spaceBefore > 0) p.spaceBefore = Metric.hwpToPt(ps.spaceBefore);
   if (ps.spaceAfter > 0)  p.spaceAfter  = Metric.hwpToPt(ps.spaceAfter);
   if (ps.lineSpacing > 0 && ps.lineSpacing !== 160) p.lineHeight = ps.lineSpacing / 100;
-  if (ps.indent > 0) p.indentPt = Metric.hwpToPt(ps.indent);
+  // leftMargin (offset 4) = 문단 몸체 왼쪽 여백 → indentPt
+  if (ps.leftMargin > 0) p.indentPt = Metric.hwpToPt(ps.leftMargin);
+  // indent (offset 12) = 첫 줄 들여쓰기(양수) / 내어쓰기(음수) → firstLineIndentPt
+  if (ps.indent !== 0) p.firstLineIndentPt = Metric.hwpToPt(ps.indent);
   return p;
 }
 

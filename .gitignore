@@ -10,3 +10,7 @@ tests
 data
 playground
 CLAUDE.*
+.c
+Tester.so.c
+*.hwp
+*.hwp.md
