@@ -281,10 +281,14 @@ export class HwpxEncoder implements Encoder {
       const dims = normalizeDims(sheet?.dims ?? A4);
 
       // Available width = page width - left margin - right margin (in HWPUNIT)
-      const availableWidth =
+      // 방어: ml/mr이 0이거나 미정의면 A4 기본 좌우 여백(70.87pt ≈ 2.5cm) 적용
+      const safeML = dims.ml > 0 ? dims.ml : 70.87;
+      const safeMR = dims.mr > 0 ? dims.mr : 70.87;
+      const availableWidth = Math.round(
         Metric.ptToHwp(dims.wPt) -
-        Metric.ptToHwp(dims.ml) -
-        Metric.ptToHwp(dims.mr);
+        Metric.ptToHwp(safeML) -
+        Metric.ptToHwp(safeMR),
+      );
 
       const ctx: HwpxCtx = {
         charPrs: [],
@@ -394,6 +398,12 @@ export class HwpxEncoder implements Encoder {
         mime: "text/xml",
       });
 
+      console.log('[HwpxEncoder] 섹션 단락수:', (TextKit.decode(sectionData).match(/<hp:p /g) || []).length);
+      console.log('[HwpxEncoder] 텍스트 노드수:', (TextKit.decode(sectionData).match(/<hp:t/g) || []).length);
+      console.log('[HwpxEncoder] 이미지 bin수:', ctx.bins.length);
+      console.log('[HwpxEncoder] charPr수:', ctx.charPrs.length);
+      console.log('[HwpxEncoder] 전체 파일 크기:', entries.reduce((s, e) => s + e.data.length, 0), 'bytes');
+
       return succeed(await ArchiveKit.zip(entries));
     } catch (e: any) {
       return fail(`HWPX encode error: ${e?.message ?? String(e)}`);
@@ -458,7 +468,7 @@ function contentHpf(ctx: HwpxCtx, meta?: DocMeta): string {
     const comment = bin.originalName
       ? `<!-- original: ${esc(bin.originalName)} -->`
       : "";
-    items += `${comment}<opf:item id="${bin.id}" href="BinData/${bin.name}" media-type="${ct}" isEmbeded="1"/>`;
+    items += `${comment}<opf:item id="${bin.id}" href="BinData/${bin.name}" media-type="${ct}" isEmbedded="1"/>`;
   }
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><opf:package xmlns:opf="http://www.idpf.org/2007/opf/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf" version="2.0" unique-identifier="hwpx" id="hwpx"><opf:metadata><opf:title>${title}</opf:title><opf:language>ko</opf:language><opf:meta name="creator" content="text">${creator}</opf:meta><opf:meta name="subject" content="text">${subject}</opf:meta><opf:meta name="description" content="text">${description}</opf:meta><opf:meta name="CreatedDate" content="text">${created}</opf:meta><opf:meta name="ModifiedDate" content="text">${modified}</opf:meta><opf:meta name="keyword" content="text">${keyword}</opf:meta></opf:metadata><opf:manifest>${items}</opf:manifest><opf:spine><opf:itemref idref="section0" linear="yes"/></opf:spine></opf:package>`;
 }
@@ -479,12 +489,10 @@ function headerXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
   ];
   let fontFaces = `<hh:fontfaces itemCnt="${langs.length}">`;
   for (const lang of langs) {
-    fontFaces += `<hh:fontface lang="${lang}" fontCnt="${fontCount}">`;
-    for (let fi = 0; fi < ctx.fonts.length; fi++) {
-      fontFaces += `<hh:font id="${fi}" face="${esc(ctx.fonts[fi])}" type="TTF" isEmbedded="0"><hh:typeInfo familyType="FCAT_GOTHIC" weight="6" proportion="0" contrast="0" strokeVariation="1" armStyle="1" letterform="1" midline="1" xHeight="1"/></hh:font>`;
-    }
-    if (ctx.fonts.length === 0) {
-      fontFaces += `<hh:font id="0" face="맑은 고딕" type="TTF" isEmbedded="0"><hh:typeInfo familyType="FCAT_GOTHIC" weight="6" proportion="0" contrast="0" strokeVariation="1" armStyle="1" letterform="1" midline="1" xHeight="1"/></hh:font>`;
+    const currentFonts = ctx.fonts.length > 0 ? ctx.fonts : ["맑은 고딕"];
+    fontFaces += `<hh:fontface lang="${lang}" fontCnt="${currentFonts.length}">`;
+    for (let fi = 0; fi < currentFonts.length; fi++) {
+      fontFaces += `<hh:font id="${fi}" face="${esc(currentFonts[fi])}" type="TTF" isEmbedded="0"><hh:typeInfo familyType="FCAT_GOTHIC" weight="6" proportion="0" contrast="0" strokeVariation="1" armStyle="1" letterform="1" midline="1" xHeight="1"/></hh:font>`;
     }
     fontFaces += `</hh:fontface>`;
   }
@@ -502,8 +510,8 @@ function headerXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
   // ParaPr definitions
   let paraPrXml = "";
   for (const pp of ctx.paraPrs) {
-    const marginSwitch = `<hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar"><hh:margin><hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="0" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="PERCENT" value="${pp.lineSpacing}" unit="HWPUNIT"/></hp:case><hp:default><hh:margin><hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="0" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="PERCENT" value="${pp.lineSpacing}" unit="HWPUNIT"/></hp:default></hp:switch>`;
-    paraPrXml += `<hh:paraPr id="${pp.id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="0" suppressLineNumbers="0" checked="0"><hh:align horizontal="${pp.align}" vertical="BASELINE"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="BREAK_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/>${marginSwitch}<hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>`;
+    const marginXml = `<hh:margin><hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="0" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="PERCENT" value="${pp.lineSpacing}" unit="HWPUNIT"/>`;
+    paraPrXml += `<hh:paraPr id="${pp.id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="0" suppressLineNumbers="0" checked="0"><hh:align horizontal="${pp.align}" vertical="BASELINE"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="BREAK_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/>${marginXml}<hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>`;
   }
 
   // BorderFill definitions
@@ -521,9 +529,45 @@ function sectionXml(
 ): string {
   const kids = sheet?.kids ?? [];
 
-  // First paragraph includes secPr
   // WIDELY = portrait (standard), NARROWLY = landscape
-  const secPr = `<hp:secPr id="0" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0"><hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/><hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/><hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/><hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/><hp:pagePr landscape="${dims.orient === "landscape" ? "NARROWLY" : "WIDELY"}" width="${Metric.ptToHwp(dims.wPt)}" height="${Metric.ptToHwp(dims.hPt)}" gutterType="LEFT_ONLY"><hp:margin header="2834" footer="2834" gutter="0" left="${Metric.ptToHwp(dims.ml)}" right="${Metric.ptToHwp(dims.mr)}" top="${Metric.ptToHwp(dims.mt)}" bottom="${Metric.ptToHwp(dims.mb)}"/></hp:pagePr><hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="284" belowLine="568" aboveLine="852"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr><hp:endNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="0" type="NONE" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="0" belowLine="576" aboveLine="864"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="END_OF_DOCUMENT" beneathText="0"/></hp:endNotePr><hp:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="EVEN" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="ODD" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:presentationPr duration="0" transitionEffect="NONE" transitionSpeed="FAST" transitionType="AUTO"/></hp:secPr>`;
+  const secPr = `<hp:secPr id="0" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">
+    <hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/>
+    <hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/>
+    <hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/>
+    <hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/>
+    <hp:pagePr landscape="${dims.orient === "landscape" ? "NARROWLY" : "WIDELY"}" width="${Metric.ptToHwp(dims.wPt)}" height="${Metric.ptToHwp(dims.hPt)}" gutterType="LEFT_ONLY">
+      <hp:margin header="2834" footer="2834" gutter="0" left="${Metric.ptToHwp(dims.ml)}" right="${Metric.ptToHwp(dims.mr)}" top="${Metric.ptToHwp(dims.mt)}" bottom="${Metric.ptToHwp(dims.mb)}"/>
+    </hp:pagePr>
+    <hp:footNotePr>
+      <hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/>
+      <hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/>
+      <hp:noteSpacing betweenNotes="284" belowLine="568" aboveLine="852"/>
+      <hp:numbering type="CONTINUOUS" newNum="1"/>
+      <hp:placement place="EACH_COLUMN" beneathText="0"/>
+    </hp:footNotePr>
+    <hp:endNotePr>
+      <hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/>
+      <hp:noteLine length="0" type="NONE" width="0.12 mm" color="#000000"/>
+      <hp:noteSpacing betweenNotes="0" belowLine="576" aboveLine="864"/>
+      <hp:numbering type="CONTINUOUS" newNum="1"/>
+      <hp:placement place="END_OF_DOCUMENT" beneathText="0"/>
+    </hp:endNotePr>
+    <hp:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER">
+      <hp:offset left="1417" right="1417" top="1417" bottom="1417"/>
+    </hp:pageBorderFill>
+    <hp:pageBorderFill type="EVEN" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER">
+      <hp:offset left="1417" right="1417" top="1417" bottom="1417"/>
+    </hp:pageBorderFill>
+    <hp:pageBorderFill type="ODD" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER">
+      <hp:offset left="1417" right="1417" top="1417" bottom="1417"/>
+    </hp:pageBorderFill>
+    <hp:presentationPr duration="0" transitionEffect="NONE" transitionSpeed="FAST" transitionType="AUTO"/>
+  </hp:secPr>
+  <hp:ctrl>
+    <hp:colPr id="${ctx.nextElementId++}" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0">
+      <hp:col width="${ctx.availableWidth}" gap="0"/>
+    </hp:colPr>
+  </hp:ctrl>`;
 
   let contentXml = "";
   let isFirst = true;
@@ -642,7 +686,8 @@ function encodeRun(span: SpanNode, ctx: HwpxCtx): string {
       if (kid.content) {
         parts.push(`<hp:t>${esc(kid.content)}</hp:t>`);
       } else {
-        parts.push(`<hp:t></hp:t>`);
+        // 완전히 빈 run은 일부 뷰어에서 invisible 처리됨 → 공백 1개 삽입
+        parts.push(`<hp:t xml:space="preserve"> </hp:t>`);
       }
     } else if (kid.tag === "pagenum") {
       const fmt =

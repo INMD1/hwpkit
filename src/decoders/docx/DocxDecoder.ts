@@ -626,7 +626,24 @@ function decodeDrawing(drawing: any, ctx: DecCtx): ImgNode | null {
     const target = ctx.relsMap.get(rId);
     if (!target) return null;
 
-    const filePath = resolveDocxPath("word", target);
+    // Multi-step path resolution:
+    // 1) word/ base (document.xml 기준, 대부분의 경우)
+    // 2) word/_rels/ base (일부 DOCX의 "../media/" 상대 경로)
+    // 3) ZIP 전체에서 파일명 fallback 검색
+    let filePath = resolveDocxPath("word", target);
+    if (!ctx.files.has(filePath)) {
+      filePath = resolveDocxPath("word/_rels", target);
+    }
+    if (!ctx.files.has(filePath)) {
+      const fileName = target.split('/').pop() ?? '';
+      for (const [k] of ctx.files) {
+        if (k.endsWith('/' + fileName) || k === fileName) {
+          filePath = k;
+          break;
+        }
+      }
+    }
+
     const fileData = ctx.files.get(filePath);
     if (!fileData) {
       console.warn(
@@ -659,11 +676,42 @@ function decodeDrawing(drawing: any, ctx: DecCtx): ImgNode | null {
   }
 }
 
+/** w:highlight val → hex 색상 매핑 (OOXML 명세) */
+const HIGHLIGHT_COLOR_MAP: Record<string, string> = {
+  yellow:      "FFFF00",
+  green:       "00FF00",
+  cyan:        "00FFFF",
+  magenta:     "FF00FF",
+  blue:        "0000FF",
+  red:         "FF0000",
+  darkBlue:    "00008B",
+  darkCyan:    "008B8B",
+  darkGreen:   "006400",
+  darkMagenta: "8B008B",
+  darkRed:     "8B0000",
+  darkYellow:  "808000",
+  darkGray:    "A9A9A9",
+  lightGray:   "D3D3D3",
+  black:       "000000",
+  white:       "FFFFFF",
+};
+
 function decodeRun(run: any, ctx: DecCtx, styleRpr?: ParaStyleDef['rPr']): SpanNode {
   const rPr = run?.["w:rPr"]?.[0] ?? run?.rPr?.[0] ?? {};
 
+  // w:vanish — 숨긴 텍스트: run 전체 건너뜀 (빈 span 반환)
+  const vanishNode = rPr?.["w:vanish"]?.[0] ?? rPr?.vanish?.[0];
+  if (vanishNode != null) {
+    const vanishVal = vanishNode?._attr?.["w:val"] ?? vanishNode?._attr?.val ?? "1";
+    if (vanishVal !== "0") return buildSpan("");
+  }
+
+  // w:sz → 없으면 w:szCs 로 fallback (한글 글꼴 크기)
   const szAttr = rPr?.["w:sz"]?.[0]?._attr ?? rPr?.sz?.[0]?._attr ?? {};
   const szVal = szAttr?.["w:val"] ?? szAttr?.val;
+  const szCsAttr = rPr?.["w:szCs"]?.[0]?._attr ?? rPr?.szCs?.[0]?._attr ?? {};
+  const szCsVal = szCsAttr?.["w:val"] ?? szCsAttr?.val;
+  const effectiveSzVal = szVal ?? szCsVal;
 
   const colorAttr =
     rPr?.["w:color"]?.[0]?._attr ?? rPr?.color?.[0]?._attr ?? {};
@@ -682,14 +730,30 @@ function decodeRun(run: any, ctx: DecCtx, styleRpr?: ParaStyleDef['rPr']): SpanN
   const underVal =
     rPr?.["w:u"]?.[0]?._attr?.["w:val"] ?? rPr?.["w:u"]?.[0]?._attr?.val;
 
-  // Background/highlight
+  // w:shd — 배경색 (낮은 우선순위)
   const shdAttr = rPr?.["w:shd"]?.[0]?._attr ?? rPr?.shd?.[0]?._attr ?? {};
-  const bgVal = safeHex(shdAttr?.["w:fill"] ?? shdAttr?.fill);
+  const shdBg = safeHex(shdAttr?.["w:fill"] ?? shdAttr?.fill);
 
-  // Superscript/subscript
+  // w:highlight — 형광펜 색상 (w:shd보다 우선)
+  const hlAttr = rPr?.["w:highlight"]?.[0]?._attr ?? rPr?.highlight?.[0]?._attr ?? {};
+  const hlVal = hlAttr?.["w:val"] ?? hlAttr?.val;
+  const bgVal = (hlVal ? HIGHLIGHT_COLOR_MAP[hlVal] : undefined) ?? shdBg;
+
+  // w:vertAlign — superscript / subscript
   const vertAlignVal =
     rPr?.["w:vertAlign"]?.[0]?._attr?.["w:val"] ??
     rPr?.["w:vertAlign"]?.[0]?._attr?.val;
+
+  // w:position — 글자 상하 이동 (half-point, 양수=위, 음수=아래)
+  // vertAlign이 없을 때 보조 판단: ±4 half-pt(≈2pt) 이상이면 sup/sub
+  const posAttr = rPr?.["w:position"]?.[0]?._attr ?? rPr?.position?.[0]?._attr ?? {};
+  const posVal = Number(posAttr?.["w:val"] ?? posAttr?.val ?? 0);
+  let isSup = vertAlignVal === "superscript";
+  let isSub = vertAlignVal === "subscript";
+  if (!isSup && !isSub && posVal !== 0) {
+    if (posVal >= 4) isSup = true;
+    else if (posVal <= -4) isSub = true;
+  }
 
   // Check bold/italic/strike — val="0" means explicitly OFF
   const bNode = rPr?.["w:b"]?.[0] ?? rPr?.b?.[0];
@@ -711,9 +775,9 @@ function decodeRun(run: any, ctx: DecCtx, styleRpr?: ParaStyleDef['rPr']): SpanN
     i: (iNode != null ? isItalic : styleRpr?.i) || undefined,
     u: (underVal ? underVal !== "none" : styleRpr?.u) || undefined,
     s: (sNode != null ? isStrike : styleRpr?.s) || undefined,
-    sup: vertAlignVal === "superscript" || undefined,
-    sub: vertAlignVal === "subscript" || undefined,
-    pt: szVal ? Metric.halfPtToPt(Number(szVal)) : styleRpr?.pt,
+    sup: isSup || undefined,
+    sub: isSub || undefined,
+    pt: effectiveSzVal ? Metric.halfPtToPt(Number(effectiveSzVal)) : styleRpr?.pt,
     color: safeHex(colorVal) ?? styleRpr?.color,
     font: fontName ? safeFont(fontName) : styleRpr?.font,
     bg: bgVal,

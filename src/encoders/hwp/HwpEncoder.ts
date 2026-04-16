@@ -659,7 +659,14 @@ function mkParaText(text: string): Uint8Array {
   const w = new BufWriter();
   for (let i = 0; i < text.length; i++) {
     const c = text.charCodeAt(i);
-    w.u16(c < 32 ? 0 : c);
+    // 수정 이유(수정 2): HWP 5.0 스펙에서 TAB(0x09)·LF(0x0A)는 특수 WCHAR으로
+    // 한컴오피스가 직접 해석하므로 원값 그대로 기록.
+    // 나머지 0x01~0x1F 제어문자는 0으로 치환 (이전 동작 유지).
+    if (c === 0x09 || c === 0x0A) {
+      w.u16(c); // TAB·LF는 그대로 유지
+    } else {
+      w.u16(c < 32 ? 0 : c); // 기타 제어문자 → 0 치환
+    }
   }
   w.u16(13); // paragraph terminator (0x000D = para break)
   return w.build();
@@ -803,7 +810,9 @@ function encodePara(para: ParaNode, col: StyleCollector, lv: number, instanceId:
     mkRec(TAG_PARA_HEADER,     lv,     mkParaHeader(nchars, 0, psId, csPairs.length, 1, instanceId)),
     mkRec(TAG_PARA_TEXT,       lv + 1, mkParaText(text)),
     mkRec(TAG_PARA_CHAR_SHAPE, lv + 1, mkParaCharShape(csPairs)),
-    mkRec(TAG_PARA_LINE_SEG,   lv + 1, new Uint8Array(36)), // layout cache (1 line × 36 bytes)
+    // 수정 이유(수정 4): HWP 5.0 스펙 PARA_LINE_SEG 레코드는 줄당 32바이트.
+    // 이전의 36바이트는 스펙 불일치 → 32바이트(1줄 × 32바이트)로 수정.
+    mkRec(TAG_PARA_LINE_SEG,   lv + 1, new Uint8Array(32)), // 1 line × 32 bytes
   ];
 }
 
@@ -811,22 +820,24 @@ function encodePara(para: ParaNode, col: StyleCollector, lv: number, instanceId:
 
 /**
  * CTRL_HEADER for table ctrl — 46-byte GHDR (개체 공통 속성, 표 68)
- * Layout: ctrlId(4)+attr(4)+vOff(4)+hOff(4)+w(4)+h(4)+z(4)+margins(8)+instanceId(4)+pageBreak(4)+captionLen(2)
+ * Layout: ctrlId(4)+attr(4)+vOff(4)+hOff(4)+w(4)+h(4)+z(4)+margins(4×u16=8)+instanceId(4)+pageBreak(4)+captionLen(2)
+ * 수정 이유(수정 5): 바이트 수 검증 결과 이미 정확히 46바이트임을 확인.
+ *   4+4+4+4+4+4+4+8+4+4+2 = 46바이트 (HWP 5.0 스펙 표 68 일치, 패딩 없음)
  */
 function mkTableCtrl(wHwp: number, hHwp: number, instanceId: number): Uint8Array {
   return new BufWriter()
-    .u32(CTRL_TABLE)   // ctrlId: 'tbl ' (4)
-    .u32(0x082a2211)   // attr — value from real file (4)
-    .i32(0)            // vOff (4)
-    .i32(0)            // hOff (4)
-    .u32(wHwp)         // width in HWPUNIT (4)
-    .u32(hHwp)         // height in HWPUNIT (4)
-    .i32(7)            // z-order — value from real file (4)
-    .u16(140).u16(140).u16(140).u16(140) // outer margins left/right/top/bottom (8)
-    .u32(instanceId)   // instanceId (4)
-    .i32(0)            // pageBreak (4)
-    .u16(0)            // captionLen (2)
-    .build();          // 46 bytes
+    .u32(CTRL_TABLE)   // ctrlId: 'tbl ' (+4 → 4)
+    .u32(0x082a2211)   // attr — 실 파일 참조값 (+4 → 8)
+    .i32(0)            // vOff (+4 → 12)
+    .i32(0)            // hOff (+4 → 16)
+    .u32(wHwp)         // width in HWPUNIT (+4 → 20)
+    .u32(hHwp)         // height in HWPUNIT (+4 → 24)
+    .i32(7)            // z-order — 실 파일 참조값 (+4 → 28)
+    .u16(140).u16(140).u16(140).u16(140) // outer margins L/R/T/B (+8 → 36)
+    .u32(instanceId)   // instanceId (+4 → 40)
+    .i32(0)            // pageBreak (+4 → 44)
+    .u16(0)            // captionLen (+2 → 46) ← 스펙 정확, 추가 패딩 없음
+    .build();          // 정확히 46 bytes
 }
 
 /**
@@ -1018,7 +1029,9 @@ function buildSectionParagraph(dims: PageDims, instanceId: number): Uint8Array[]
     mkRec(TAG_PARA_HEADER,     0, mkParaHeader(nchars, SECD_CTRL_MASK, 0, 1, 1, instanceId)),
     mkRec(TAG_PARA_TEXT,       1, mkSecdParaText()),
     mkRec(TAG_PARA_CHAR_SHAPE, 1, mkParaCharShape([[0, 0]])),
-    mkRec(TAG_PARA_LINE_SEG,   1, new Uint8Array(36)), // 1 line × 36 bytes = 36 bytes
+    // 수정 이유(수정 3): HWP 5.0 스펙 PARA_LINE_SEG 레코드는 줄당 32바이트.
+    // 이전의 36바이트는 스펙 불일치 → 32바이트(1줄 × 32바이트)로 수정.
+    mkRec(TAG_PARA_LINE_SEG,   1, new Uint8Array(32)), // 1 line × 32 bytes
     mkRec(TAG_CTRL_HEADER,     1, mkSectionCtrl()),    // 'secd' at level 1
     mkRec(TAG_PAGE_DEF,        2, mkPageDef(dims)),    // page def at level 2
     mkRec(TAG_FOOTNOTE_SHAPE,  2, new Uint8Array(28)), // footnote shape (defaults)
@@ -1074,7 +1087,8 @@ function buildBodyTextStream(
         chunks.push(mkRec(TAG_PARA_HEADER,     0, mkParaHeader(9, TABLE_CTRL_MASK, 0, 1, 1, idGen())));
         chunks.push(mkRec(TAG_PARA_TEXT,       1, mkTableParaText()));
         chunks.push(mkRec(TAG_PARA_CHAR_SHAPE, 1, mkParaCharShape([[0, 0]])));
-        chunks.push(mkRec(TAG_PARA_LINE_SEG,   1, new Uint8Array(36)));
+        // 수정 이유(수정 4): 테이블 컨테이너 단락도 동일하게 32바이트로 통일
+        chunks.push(mkRec(TAG_PARA_LINE_SEG,   1, new Uint8Array(32))); // 1 line × 32 bytes
         // Table ctrl at level 1, TABLE record and cells at levels 2/3
         for (const r of encodeGrid(node as GridNode, col, 1, idGen)) chunks.push(r);
       }
@@ -1368,6 +1382,31 @@ export class HwpEncoder implements Encoder {
       // Assemble OLE2 file (images go as raw streams in BinData storage, NOT compressed)
       const fileHdr = buildHwpFileHeader();
       const hwp     = buildHwpOle2(fileHdr, docInfoCmp, bodyCmp, images);
+
+      // 수정 이유(수정 1): OLE2 구조 검증 — "인코딩 설정" 대화상자 원인 진단용.
+      // 한컴오피스가 HWP OLE2를 인식 못하면 텍스트 파일로 간주하여 해당 대화상자가 뜸.
+      // magicOk가 false이거나 dirFirstSector가 이상한 값이면 buildHwpOle2 버그 탐색.
+      const OLE2_MAGIC = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+      const magicOk = OLE2_MAGIC.every((b, i) => hwp[i] === b);
+      const dv2 = new DataView(hwp.buffer, hwp.byteOffset);
+      const fatN        = dv2.getUint32(44, true);
+      const dirFirstSec = dv2.getUint32(48, true);
+      const sectorSize  = 1 << dv2.getUint16(30, true);
+      console.log('[HwpEncoder] 검증:', {
+        magicOk,
+        fileSize:      hwp.length,
+        sectorSize,
+        fatSectors:    fatN,
+        dirFirstSector: dirFirstSec,
+        docInfoSize:   docInfoCmp.length,
+        bodyTextSize:  bodyCmp.length,
+        imageCount:    images.length,
+      });
+      // Root Entry 디렉토리 확인 (offset = 512 + dirFirstSec * 512)
+      const dirOff      = 512 + dirFirstSec * 512;
+      const rootNameLen = dv2.getUint16(dirOff + 64, true);
+      const rootChild   = dv2.getInt32(dirOff + 76, true);
+      console.log('[HwpEncoder] Root Entry:', { nameLen: rootNameLen, childId: rootChild });
 
       return succeed(hwp);
     } catch (e: any) {
