@@ -523,12 +523,12 @@ function sectionXml(
 
   // First paragraph includes secPr
   // WIDELY = portrait (standard), NARROWLY = landscape
-  const secPr = `<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0"><hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/><hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/><hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/><hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/><hp:pagePr landscape="${dims.orient === "landscape" ? "NARROWLY" : "WIDELY"}" width="${Metric.ptToHwp(dims.wPt)}" height="${Metric.ptToHwp(dims.hPt)}" gutterType="LEFT_ONLY"><hp:margin header="2834" footer="2834" gutter="0" left="${Metric.ptToHwp(dims.ml)}" right="${Metric.ptToHwp(dims.mr)}" top="${Metric.ptToHwp(dims.mt)}" bottom="${Metric.ptToHwp(dims.mb)}"/></hp:pagePr><hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="284" belowLine="568" aboveLine="852"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr><hp:endNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="0" type="NONE" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="0" belowLine="576" aboveLine="864"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="END_OF_DOCUMENT" beneathText="0"/></hp:endNotePr><hp:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="EVEN" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="ODD" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill></hp:secPr><hp:ctrl><hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/></hp:ctrl>`;
+  const secPr = `<hp:secPr id="0" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0"><hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/><hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/><hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/><hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/><hp:pagePr landscape="${dims.orient === "landscape" ? "NARROWLY" : "WIDELY"}" width="${Metric.ptToHwp(dims.wPt)}" height="${Metric.ptToHwp(dims.hPt)}" gutterType="LEFT_ONLY"><hp:margin header="2834" footer="2834" gutter="0" left="${Metric.ptToHwp(dims.ml)}" right="${Metric.ptToHwp(dims.mr)}" top="${Metric.ptToHwp(dims.mt)}" bottom="${Metric.ptToHwp(dims.mb)}"/></hp:pagePr><hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="284" belowLine="568" aboveLine="852"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr><hp:endNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="0" type="NONE" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="0" belowLine="576" aboveLine="864"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="END_OF_DOCUMENT" beneathText="0"/></hp:endNotePr><hp:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="EVEN" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="ODD" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:presentationPr duration="0" transitionEffect="NONE" transitionSpeed="FAST" transitionType="AUTO"/></hp:secPr>`;
 
   let contentXml = "";
   let isFirst = true;
 
-  const defaultLineseg = `<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="1000" textheight="1000" baseline="850" spacing="600" horzpos="0" horzsize="${ctx.availableWidth}" flags="393216"/></hp:linesegarray>`;
+  const defaultLineseg = `<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="1000" textheight="1000" baseline="850" spacing="600" horzpos="0" horzsize="${Math.max(1, ctx.availableWidth)}" flags="393216"/></hp:linesegarray>`;
 
   for (const kid of kids) {
     if (kid.tag === "para") {
@@ -537,14 +537,14 @@ function sectionXml(
     } else if (kid.tag === "grid") {
       const gridXml = encodeGrid(kid, ctx);
       const runsXml = `<hp:run charPrIDRef="0">${gridXml}<hp:t></hp:t></hp:run>`;
-      contentXml += `<hp:p paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">${isFirst ? secPr : ""}${runsXml}${defaultLineseg}</hp:p>`;
+      contentXml += `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">${isFirst ? secPr : ""}${runsXml}${defaultLineseg}</hp:p>`;
       isFirst = false;
     }
   }
 
   // If empty, add one empty paragraph with secPr
   if (contentXml === "") {
-    contentXml = `<hp:p paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">${secPr}<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>${defaultLineseg}</hp:p>`;
+    contentXml = `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">${secPr}<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>${defaultLineseg}</hp:p>`;
   }
 
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hs:sec ${NS}>${contentXml}</hs:sec>`;
@@ -614,10 +614,10 @@ function encodePara(
   const paraPr = ctx.paraPrs[paraPrId];
   const lineSpacing = paraPr?.lineSpacing ?? 160;
   const spacing = Math.max(0, Math.round(fontSize * (lineSpacing / 100 - 1)));
-  const horzsize = availWidth ?? ctx.availableWidth;
+  const horzsize = Math.max(1, availWidth ?? ctx.availableWidth);
   const linesegarray = `<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="${fontSize}" textheight="${fontSize}" baseline="${Math.round(fontSize * 0.85)}" spacing="${spacing}" horzpos="0" horzsize="${horzsize}" flags="393216"/></hp:linesegarray>`;
 
-  return `<hp:p paraPrIDRef="${paraPrId}" styleIDRef="0" pageBreak="${hasPageBreak ? "1" : "0"}" columnBreak="0" merged="0">${secPr}${runs}${linesegarray}</hp:p>`;
+  return `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="${paraPrId}" styleIDRef="0" pageBreak="${hasPageBreak ? "1" : "0"}" columnBreak="0" merged="0">${secPr}${runs}${linesegarray}</hp:p>`;
 }
 
 /** Get the font size (in HWPX height units, 1000=10pt) for lineseg computation */
@@ -894,7 +894,9 @@ function esc(s: string): string {
   s = s.replace(/湰灧/g, "");
   s = s.replace(/\uFEFF/g, "");
   // 3. XML 1.0에서 허용하지 않는 보이지 않는 제어문자 모두 제거
-  s = s.replace(/[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD]/g, "");
+  // 허용 범위: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+  // eslint-disable-next-line no-control-regex
+  s = s.replace(/[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/gu, "");
 
   return TextKit.escapeXml(s);
 }
