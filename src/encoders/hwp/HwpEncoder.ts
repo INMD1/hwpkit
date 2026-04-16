@@ -678,6 +678,24 @@ function mkParaCharShape(pairs: [pos: number, id: number][]): Uint8Array {
   return w.build();
 }
 
+function mkLineSeg(availWidthHwp: number, fontHwp = 1000): Uint8Array {
+  // HWP 5.0 스펙: PARA_LINE_SEG 32bytes (8 × INT32 LE)
+  // vertsize = fontHwp * 1.6 (160% 줄 간격 기본값)
+  const vertSize = Math.round(fontHwp * 1.6);
+  const spacing  = vertSize - fontHwp;
+  const baseline = Math.round(fontHwp * 0.85);
+  return new BufWriter()
+    .u32(0)             //  0: textpos  (텍스트 시작 위치)
+    .i32(0)             //  4: vertpos  (수직 위치)
+    .i32(vertSize)      //  8: vertsize (줄 세로 크기)
+    .i32(fontHwp)       // 12: textheight
+    .i32(baseline)      // 16: baseline
+    .i32(spacing)       // 20: spacing  (줄 간격 여분)
+    .i32(0)             // 24: horzpos
+    .i32(availWidthHwp) // 28: horzsize (가용 너비)
+    .build();
+}
+
 /**
  * PARA_TEXT for section definition paragraph.
  * 확장 컨트롤(size=8): ctrl_code(1) + ctrlId_lo(1) + ctrlId_hi(1) + ptr[4] + ctrl_code(1)
@@ -763,6 +781,7 @@ function encodePicPara(
   col: StyleCollector,
   lv: number,
   idGen: () => number,
+  availWidthHwp: number,
 ): Uint8Array[] {
   // imgNode.w / imgNode.h are in pt (set by all decoders)
   const wHwp = Metric.ptToHwp(Math.max(imgNode.w, 10));
@@ -773,9 +792,10 @@ function encodePicPara(
   const psId = col.addParaShape({});
 
   return [
-    mkRec(TAG_PARA_HEADER,     lv,     mkParaHeader(9, TABLE_CTRL_MASK, psId, 1, 0, instanceId)),
+    mkRec(TAG_PARA_HEADER,     lv,     mkParaHeader(9, TABLE_CTRL_MASK, psId, 1, 1, instanceId)),
     mkRec(TAG_PARA_TEXT,       lv + 1, mkPicParaText()),
     mkRec(TAG_PARA_CHAR_SHAPE, lv + 1, mkParaCharShape([[0, 0]])),
+    mkRec(TAG_PARA_LINE_SEG,   lv + 1, mkLineSeg(availWidthHwp, Metric.ptToHwp(imgNode.h))),
     // $pic CTRL_HEADER (GHDR) at level lv+1
     mkRec(TAG_CTRL_HEADER, lv + 1, mkPicCtrl(wHwp, hHwp, idGen())),
     // SHAPE_COMPONENT_PICTURE at level lv+2
@@ -783,10 +803,22 @@ function encodePicPara(
   ];
 }
 
-function encodePara(para: ParaNode, col: StyleCollector, lv: number, instanceId: number): Uint8Array[] {
+function encodePara(
+  para: ParaNode, col: StyleCollector, lv: number,
+  instanceId: number, availWidthHwp: number,
+): Uint8Array[] {
   let text = '';
   const csPairs: [number, number][] = [];
   let pos = 0;
+
+  // 첫 번째 span의 폰트 크기를 fontHwp로 계산
+  let fontHwp = 1000;
+  for (const kid of para.kids) {
+    if (kid.tag === 'span') {
+      const pt = (kid as SpanNode).props.pt;
+      if (pt && pt > 0) { fontHwp = Metric.ptToHwp(pt); break; }
+    }
+  }
 
   for (const kid of para.kids) {
     if (kid.tag === 'span') {
@@ -810,9 +842,7 @@ function encodePara(para: ParaNode, col: StyleCollector, lv: number, instanceId:
     mkRec(TAG_PARA_HEADER,     lv,     mkParaHeader(nchars, 0, psId, csPairs.length, 1, instanceId)),
     mkRec(TAG_PARA_TEXT,       lv + 1, mkParaText(text)),
     mkRec(TAG_PARA_CHAR_SHAPE, lv + 1, mkParaCharShape(csPairs)),
-    // 수정 이유(수정 4): HWP 5.0 스펙 PARA_LINE_SEG 레코드는 줄당 32바이트.
-    // 이전의 36바이트는 스펙 불일치 → 32바이트(1줄 × 32바이트)로 수정.
-    mkRec(TAG_PARA_LINE_SEG,   lv + 1, new Uint8Array(32)), // 1 line × 32 bytes
+    mkRec(TAG_PARA_LINE_SEG,   lv + 1, mkLineSeg(availWidthHwp, fontHwp)),
   ];
 }
 
@@ -931,7 +961,7 @@ function mkCellListHeader(
 
 const DEFAULT_ROW_HEIGHT_PT = 14;
 
-function encodeGrid(grid: GridNode, col: StyleCollector, lv: number, idGen: () => number): Uint8Array[] {
+function encodeGrid(grid: GridNode, col: StyleCollector, lv: number, idGen: () => number, availWidthHwp: number): Uint8Array[] {
   const records: Uint8Array[] = [];
   const rowCnt = grid.kids.length;
   const colCnt = Math.max(1, grid.kids[0]?.kids.length ?? 1);
@@ -986,8 +1016,9 @@ function encodeGrid(grid: GridNode, col: StyleCollector, lv: number, idGen: () =
         mkCellListHeader(paras.length, r, c, cell.rs, cell.cs, wHwp, hHwp, bfId)));
 
       // Cell paragraphs at level lv+2 (children of LIST_HEADER)
+      const cellWidthHwp = Metric.ptToHwp(cwPt[c] ?? defColPt);
       for (const para of paras) {
-        records.push(...encodePara(para as ParaNode, col, lv + 2, idGen()));
+        records.push(...encodePara(para as ParaNode, col, lv + 2, idGen(), cellWidthHwp));
       }
     }
   }
@@ -1015,7 +1046,7 @@ function mkSectionCtrl(): Uint8Array {
  * Level 0: PARA_HEADER (nchars=9, ctrlMask=1<<2, lineAlignCount=1)
  * Level 1:   PARA_TEXT (secd ctrl reference + terminator, 9 WCHAR)
  * Level 1:   PARA_CHAR_SHAPE
- * Level 1:   PARA_LINE_SEG (36 bytes for 1 line)
+ * Level 1:   PARA_LINE_SEG (32 bytes for 1 line)
  * Level 1:   CTRL_HEADER ('secd', 4 bytes)
  * Level 2:     PAGE_DEF (40 bytes)
  * Level 2:     FOOTNOTE_SHAPE (28 bytes, for footnotes)
@@ -1024,14 +1055,15 @@ function mkSectionCtrl(): Uint8Array {
 function buildSectionParagraph(dims: PageDims, instanceId: number): Uint8Array[] {
   const SECD_CTRL_MASK = 1 << 2; // code 2 = 구역 정의/단 정의
   const nchars = 9; // 8 ctrl wchars + 1 terminator
+  const availWidthHwp = Math.max(1000,
+    Metric.ptToHwp(dims.wPt) - Metric.ptToHwp(dims.ml) - Metric.ptToHwp(dims.mr),
+  );
 
   return [
     mkRec(TAG_PARA_HEADER,     0, mkParaHeader(nchars, SECD_CTRL_MASK, 0, 1, 1, instanceId)),
     mkRec(TAG_PARA_TEXT,       1, mkSecdParaText()),
     mkRec(TAG_PARA_CHAR_SHAPE, 1, mkParaCharShape([[0, 0]])),
-    // 수정 이유(수정 3): HWP 5.0 스펙 PARA_LINE_SEG 레코드는 줄당 32바이트.
-    // 이전의 36바이트는 스펙 불일치 → 32바이트(1줄 × 32바이트)로 수정.
-    mkRec(TAG_PARA_LINE_SEG,   1, new Uint8Array(32)), // 1 line × 32 bytes
+    mkRec(TAG_PARA_LINE_SEG,   1, mkLineSeg(availWidthHwp, 1000)),
     mkRec(TAG_CTRL_HEADER,     1, mkSectionCtrl()),    // 'secd' at level 1
     mkRec(TAG_PAGE_DEF,        2, mkPageDef(dims)),    // page def at level 2
     mkRec(TAG_FOOTNOTE_SHAPE,  2, new Uint8Array(28)), // footnote shape (defaults)
@@ -1048,6 +1080,9 @@ function buildBodyTextStream(
   const dims = doc.kids[0]?.dims ?? A4;
   let instanceIdCounter = 1;
   const idGen = () => instanceIdCounter++;
+  const availWidthHwp = Math.max(1000,
+    Metric.ptToHwp(dims.wPt) - Metric.ptToHwp(dims.ml) - Metric.ptToHwp(dims.mr),
+  );
 
   // Section definition paragraph
   for (const r of buildSectionParagraph(dims, idGen())) chunks.push(r);
@@ -1068,7 +1103,7 @@ function buildBodyTextStream(
               // Find matching BinImage
               const binImg = images.find(b => b64Matches(b, img.b64));
               if (binImg) {
-                for (const r of encodePicPara(img, binImg.id, col, 0, idGen)) chunks.push(r);
+                for (const r of encodePicPara(img, binImg.id, col, 0, idGen, availWidthHwp)) chunks.push(r);
               }
             }
           }
@@ -1076,10 +1111,10 @@ function buildBodyTextStream(
           const textKids = para.kids.filter((k: any) => k.tag !== 'img');
           if (textKids.length > 0) {
             const textPara: ParaNode = { tag: 'para', props: para.props, kids: textKids as any };
-            for (const r of encodePara(textPara, col, 0, idGen())) chunks.push(r);
+            for (const r of encodePara(textPara, col, 0, idGen(), availWidthHwp)) chunks.push(r);
           }
         } else {
-          for (const r of encodePara(para, col, 0, idGen())) chunks.push(r);
+          for (const r of encodePara(para, col, 0, idGen(), availWidthHwp)) chunks.push(r);
         }
       } else if (node.tag === 'grid') {
         // Table container paragraph at level 0
@@ -1087,10 +1122,9 @@ function buildBodyTextStream(
         chunks.push(mkRec(TAG_PARA_HEADER,     0, mkParaHeader(9, TABLE_CTRL_MASK, 0, 1, 1, idGen())));
         chunks.push(mkRec(TAG_PARA_TEXT,       1, mkTableParaText()));
         chunks.push(mkRec(TAG_PARA_CHAR_SHAPE, 1, mkParaCharShape([[0, 0]])));
-        // 수정 이유(수정 4): 테이블 컨테이너 단락도 동일하게 32바이트로 통일
-        chunks.push(mkRec(TAG_PARA_LINE_SEG,   1, new Uint8Array(32))); // 1 line × 32 bytes
+        chunks.push(mkRec(TAG_PARA_LINE_SEG,   1, mkLineSeg(availWidthHwp, 1000)));
         // Table ctrl at level 1, TABLE record and cells at levels 2/3
-        for (const r of encodeGrid(node as GridNode, col, 1, idGen)) chunks.push(r);
+        for (const r of encodeGrid(node as GridNode, col, 1, idGen, availWidthHwp)) chunks.push(r);
       }
     }
   }

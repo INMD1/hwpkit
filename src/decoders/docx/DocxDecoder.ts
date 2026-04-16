@@ -626,29 +626,27 @@ function decodeDrawing(drawing: any, ctx: DecCtx): ImgNode | null {
     const target = ctx.relsMap.get(rId);
     if (!target) return null;
 
-    // Multi-step path resolution:
-    // 1) word/ base (document.xml 기준, 대부분의 경우)
-    // 2) word/_rels/ base (일부 DOCX의 "../media/" 상대 경로)
-    // 3) ZIP 전체에서 파일명 fallback 검색
     let filePath = resolveDocxPath("word", target);
-    if (!ctx.files.has(filePath)) {
+    let fileData = ctx.files.get(filePath);
+
+    if (!fileData) {
       filePath = resolveDocxPath("word/_rels", target);
+      fileData = ctx.files.get(filePath);
     }
-    if (!ctx.files.has(filePath)) {
+
+    if (!fileData) {
       const fileName = target.split('/').pop() ?? '';
-      for (const [k] of ctx.files) {
-        if (k.endsWith('/' + fileName) || k === fileName) {
+      for (const [k, v] of ctx.files) {
+        if (fileName && (k.endsWith('/' + fileName) || k === fileName)) {
+          fileData = v;
           filePath = k;
           break;
         }
       }
     }
 
-    const fileData = ctx.files.get(filePath);
     if (!fileData) {
-      console.warn(
-        `[DocxDecoder] image not found in ZIP: "${filePath}" (rId=${rId}, target=${target})`,
-      );
+      console.warn(`[DocxDecoder] image not found: "${target}"`);
       return null;
     }
 
