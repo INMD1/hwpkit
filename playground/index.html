@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>hwpkit playground</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 12px 20px;
+      background: #1a1d27;
+      border-bottom: 1px solid #2d3248;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    header h1 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #a78bfa;
+    }
+
+    header span {
+      font-size: 12px;
+      color: #64748b;
+    }
+
+    .toolbar {
+      padding: 10px 20px;
+      background: #141722;
+      border-bottom: 1px solid #2d3248;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .toolbar label {
+      font-size: 13px;
+      color: #94a3b8;
+    }
+
+    select {
+      background: #1e2236;
+      border: 1px solid #374151;
+      color: #e2e8f0;
+      padding: 5px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    select:focus { outline: none; border-color: #a78bfa; }
+
+    button {
+      padding: 6px 16px;
+      border-radius: 6px;
+      border: none;
+      font-size: 13px;
+      cursor: pointer;
+      font-weight: 500;
+    }
+
+    .btn-primary {
+      background: #7c3aed;
+      color: #fff;
+    }
+    .btn-primary:hover { background: #6d28d9; }
+
+    .btn-secondary {
+      background: #1e2236;
+      color: #94a3b8;
+      border: 1px solid #374151;
+    }
+    .btn-secondary:hover { background: #252a40; }
+
+    .btn-upload {
+      background: #1e4036;
+      color: #34d399;
+      border: 1px solid #065f46;
+    }
+    .btn-upload:hover { background: #1a3a30; }
+
+    #file-input { display: none; }
+
+    .panels {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      overflow: hidden;
+    }
+
+    .panel {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .panel:first-child { border-right: 1px solid #2d3248; }
+
+    .panel-header {
+      padding: 8px 16px;
+      background: #141722;
+      border-bottom: 1px solid #2d3248;
+      font-size: 12px;
+      color: #64748b;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .panel-header strong { color: #94a3b8; font-weight: 600; }
+
+    .tab-bar {
+      display: flex;
+      gap: 2px;
+    }
+
+    .tab {
+      padding: 4px 10px;
+      font-size: 11px;
+      background: transparent;
+      color: #64748b;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .tab.active {
+      background: #1e2236;
+      color: #a78bfa;
+      border-color: #374151;
+    }
+
+    textarea {
+      flex: 1;
+      background: #0f1117;
+      color: #e2e8f0;
+      border: none;
+      padding: 16px;
+      font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      resize: none;
+      outline: none;
+    }
+
+    textarea::placeholder { color: #374151; }
+
+    .output-area {
+      flex: 1;
+      overflow: auto;
+      padding: 16px;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .output-text {
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: #e2e8f0;
+    }
+
+    .output-tree {
+      display: none;
+    }
+
+    .output-html {
+      display: none;
+      flex: 1;
+      border: none;
+      background: #fff;
+      width: 100%;
+      height: 100%;
+    }
+
+    .output-tree.active, .output-text.active {
+      display: block;
+    }
+
+    .output-html.active {
+      display: block;
+    }
+
+    .tree-node {
+      padding: 2px 0;
+    }
+
+    .tree-tag {
+      color: #60a5fa;
+      font-weight: 600;
+    }
+
+    .tree-prop {
+      color: #fbbf24;
+      font-size: 11px;
+    }
+
+    .tree-content {
+      color: #86efac;
+    }
+
+    .tree-children {
+      margin-left: 20px;
+      border-left: 1px solid #1e2236;
+      padding-left: 12px;
+    }
+
+    .warn-bar {
+      padding: 8px 16px;
+      background: #2d1a00;
+      border-top: 1px solid #78350f;
+      font-size: 12px;
+      color: #fbbf24;
+      display: none;
+      max-height: 80px;
+      overflow-y: auto;
+    }
+
+    .warn-bar.visible { display: block; }
+
+    .status-bar {
+      padding: 4px 16px;
+      background: #0a0c14;
+      border-top: 1px solid #1e2236;
+      font-size: 11px;
+      color: #374151;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .status-ok { color: #34d399; }
+    .status-err { color: #f87171; }
+
+    @media (max-width: 700px) {
+      .panels { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+      .panel:first-child { border-right: none; border-bottom: 1px solid #2d3248; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>hwpkit</h1>
+    <span>문서 변환 라이브러리 playground</span>
+  </header>
+
+  <div class="toolbar">
+    <label>입력 포맷</label>
+    <select id="src-fmt">
+      <option value="md">Markdown (md)</option>
+      <option value="hwpx">HWPX</option>
+      <option value="docx">DOCX</option>
+      <option value="hwp">HWP (읽기 전용)</option>
+    </select>
+
+    <label>출력 포맷</label>
+    <select id="dst-fmt">
+      <option value="md">Markdown (md)</option>
+      <option value="html">HTML</option>
+      <option value="hwpx">HWPX</option>
+      <option value="docx">DOCX</option>
+      <option value="hwp">HWP (hwp)</option>
+    </select>
+
+    <button class="btn-primary" id="run-btn">변환 실행</button>
+    <button class="btn-secondary" id="inspect-btn">DocRoot 검사</button>
+
+    <label for="file-input">
+      <button class="btn-upload" onclick="document.getElementById('file-input').click()">파일 업로드</button>
+    </label>
+    <input type="file" id="file-input" accept=".md,.hwpx,.docx,.hwp,.txt" />
+
+    <span style="color:#374151;font-size:12px;">데모:</span>
+    <button class="btn-secondary" id="demo-hwpx-btn">demo.hwpx</button>
+    <button class="btn-secondary" id="demo-hwp-btn">demo.hwp</button>
+
+    <button class="btn-secondary" id="clear-btn">초기화</button>
+  </div>
+
+  <div class="panels">
+    <div class="panel">
+      <div class="panel-header">
+        <strong>입력</strong>
+        <span id="input-info">md · 0 bytes</span>
+      </div>
+      <textarea id="input" placeholder="Markdown 텍스트를 입력하거나 파일을 업로드하세요...
+
+예시:
+# 안녕하세요
+
+**굵은 텍스트**와 *이탤릭*을 지원합니다.
+
+## 목록
+- 항목 1
+- 항목 2
+  - 중첩 항목
+
+## 표
+
+| 이름 | 나이 |
+|------|------|
+| 홍길동 | 30 |
+| 김철수 | 25 |
+"></textarea>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <strong>출력</strong>
+        <div class="tab-bar">
+          <button class="tab active" id="tab-text" onclick="switchTab('text')">텍스트</button>
+          <button class="tab" id="tab-html" onclick="switchTab('html')">HTML 미리보기</button>
+          <button class="tab" id="tab-tree" onclick="switchTab('tree')">트리</button>
+        </div>
+        <span id="output-info" style="font-size:11px;color:#64748b;"></span>
+      </div>
+      <div class="output-area">
+        <div class="output-text active" id="output-text"></div>
+        <iframe class="output-html" id="output-html" sandbox="allow-same-origin"></iframe>
+        <div class="output-tree" id="output-tree"></div>
+      </div>
+      <div class="warn-bar" id="warn-bar"></div>
+    </div>
+  </div>
+
+  <div class="status-bar">
+    <span id="status">준비</span>
+    <span id="timing"></span>
+  </div>
+
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>

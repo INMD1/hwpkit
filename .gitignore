@@ -8,9 +8,8 @@ dist
 .claude
 tests
 data
-playground
 CLAUDE.*
-.c
-Tester.so.c
+*.so.c
 *.hwp
 *.hwp.md
+*.docx
