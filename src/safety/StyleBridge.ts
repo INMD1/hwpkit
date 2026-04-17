@@ -55,12 +55,34 @@ export function safeAlign(raw?: string): Align {
 
 // ─── 테두리 정규화 ─────────────────────────────────────────
 const HWPX_STROKE: Record<string, StrokeKind> = {
-  SOLID: 'solid', NONE: 'none', DASH: 'dash', DOT: 'dot',
-  DOUBLE: 'double', LONG_DASH: 'dash', DASH_DOT: 'dash',
+  SOLID: "solid",
+  NONE: "none",
+  DASH: "dash",
+  DOT: "dot",
+  DOUBLE: "double",
+  LONG_DASH: "dash",
+  DASH_DOT: "dash",
+  DASH_DOT_DOT: "dash",
+  THICK_THIN: "double",
+  THIN_THICK: "double",
+  TRIPLE: "double",
 };
 const DOCX_STROKE: Record<string, StrokeKind> = {
-  single: 'solid', none: 'none', nil: 'none', dashed: 'dash',
-  dotted: 'dot', double: 'double', wave: 'solid',
+  single: "solid",
+  none: "none",
+  nil: "none",
+  dashed: "dash",
+  dotted: "dot",
+  double: "double",
+  dotDash: "dash",
+  dotDotDash: "dash",
+  thickThin: "double",
+  thinThick: "double",
+  triple: "double",
+  wave: "solid",
+  dashDotStroked: "dash",
+  threeDEmboss: "solid",
+  threeDEngrave: "solid",
 };
 
 export function safeStrokeHwpx(type?: string, w?: number, c?: string): Stroke {

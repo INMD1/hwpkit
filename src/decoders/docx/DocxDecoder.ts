@@ -111,6 +111,7 @@ export class DocxDecoder implements Decoder {
       const body = getBody(docObj);
       const dims = extractDims(body) ?? { ...A4 };
       const elements = getBodyElements(body);
+      console.log(`[DocxDecoder] 파싱된 전체 본문 요소 개수: ${elements.length}`);
 
       const decCtx: DecCtx = { relsMap, files, shield, numMap, warns, stylesMap, paraStyleMap };
 
@@ -319,11 +320,14 @@ async function parseNumbering(xml: string): Promise<NumMap> {
 }
 
 function getBody(obj: any): any {
-  return (
-    obj?.["w:document"]?.[0]?.["w:body"]?.[0] ??
-    obj?.document?.[0]?.body?.[0] ??
-    obj
-  );
+  // XML 파서에 따라 w:document 또는 document 형태일 수 있음
+  const doc = obj?.["w:document"]?.[0] ?? obj?.document?.[0] ?? obj;
+  const body = doc?.["w:body"]?.[0] ?? doc?.body?.[0] ?? doc;
+  
+  if (!body) {
+    console.error("[DocxDecoder] 본문(body)을 찾을 수 없습니다.");
+  }
+  return body;
 }
 
 function extractDims(body: any): PageDims | null {

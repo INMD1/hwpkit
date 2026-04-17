@@ -61,17 +61,26 @@ const BORDER_W_PT = [
   5.67, 8.50, 11.34, 14.17,
 ];
 
-/** 표 25 테두리선 종류: 0=실선(solid), 2=점선(dash), 3=dash-dot, 7=2중선(double) */
+/** 표 25 테두리선 종류: 0=실선, 1=점선, 2=긴점선, 3=dash-dot, 4=dash-dot-dot, 7=2중선, 8=3중선 등 */
 const BORDER_KIND_IDX: Record<string, number> = {
-  solid: 0, dash: 2, dot: 3, double: 7, none: 0,
+  solid: 0,
+  dot: 1,
+  dash: 2,
+  double: 7,
+  triple: 8,
+  none: 0,
 };
 
 /**
  * 표 44 문단 모양 속성1:
- * bits 2-4 = 정렬 방식 (0=양쪽, 1=왼쪽, 2=오른쪽, 3=가운데)
+ * bits 2-4 = 정렬 방식 (0=양쪽, 1=왼쪽, 2=오른쪽, 3=가운데, 4=배분)
  */
 const ALIGN_CODE: Record<string, number> = {
-  justify: 0, left: 1, right: 2, center: 3,
+  justify: 0,
+  left: 1,
+  right: 2,
+  center: 3,
+  distribute: 4,
 };
 
 /* ═══════════════════════════════════════════════════════════════
@@ -444,14 +453,22 @@ function mkCharShape(p: TextProps, col: StyleCollector): Uint8Array {
 
   // 표 35 글자 모양 속성:
   //  bit 0: 기울임(italic), bit 1: 진하게(bold)
-  //  bits 2-4: 밑줄 종류 (1=글자아래), bits 5-8: 밑줄 모양
+  //  bits 2-4: 밑줄 종류 (0=없음, 1=글자아래, 2=글자위)
+  //  bits 5-8: 밑줄 모양 (0=실선, 1=2중선 등)
   //  bits 16-17: 위/아래 첨자 (0=없음, 1=위첨자, 2=아래첨자)
   //  bits 18-20: 취소선 종류 (1=실선)
+  //  bits 21-24: 취소선 모양
   let attr = 0;
   if (p.i)   attr |= (1 << 0);
   if (p.b)   attr |= (1 << 1);
-  if (p.u)   attr |= (1 << 2);   // 밑줄 종류 = 1 (글자 아래)
-  if (p.s)   attr |= (1 << 18);  // 취소선 종류 = 1
+  if (p.u)   {
+    attr |= (1 << 2);   // 밑줄 종류 = 1 (글자 아래)
+    attr |= (0 << 5);   // 밑줄 모양 = 0 (실선)
+  }
+  if (p.s)   {
+    attr |= (1 << 18);  // 취소선 종류 = 1
+    attr |= (0 << 21);  // 취소선 모양 = 0 (실선)
+  }
   if (p.sup) attr |= (1 << 16);  // 위 첨자
   if (p.sub) attr |= (2 << 16);  // 아래 첨자
 
