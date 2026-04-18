@@ -483,6 +483,7 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   const props: ParaProps = {
     align: safeAlign(alignVal),
     heading: parseHeading(headStyle),
+    styleId: headStyle || undefined,
   };
 
   // Spacing (before/after/line height) — inline pPr wins over style

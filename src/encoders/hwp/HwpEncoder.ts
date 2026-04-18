@@ -33,6 +33,7 @@ const TAG_FACE_NAME            = T + 3;  // 19 - HWPTAG_FACE_NAME
 const TAG_BORDER_FILL          = T + 4;  // 20 - HWPTAG_BORDER_FILL
 const TAG_CHAR_SHAPE           = T + 5;  // 21 - HWPTAG_CHAR_SHAPE
 const TAG_PARA_SHAPE           = T + 9;  // 25 - HWPTAG_PARA_SHAPE
+const TAG_STYLE                = T + 10; // 26 - HWPTAG_STYLE
 
 // DocInfo tags (additional)
 const TAG_BIN_DATA             = T + 2;  // 18 - HWPTAG_BIN_DATA
@@ -324,11 +325,27 @@ function mkIdMappings(col: StyleCollector, nBinData = 0): Uint8Array {
   w.u32(0);                    // [11] nNumbering
   w.u32(0);                    // [12] nBullet
   w.u32(col.psProps.length);   // [13] nParaShape
-  w.u32(0);                    // [14] nStyle
+  w.u32(1);                    // [14] nStyle (바탕글 스타일 1개 추가)
   w.u32(0);                    // [15] nMemoShape (5.0.2.1+)
   w.u32(0);                    // [16] nTrackChange (5.0.3.2+)
   w.u32(0);                    // [17] nTrackChangeAuthor (5.0.3.2+)
   return w.build(); // 18 × 4 = 72 bytes
+}
+
+/**
+ * HWPTAG_STYLE (표 47 스타일)
+ * level 1 in DocInfo
+ */
+function mkStyle(name: string, engName: string, paraPrId: number, charPrId: number): Uint8Array {
+  return new BufWriter()
+    .u16(name.length).utf16(name)
+    .u16(engName.length).utf16(engName)
+    .u16(paraPrId)
+    .u16(charPrId)
+    .u16(0)    // nextStyleId
+    .u16(1042) // langId (Korean)
+    .u16(0)    // attr (0=Para style)
+    .build();
 }
 
 /**
@@ -617,6 +634,9 @@ function buildDocInfoStream(col: StyleCollector, images: BinImage[] = []): Uint8
     chunks.push(mkRec(TAG_PARA_SHAPE, 1, mkParaShape(p)));
   }
 
+  // HWPTAG_STYLE at level 1 (id=0: 바탕글)
+  chunks.push(mkRec(TAG_STYLE, 1, mkStyle('바탕글', 'Normal', 0, 0)));
+
   return concatU8(chunks);
 }
 
@@ -758,14 +778,14 @@ function mkPicParaText(): Uint8Array {
 /**
  * HWPTAG_SHAPE_COMPONENT_PICTURE (tag 85) — 97 bytes
  * Contains drawing common attrs + picture-specific attrs (표 107)
- * Critical field: BINDATA_ID at offset 87 (2 bytes)
  */
 function mkShapeComponentPicture(binDataId: number, wHwp: number, hHwp: number): Uint8Array {
   const w = new BufWriter();
   // Drawing common attributes (19 bytes)
   w.u32(CTRL_PIC);  // ctrlId: '$pic' (4)
-  w.zeros(15);      // border style, fill type (all default/none)
-  // Picture attributes (표 107, 78 bytes total = up to offset 97)
+  w.zeros(15);      // border style, fill type (all default/none) (15)
+
+  // Picture attributes (표 107)
   // Geometric region (HWPUNIT bounds)
   w.u32(0);         // left (4)
   w.u32(0);         // top (4)
@@ -776,46 +796,76 @@ function mkShapeComponentPicture(binDataId: number, wHwp: number, hHwp: number):
   w.u32(0);         // top (4)
   w.u32(wHwp);      // right (4)
   w.u32(hHwp);      // bottom (4)
-  // Rotation / effect (zeros = no rotation, no effect)
-  w.zeros(20);      // rotate angle, rotation center X/Y, effect flags (20)
-  // imageInfo (5 bytes at offset 87 from start)
-  // Currently at offset: 19 + 4+4+4+4 + 4+4+4+4 + 20 = 19+16+16+20 = 71... need 87
-  // Gap: 87 - 71 = 16 more bytes of zeros before binDataId
-  w.zeros(16);      // padding to reach offset 87
-  w.u16(binDataId); // BINDATA_ID (2) — which BIN stream to use
-  w.u8(0);          // image type (0 = stored in BinData storage)
-  w.u8(0);          // flags
-  w.u8(0);          // padding
-  w.zeros(5);       // remaining (to reach 97 bytes total)
-  // Total: 19+16+16+20+16+2+1+1+1+5 = 97
-  return w.build(); // 97 bytes
+  
+  // Rotation / effect / image info (total gap to offset 87 is needed)
+  // 19 (common) + 32 (geometric/bbox) = 51 bytes so far.
+  // We need binDataId at offset 87. Gap = 87 - 51 = 36 bytes.
+  w.zeros(36);      // padding (36)
+  
+  w.u16(binDataId); // BINDATA_ID (2) @ offset 87
+  w.u8(0);          // image type (0 = stored in BinData storage) (1)
+  w.u8(0);          // flags (1)
+  w.u8(0);          // padding (1)
+  w.zeros(5);       // remaining (5)
+  // Total: 51 + 36 + 2 + 1 + 1 + 1 + 5 = 97 bytes
+  return w.build();
 }
 
-/** Encode an image node as a picture paragraph (level lv) */
+/**
+ * HWPTAG_CTRL_HEADER for picture/table objects (GHDR, 표 68) — 46 bytes
+ */
+function mkObjectCtrl(ctrlId: number, wHwp: number, hHwp: number, instanceId: number, layout?: ImgLayout): Uint8Array {
+  // attr bits 0-2: wrap type (0=어울림, 1=자리차지, 2=글 뒤, 3=글 앞)
+  let attr = 0x082a2210; // base flags
+  if (layout) {
+    if (layout.wrap === 'square' || layout.wrap === 'tight' || layout.wrap === 'through') attr |= 0;
+    else if (layout.wrap === 'inline') attr |= 1;
+    else if (layout.wrap === 'behind') attr |= 2;
+    else if (layout.wrap === 'front' || layout.wrap === 'none') attr |= 3;
+  }
+  
+  // bit 3: 글자처럼 취급 여부
+  if (layout?.wrap === 'inline') attr |= (1 << 3);
+
+  return new BufWriter()
+    .u32(ctrlId)
+    .u32(attr)
+    .i32(layout?.yPt ? Metric.ptToHwp(layout.yPt) : 0)
+    .i32(layout?.xPt ? Metric.ptToHwp(layout.xPt) : 0)
+    .u32(wHwp)
+    .u32(hHwp)
+    .i32(layout?.zOrder ?? 0)
+    .u16(layout?.distL ? Metric.ptToHwp(layout.distL) : 0)
+    .u16(layout?.distR ? Metric.ptToHwp(layout.distR) : 0)
+    .u16(layout?.distT ? Metric.ptToHwp(layout.distT) : 0)
+    .u16(layout?.distB ? Metric.ptToHwp(layout.distB) : 0)
+    .u32(instanceId)
+    .i32(0)
+    .u16(0)
+    .build(); // 46 bytes
+}
+
 function encodePicPara(
-  imgNode: { b64: string; mime: string; w: number; h: number },
+  imgNode: ImgNode,
   binDataId: number,
   col: StyleCollector,
   lv: number,
   idGen: () => number,
   availWidthHwp: number,
 ): Uint8Array[] {
-  // imgNode.w / imgNode.h are in pt (set by all decoders)
-  const wHwp = Metric.ptToHwp(Math.max(imgNode.w, 10));
-  const hHwp = Metric.ptToHwp(Math.max(imgNode.h, 10));
+  const wHwp = Metric.ptToHwp(imgNode.w);
+  const hHwp = Metric.ptToHwp(imgNode.h);
 
-  const TABLE_CTRL_MASK = 1 << 11;
+  const CTRL_MASK = 1 << 11;
   const instanceId = idGen();
   const psId = col.addParaShape({});
 
   return [
-    mkRec(TAG_PARA_HEADER,     lv,     mkParaHeader(9, TABLE_CTRL_MASK, psId, 1, 1, instanceId)),
+    mkRec(TAG_PARA_HEADER,     lv,     mkParaHeader(9, CTRL_MASK, psId, 1, 1, instanceId)),
     mkRec(TAG_PARA_TEXT,       lv + 1, mkPicParaText()),
     mkRec(TAG_PARA_CHAR_SHAPE, lv + 1, mkParaCharShape([[0, 0]])),
     mkRec(TAG_PARA_LINE_SEG,   lv + 1, mkLineSeg(availWidthHwp, Metric.ptToHwp(imgNode.h))),
-    // $pic CTRL_HEADER (GHDR) at level lv+1
-    mkRec(TAG_CTRL_HEADER, lv + 1, mkPicCtrl(wHwp, hHwp, idGen())),
-    // SHAPE_COMPONENT_PICTURE at level lv+2
+    mkRec(TAG_CTRL_HEADER,     lv + 1, mkObjectCtrl(CTRL_PIC, wHwp, hHwp, idGen(), imgNode.layout)),
     mkRec(TAG_SHAPE_COMPONENT_PICTURE, lv + 2, mkShapeComponentPicture(binDataId, wHwp, hHwp)),
   ];
 }
@@ -1110,22 +1160,18 @@ function buildBodyTextStream(
     for (const node of sheet.kids) {
       if (node.tag === 'para') {
         const para = node as ParaNode;
-        // Check if the paragraph contains images
-        const hasImg = para.kids.some((k: any) => k.tag === 'img');
-        if (hasImg) {
-          // Emit one image paragraph per img node found
-          for (const kid of para.kids) {
-            if ((kid as any).tag === 'img') {
-              const img = kid as any;
-              // Find matching BinImage
-              const binImg = images.find(b => b64Matches(b, img.b64));
-              if (binImg) {
-                for (const r of encodePicPara(img, binImg.id, col, 0, idGen, availWidthHwp)) chunks.push(r);
-              }
+        // Collect all img nodes, including those nested inside link nodes
+        const imgNodes = flatImgNodes(para.kids);
+        if (imgNodes.length > 0) {
+          // Emit one image paragraph per img node (link-wrapped or bare)
+          for (const img of imgNodes) {
+            const binImg = images.find(b => b64Matches(b, img.b64));
+            if (binImg) {
+              for (const r of encodePicPara(img, binImg.id, col, 0, idGen, availWidthHwp)) chunks.push(r);
             }
           }
-          // Also emit any text in the paragraph (spans)
-          const textKids = para.kids.filter((k: any) => k.tag !== 'img');
+          // Emit any remaining text (spans) from the same paragraph
+          const textKids = para.kids.filter((k: any) => k.tag !== 'img' && k.tag !== 'link');
           if (textKids.length > 0) {
             const textPara: ParaNode = { tag: 'para', props: para.props, kids: textKids as any };
             for (const r of encodePara(textPara, col, 0, idGen(), availWidthHwp)) chunks.push(r);
@@ -1147,6 +1193,22 @@ function buildBodyTextStream(
   }
 
   return concatU8(chunks);
+}
+
+/**
+ * Recursively extract all ImgNode objects from a para's kids array,
+ * including images nested inside LinkNode children.
+ */
+function flatImgNodes(kids: any[]): any[] {
+  const result: any[] = [];
+  for (const kid of kids) {
+    if (kid.tag === 'img') {
+      result.push(kid);
+    } else if (kid.tag === 'link' && Array.isArray(kid.kids)) {
+      result.push(...flatImgNodes(kid.kids));
+    }
+  }
+  return result;
 }
 
 function b64Matches(binImg: BinImage, b64: string): boolean {
@@ -1363,6 +1425,278 @@ function buildHwpOle2(
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   OLE2 Validation & Debug
+   ═══════════════════════════════════════════════════════════════ */
+
+const HWP_CLSID_BYTES = [
+  0x20, 0xE9, 0xE3, 0xC0, 0x46, 0x35, 0xCF, 0x11,
+  0x8D, 0x81, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
+];
+const HWP_CLSID_HEX = HWP_CLSID_BYTES.map(b => b.toString(16).padStart(2, '0')).join(' ');
+
+interface Ole2Entry {
+  idx: number;
+  name: string;
+  type: number;   // 0=empty 1=storage 2=stream 5=root
+  left: number;
+  right: number;
+  child: number;
+  startSec: number;
+  size: number;
+  clsidHex: string;
+}
+
+/** Read FAT into a flat Uint32Array (entry i = next sector after sector i). */
+function ole2ReadFat(hwp: Uint8Array): Uint32Array {
+  const SS  = 512;
+  const dv  = new DataView(hwp.buffer, hwp.byteOffset, hwp.byteLength);
+  const fatN = dv.getUint32(44, true);
+  const fat  = new Uint32Array(fatN * 128);
+  for (let fi = 0; fi < fatN && fi < 109; fi++) {
+    const physSec = dv.getUint32(76 + fi * 4, true);
+    if (physSec >= 0xFFFFFFFD) break;
+    const base = SS + physSec * SS;
+    for (let j = 0; j < 128; j++) {
+      fat[fi * 128 + j] = dv.getUint32(base + j * 4, true);
+    }
+  }
+  return fat;
+}
+
+/** Follow a FAT chain from startSec; returns sector list. Returns [] for ENDOFCHAIN start. */
+function ole2FatChain(fat: Uint32Array, startSec: number): number[] {
+  const chain: number[] = [];
+  const seen  = new Set<number>();
+  let cur     = startSec;
+  while (cur < 0xFFFFFFFE) {
+    if (seen.has(cur) || cur >= fat.length) { chain.push(-1); break; }
+    seen.add(cur);
+    chain.push(cur);
+    cur = fat[cur];
+  }
+  return chain;
+}
+
+/** Read all directory entries by following the directory sector chain. */
+function ole2ReadDir(hwp: Uint8Array): Ole2Entry[] {
+  const SS  = 512;
+  const dv  = new DataView(hwp.buffer, hwp.byteOffset, hwp.byteLength);
+  const fat = ole2ReadFat(hwp);
+  const entries: Ole2Entry[] = [];
+
+  const dirChain = ole2FatChain(fat, dv.getUint32(48, true));
+  let entryIdx   = 0;
+
+  for (const sec of dirChain) {
+    if (sec < 0) break;
+    const secBase = SS + sec * SS;
+    for (let e = 0; e < 4; e++) {
+      const base     = secBase + e * 128;
+      const nlBytes  = dv.getUint16(base + 64, true);
+      let name       = '';
+      const maxChars = Math.min(Math.max(0, (nlBytes >> 1) - 1), 31);
+      for (let c = 0; c < maxChars; c++) {
+        const ch = dv.getUint16(base + c * 2, true);
+        if (ch === 0) break;
+        name += String.fromCharCode(ch);
+      }
+      const type     = hwp[base + 66] ?? 0;
+      const left     = dv.getInt32(base + 68, true);
+      const right    = dv.getInt32(base + 72, true);
+      const child    = dv.getInt32(base + 76, true);
+      const startSec = dv.getUint32(base + 116, true);
+      const size     = dv.getUint32(base + 120, true);
+      const clsidHex = Array.from({ length: 16 }, (_, i) =>
+        (hwp[base + 80 + i] ?? 0).toString(16).padStart(2, '0'),
+      ).join(' ');
+      entries.push({ idx: entryIdx, name, type, left, right, child, startSec, size, clsidHex });
+      entryIdx++;
+    }
+  }
+  return entries;
+}
+
+/**
+ * Print the full OLE2 structure (directory tree + key header fields) to console.
+ * Use this to diagnose "Select file format" dialogs in Hancom Office.
+ */
+function dumpOle2(hwp: Uint8Array, tag = 'HwpEncoder'): void {
+  const SS  = 512;
+  const dv  = new DataView(hwp.buffer, hwp.byteOffset, hwp.byteLength);
+  const MAGIC_OK = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1].every((b, i) => hwp[i] === b);
+  const ENTRY_TYPES = ['Empty', 'Storage', 'Stream', '?3', '?4', 'Root'];
+
+  console.log(`[${tag}] ═══ OLE2 Dump ════════════════════════════════════`);
+  console.log(`[${tag}] Magic      : ${MAGIC_OK ? '✓ D0 CF 11 E0 A1 B1 1A E1' : '✗ INVALID'}`);
+  console.log(`[${tag}] FileSize   : ${hwp.length} bytes (${hwp.length / SS - 1} data sectors)`);
+  console.log(`[${tag}] OLE version: ${dv.getUint16(26, true)}.${dv.getUint16(24, true)}`);
+  console.log(`[${tag}] SectorSize : ${1 << dv.getUint16(30, true)}`);
+  console.log(`[${tag}] FAT sectors: ${dv.getUint32(44, true)},  Dir first sector: ${dv.getUint32(48, true)}`);
+  console.log(`[${tag}] miniCutoff : ${dv.getUint32(56, true)},  miniFAT first: ${dv.getUint32(60, true)}`);
+
+  const entries = ole2ReadDir(hwp);
+  const fat     = ole2ReadFat(hwp);
+
+  function printSubtree(idx: number, indent: string): void {
+    if (idx < 0 || idx >= entries.length) return;
+    const e = entries[idx];
+    if (e.type === 0) return;          // skip empty slots
+    if (e.left >= 0)  printSubtree(e.left,  indent);   // in-order: left first
+    const secStr  = e.startSec >= 0xFFFFFFFE ? 'ENDOFCHAIN' : String(e.startSec);
+    const typeStr = ENTRY_TYPES[e.type] ?? String(e.type);
+    const chain   = e.startSec < 0xFFFFFFFE ? ole2FatChain(fat, e.startSec) : [];
+    const chainOk = chain.length === 0 || chain[chain.length - 1] !== -1;
+    console.log(`[${tag}] ${indent}[${e.idx}] "${e.name}" (${typeStr}) startSec=${secStr} size=${e.size} FAT:${chainOk ? '✓' : '✗ BROKEN'}(${chain.slice(0,5).join('→')}${chain.length > 5 ? '…' : ''})`);
+    if (e.type === 5 || e.type === 1) {
+      const nonZero = e.clsidHex !== '00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00';
+      if (nonZero) console.log(`[${tag}] ${indent}     CLSID: ${e.clsidHex}`);
+    }
+    if (e.child >= 0) {
+      console.log(`[${tag}] ${indent}  ↓ children:`);
+      printSubtree(e.child, indent + '    ');
+    }
+    if (e.right >= 0) printSubtree(e.right, indent);   // in-order: right last
+  }
+
+  console.log(`[${tag}] Directory Tree (in-order):`);
+  if (entries.length > 0) printSubtree(0, '  ');
+
+  // Root Entry CLSID check
+  const rootClsid = entries[0]?.clsidHex ?? '';
+  const clsidOk   = rootClsid === HWP_CLSID_HEX;
+  console.log(`[${tag}] Root CLSID : ${clsidOk ? '✓' : '✗ WRONG — Hancom WILL NOT open this as HWP'}`);
+  if (!clsidOk) {
+    console.log(`[${tag}]   Expected : ${HWP_CLSID_HEX}`);
+    console.log(`[${tag}]   Actual   : ${rootClsid}`);
+  }
+  console.log(`[${tag}] ═══════════════════════════════════════════════════`);
+}
+
+/**
+ * Validate a built HWP file's OLE2 structure.
+ * Returns array of issue strings (empty = valid).
+ */
+function validateOle2(hwp: Uint8Array): string[] {
+  const SS     = 512;
+  const dv     = new DataView(hwp.buffer, hwp.byteOffset, hwp.byteLength);
+  const issues: string[] = [];
+
+  // 1. Magic
+  const OLE_MAGIC = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+  if (!OLE_MAGIC.every((b, i) => hwp[i] === b))
+    issues.push('FATAL: OLE2 magic bytes wrong at offset 0');
+
+  // 2. Sector size must be 512 (v3)
+  if (dv.getUint16(30, true) !== 9)
+    issues.push(`Wrong sector size exponent: ${dv.getUint16(30, true)} (expected 9 → 512 bytes)`);
+
+  // 3. Major version
+  const major = dv.getUint16(26, true);
+  if (major !== 3 && major !== 4)
+    issues.push(`Unexpected OLE major version: ${major}`);
+
+  // 4. Directory entries
+  const entries = ole2ReadDir(hwp);
+  if (entries.length === 0) { issues.push('FATAL: No directory entries found'); return issues; }
+
+  // 5. Root Entry CLSID — the most common cause of "Select file format" dialog
+  const rootClsid = entries[0].clsidHex.split(' ').map(h => parseInt(h, 16));
+  if (!HWP_CLSID_BYTES.every((b, i) => rootClsid[i] === b))
+    issues.push(`FATAL: Root Entry CLSID wrong. Expected ${HWP_CLSID_HEX}, got ${entries[0].clsidHex}`);
+
+  // 6. Root Entry type must be 5
+  if (entries[0].type !== 5)
+    issues.push(`Root Entry type is ${entries[0].type}, expected 5 (Root)`);
+
+  // 7. Required streams/storages by name
+  const byName = new Map<string, Ole2Entry>(entries.map(e => [e.name.toUpperCase(), e]));
+  for (const req of ['FILEHEADER', 'DOCINFO', 'BODYTEXT']) {
+    if (!byName.has(req)) issues.push(`Missing required OLE entry: "${req}"`);
+  }
+
+  // 8. Section0 must be inside BodyText (child subtree), NOT a sibling of BodyText
+  const bodyText = byName.get('BODYTEXT');
+  const section0 = byName.get('SECTION0');
+  if (bodyText && section0) {
+    function inChildSubtree(rootIdx: number, target: number, depth = 0): boolean {
+      if (rootIdx < 0 || rootIdx >= entries.length || depth > 32) return false;
+      const e = entries[rootIdx];
+      if (e.idx === target) return true;
+      return inChildSubtree(e.left,  target, depth + 1) ||
+             inChildSubtree(e.right, target, depth + 1) ||
+             inChildSubtree(e.child, target, depth + 1);
+    }
+    if (!inChildSubtree(bodyText.child, section0.idx))
+      issues.push('Section0 is NOT inside BodyText — it must be BodyText\'s child, not a root sibling');
+  } else if (!section0) {
+    issues.push('Missing Section0 stream (should be inside BodyText storage)');
+  }
+
+  // 9. FAT chain integrity for each stream
+  const fat = ole2ReadFat(hwp);
+  for (const e of entries) {
+    if (e.type !== 2 || e.startSec >= 0xFFFFFFFE) continue;
+    const chain   = ole2FatChain(fat, e.startSec);
+    const hasCycle = chain.includes(-1);
+    if (hasCycle)
+      issues.push(`FAT chain for "${e.name}" is broken or cyclic`);
+    const needed  = Math.ceil(e.size / SS);
+    if (!hasCycle && needed > 0 && chain.length < needed)
+      issues.push(`FAT chain for "${e.name}" too short: ${chain.length} sectors for ${e.size} bytes`);
+  }
+
+  // 10. FileHeader signature & compression flag consistency
+  const fhEntry = byName.get('FILEHEADER');
+  if (fhEntry && fhEntry.startSec < 0xFFFFFFFE) {
+    const fhBase = SS + fhEntry.startSec * SS;
+    // Verify "HWP Document File" signature (H=0x48 W=0x57 P=0x50)
+    if (hwp[fhBase] !== 0x48 || hwp[fhBase + 1] !== 0x57 || hwp[fhBase + 2] !== 0x50)
+      issues.push(`FileHeader: bad signature bytes (expected 'HWP' got 0x${hwp[fhBase]?.toString(16)} 0x${hwp[fhBase+1]?.toString(16)} 0x${hwp[fhBase+2]?.toString(16)})`);
+
+    const flags      = dv.getUint32(fhBase + 36, true);
+    const compressed = (flags & 1) !== 0;
+
+    // Check DocInfo zlib header (0x78 0x9C / 0x78 0xDA / 0x78 0x01)
+    const diEntry = byName.get('DOCINFO');
+    if (diEntry && diEntry.startSec < 0xFFFFFFFE) {
+      const diBase = SS + diEntry.startSec * SS;
+      const isZlib = hwp[diBase] === 0x78 &&
+        (hwp[diBase + 1] === 0x9C || hwp[diBase + 1] === 0xDA || hwp[diBase + 1] === 0x01 || hwp[diBase + 1] === 0x5E);
+      if (compressed && !isZlib)
+        issues.push(`DocInfo: compression flag=1 but no zlib header (got 0x${hwp[diBase]?.toString(16)} 0x${hwp[diBase+1]?.toString(16)})`);
+      if (!compressed && isZlib)
+        issues.push('DocInfo: compression flag=0 but stream starts with zlib header');
+    }
+
+    // Check Section0 zlib header
+    const s0Entry = byName.get('SECTION0');
+    if (s0Entry && s0Entry.startSec < 0xFFFFFFFE) {
+      const s0Base = SS + s0Entry.startSec * SS;
+      const isZlib = hwp[s0Base] === 0x78 &&
+        (hwp[s0Base + 1] === 0x9C || hwp[s0Base + 1] === 0xDA || hwp[s0Base + 1] === 0x01 || hwp[s0Base + 1] === 0x5E);
+      if (compressed && !isZlib)
+        issues.push(`Section0: compression flag=1 but no zlib header (got 0x${hwp[s0Base]?.toString(16)} 0x${hwp[s0Base+1]?.toString(16)})`);
+    }
+  }
+
+  // 11. BST order sanity: children of Root must be sorted case-insensitively
+  function checkBstOrder(idx: number, minName: string, maxName: string, depth = 0): void {
+    if (idx < 0 || idx >= entries.length || depth > 32) return;
+    const e = entries[idx];
+    if (e.type === 0) return;
+    const n = e.name.toUpperCase();
+    if (n <= minName) issues.push(`BST violation: "${e.name}" should be > "${minName}" (left subtree too large)`);
+    if (n >= maxName) issues.push(`BST violation: "${e.name}" should be < "${maxName}" (right subtree too large)`);
+    checkBstOrder(e.left,  minName, n,       depth + 1);
+    checkBstOrder(e.right, n,       maxName, depth + 1);
+  }
+  if (entries.length > 0 && entries[0].child >= 0)
+    checkBstOrder(entries[0].child, '', '\uFFFF', 0);
+
+  return issues;
+}
+
+/* ═══════════════════════════════════════════════════════════════
    Utility
    ═══════════════════════════════════════════════════════════════ */
 
@@ -1394,22 +1728,22 @@ export class HwpEncoder implements Encoder {
       const seenB64 = new Set<string>();
       let binIdCounter = 1;
 
+      function registerImg(img: any): void {
+        const key = img.b64.substring(0, 50);
+        if (seenB64.has(key)) return;
+        seenB64.add(key);
+        const raw = TextKit.base64Decode(img.b64);
+        let ext = 'jpg';
+        if (img.mime === 'image/png') ext = 'png';
+        else if (img.mime === 'image/gif') ext = 'gif';
+        else if (img.mime === 'image/bmp') ext = 'bmp';
+        images.push({ id: binIdCounter++, ext, data: new Uint8Array(raw) });
+      }
+
       function collectImages(node: any): void {
         if (node.tag === 'para') {
-          for (const kid of node.kids) {
-            if (kid.tag === 'img') {
-              const key = kid.b64.substring(0, 50);
-              if (!seenB64.has(key)) {
-                seenB64.add(key);
-                const raw = TextKit.base64Decode(kid.b64);
-                let ext = 'jpg';
-                if (kid.mime === 'image/png') ext = 'png';
-                else if (kid.mime === 'image/gif') ext = 'gif';
-                else if (kid.mime === 'image/bmp') ext = 'bmp';
-                images.push({ id: binIdCounter++, ext, data: new Uint8Array(raw) });
-              }
-            }
-          }
+          // flatImgNodes recurses into link nodes — catches all image positions
+          for (const img of flatImgNodes(node.kids)) registerImg(img);
         } else if (node.tag === 'grid') {
           for (const row of node.kids) {
             for (const cell of row.kids) {
@@ -1434,30 +1768,18 @@ export class HwpEncoder implements Encoder {
       const fileHdr = buildHwpFileHeader();
       const hwp     = buildHwpOle2(fileHdr, docInfoCmp, bodyCmp, images);
 
-      // 수정 이유(수정 1): OLE2 구조 검증 — "인코딩 설정" 대화상자 원인 진단용.
-      // 한컴오피스가 HWP OLE2를 인식 못하면 텍스트 파일로 간주하여 해당 대화상자가 뜸.
-      // magicOk가 false이거나 dirFirstSector가 이상한 값이면 buildHwpOle2 버그 탐색.
-      const OLE2_MAGIC = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
-      const magicOk = OLE2_MAGIC.every((b, i) => hwp[i] === b);
-      const dv2 = new DataView(hwp.buffer, hwp.byteOffset);
-      const fatN        = dv2.getUint32(44, true);
-      const dirFirstSec = dv2.getUint32(48, true);
-      const sectorSize  = 1 << dv2.getUint16(30, true);
-      console.log('[HwpEncoder] 검증:', {
-        magicOk,
-        fileSize:      hwp.length,
-        sectorSize,
-        fatSectors:    fatN,
-        dirFirstSector: dirFirstSec,
-        docInfoSize:   docInfoCmp.length,
-        bodyTextSize:  bodyCmp.length,
-        imageCount:    images.length,
-      });
-      // Root Entry 디렉토리 확인 (offset = 512 + dirFirstSec * 512)
-      const dirOff      = 512 + dirFirstSec * 512;
-      const rootNameLen = dv2.getUint16(dirOff + 64, true);
-      const rootChild   = dv2.getInt32(dirOff + 76, true);
-      console.log('[HwpEncoder] Root Entry:', { nameLen: rootNameLen, childId: rootChild });
+      // Full OLE2 structure dump (directory tree + CLSID + FAT chains)
+      dumpOle2(hwp, 'HwpEncoder');
+
+      // Validate all OLE2 invariants; log any issues that would cause
+      // Hancom Office to show the "Select file format" dialog.
+      const issues = validateOle2(hwp);
+      if (issues.length === 0) {
+        console.log('[HwpEncoder] ✓ OLE2 validation passed — file should open in Hancom Office');
+      } else {
+        console.error('[HwpEncoder] ✗ OLE2 validation FAILED — Hancom will likely reject this file:');
+        for (const issue of issues) console.error('[HwpEncoder]   •', issue);
+      }
 
       return succeed(hwp);
     } catch (e: any) {

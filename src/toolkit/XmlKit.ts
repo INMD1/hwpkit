@@ -37,11 +37,6 @@ function parseXmlStrict(xml: string): Promise<unknown> {
       if (!frame) return;
       const { tag, obj } = frame;
 
-      // Drop whitespace-only _text
-      if (typeof obj['_text'] === 'string' && !(obj['_text'] as string).trim()) {
-        delete obj['_text'];
-      }
-
       if (stack.length === 0) {
         result = { [tag]: [obj] };
       } else {

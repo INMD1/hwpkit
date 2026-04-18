@@ -42,6 +42,7 @@ export interface TextProps {
 export interface ParaProps {
   align?: Align;
   heading?: Heading;
+  styleId?: string;           // DOCX pStyle styleId (e.g. "Heading1", "TOC1")
   indentPt?: number;          // 문단 왼쪽 전체 들여쓰기 (pt)
   firstLineIndentPt?: number; // 첫 줄만 추가 들여쓰기 (pt, 음수=내어쓰기)
   spaceBefore?: number;
