@@ -1129,7 +1129,7 @@ function encodeParaPositioned(
   const paraPr = ctx.paraPrs[paraPrId];
   const lineSpacing = paraPr?.lineSpacing ?? 160;
   const spacing = Math.max(0, Math.round(fontSize * (lineSpacing / 100 - 1)));
-  const vertSize = fontSize + spacing;
+  let vertSize = fontSize + spacing;
   const horzSize = availWidth ?? ctx.availableWidth;
 
   // 코드 블록 감지 (Courier 폰트 또는 styleId "code")
@@ -1174,7 +1174,7 @@ function encodeParaPositioned(
   const estimatedLines = Math.max(1, Math.ceil(totalTextLen / charsPerLine));
   
   // 실제 점유 높이 = (글자크기 * 줄간격) * 예측 줄 수
-  const vertSize = (fontSize + spacing) * estimatedLines;
+  vertSize = (fontSize + spacing) * estimatedLines;
 
   const hasPageBreak = para.kids.some(
     (k) => k.tag === "span" && k.kids.some((c) => c.tag === "pb"),
