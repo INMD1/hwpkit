@@ -971,12 +971,20 @@ function buildSectionXml(
   const kids = sheet?.kids ?? [];
   const hfRunXml = sheet ? buildHeaderFooterRunXml(sheet, dims, ctx) : "";
 
-  let contentXml = secPrXml; // 섹션 루트 바로 아래에 배치
+  // 가용 너비 계산 (HWPUNIT)
+  const availWidth = Math.max(
+    1000,
+    Metric.ptToHwp(dims.wPt) - Metric.ptToHwp(dims.ml) - Metric.ptToHwp(dims.mr),
+  );
+  ctx.availableWidth = availWidth;
+
+  let contentXml = "";
   let vertPos = 0;
 
   for (let i = 0; i < kids.length; i++) {
     const kid = kids[i];
     const isFirst = i === 0;
+    const curSecPr = isFirst ? secPrXml : "";
     const curHfRun = isFirst ? hfRunXml : "";
 
     if (kid.tag === "para") {
@@ -984,8 +992,8 @@ function buildSectionXml(
         kid,
         ctx,
         vertPos,
-        "", // secPr 비움
-        undefined,
+        curSecPr,
+        availWidth,
         curHfRun,
       );
       contentXml += xml;
@@ -995,7 +1003,7 @@ function buildSectionXml(
         kid,
         ctx,
         vertPos,
-        "", // secPr 비움
+        curSecPr,
         curHfRun,
       );
       contentXml += xml;
@@ -1006,12 +1014,13 @@ function buildSectionXml(
   if (kids.length === 0) {
     // 빈 문서 — 최소 단락 1개 필수
     const fs = 1000;
-    const sp = 600;
-    contentXml +=
+    const vs = 1600;
+    contentXml =
       `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">` +
+      secPrXml +
       hfRunXml +
       `<hp:run charPrIDRef="0"><hp:t> </hp:t></hp:run>` +
-      buildLineSeg(0, fs + sp, fs, ctx.availableWidth) +
+      buildLineSeg(0, vs, fs, availWidth) +
       `</hp:p>`;
   }
 
@@ -1064,7 +1073,7 @@ function buildSecPrXml(dims: PageDims): string {
     `<hp:endNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar="" supscript="1"/>` +
     `<hp:noteLine length="-1" type="SOLID" width="0.25 mm" color="#000000"/>` +
     `<hp:noteSpacing betweenNotes="0" belowLine="0" aboveLine="1000"/>` +
-    `<hp:numbering type="CONTINUOUS" newNum="1"/>` +
+    `<hh:numbering type="CONTINUOUS" newNum="1"/>` +
     `<hp:placement place="END_OF_DOCUMENT" beneathText="0"/>` +
     `</hp:endNotePr>` +
     pageBorderFill +
@@ -1148,8 +1157,7 @@ function encodeParaPositioned(
     );
 
   let runsXml = encodeParaKids(para.kids, ctx);
-  if (!runsXml && !secPr)
-    runsXml = `<hp:run charPrIDRef="0"><hp:t> </hp:t></hp:run>`;
+  if (!runsXml) runsXml = `<hp:run charPrIDRef="0"><hp:t> </hp:t></hp:run>`;
 
   const hasPageBreak = para.kids.some(
     (k) => k.tag === "span" && k.kids.some((c) => c.tag === "pb"),
