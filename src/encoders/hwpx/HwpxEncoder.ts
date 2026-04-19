@@ -1159,9 +1159,27 @@ function encodeParaPositioned(
   let runsXml = encodeParaKids(para.kids, ctx);
   if (!runsXml) runsXml = `<hp:run charPrIDRef="0"><hp:t> </hp:t></hp:run>`;
 
+  // 단락 높이 예측 고도화 (줄바꿈 대응)
+  // 텍스트 길이를 기반으로 대략적인 줄 수 계산 (한글/영문 평균 폭 고려)
+  const totalTextLen = para.kids.reduce((acc, k) => {
+    if (k.tag === "span") {
+      return acc + k.kids.reduce((sacc, c) => (c.tag === "txt" ? sacc + c.content.length : sacc), 0);
+    }
+    return acc;
+  }, 0);
+  
+  // 가용 너비(horzSize) 대비 글자 수로 줄 수 예측 (대략 1글자당 폰트크기의 0.6배 폭 가정)
+  const estimatedCharWidth = fontSize * 0.6;
+  const charsPerLine = Math.max(10, Math.floor(horzSize / estimatedCharWidth));
+  const estimatedLines = Math.max(1, Math.ceil(totalTextLen / charsPerLine));
+  
+  // 실제 점유 높이 = (글자크기 * 줄간격) * 예측 줄 수
+  const vertSize = (fontSize + spacing) * estimatedLines;
+
   const hasPageBreak = para.kids.some(
     (k) => k.tag === "span" && k.kids.some((c) => c.tag === "pb"),
   );
+  // 줄 정보에는 첫 줄 정보를 넣되, 단락 전체 높이를 vertsize로 설정하여 겹침 방지
   const linesegXml = buildLineSeg(vertPos, vertSize, fontSize, horzSize);
 
   const xml =
@@ -1361,10 +1379,10 @@ function encodeGridPositioned(
   secPr = "",
   hfRun = "",
 ): { xml: string; nextVertPos: number } {
-  const gridXml = buildGridXml(grid, ctx);
+  const { xml: gridXml, height: tblHeight } = buildGridXml(grid, ctx);
   const fs = 1000;
-  const sp = 600;
-  const vs = fs + sp;
+  // 표의 실제 높이를 반영 (최소 1600)
+  const vs = Math.max(1600, tblHeight);
   const linesegXml = buildLineSeg(vertPos, vs, fs, ctx.availableWidth);
 
   const xml =
@@ -1378,8 +1396,12 @@ function encodeGridPositioned(
   return { xml, nextVertPos: vertPos + vs };
 }
 
-function buildGridXml(grid: GridNode, ctx: HwpxCtx): string {
+function buildGridXml(
+  grid: GridNode,
+  ctx: HwpxCtx,
+): { xml: string; height: number } {
   const rowCount = grid.kids.length;
+  // ... (기존 tableMap 생성 로직 동일)
 
   // 가상 2D 맵 — 병합 셀 처리
   interface CellEntry {
@@ -1506,15 +1528,16 @@ function buildGridXml(grid: GridNode, ctx: HwpxCtx): string {
   }
 
   const headerRow = grid.props.headerRow ? ' repeatHeader="1"' : "";
-  return (
+  const xml =
     `<hp:tbl id="${ctx.nextElementId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE"${headerRow} rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="0">` +
     `<hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="${totalH}" heightRelTo="ABSOLUTE" protect="0"/>` +
     `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>` +
     `<hp:outMargin left="138" right="138" top="138" bottom="138"/>` +
     `<hp:inMargin left="138" right="138" top="138" bottom="138"/>` +
     rowsXml +
-    `</hp:tbl>`
-  );
+    `</hp:tbl>`;
+
+  return { xml, height: totalH };
 }
 
 function estimateCellHeight(cell: CellNode, ctx: HwpxCtx): number {
