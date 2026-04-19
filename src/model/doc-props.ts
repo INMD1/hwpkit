@@ -96,6 +96,8 @@ export interface PageDims {
   ml: number;
   mr: number;
   orient?: 'portrait' | 'landscape';
+  headerPt?: number;  // distance from paper top to header top (DOCX w:header)
+  footerPt?: number;  // distance from paper bottom to footer bottom (DOCX w:footer)
 }
 
 export interface DocMeta {

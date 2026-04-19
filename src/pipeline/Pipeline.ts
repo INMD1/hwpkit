@@ -1,6 +1,6 @@
 import type { DocRoot } from '../model/doc-tree';
 import type { Outcome } from '../contract/result';
-import { fail } from '../contract/result';
+import { succeed, fail } from '../contract/result';
 import { registry } from './registry';
 
 // Side-effect imports: auto-register all decoders and encoders

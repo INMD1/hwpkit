@@ -6,6 +6,7 @@ import type {
   SpanNode,
   GridNode,
   ImgNode,
+  LinkNode,
   PageNumNode,
   CellNode,
 } from "../../model/doc-tree";
@@ -117,12 +118,16 @@ export class DocxDecoder implements Decoder {
 
       const kids: ContentNode[] = [];
       for (const el of elements) {
-        const node = shield.guard(
+        const nodes = shield.guard(
           () => decodeElement(el, decCtx),
-          buildPara([buildSpan("[요소 파싱 실패]")]),
+          [buildPara([buildSpan("[요소 파싱 실패]")])],
           "docx:bodyElement",
         );
-        kids.push(node);
+        if (Array.isArray(nodes)) {
+          kids.push(...nodes);
+        } else {
+          kids.push(nodes);
+        }
 
         // Inline sectPr in pPr = section break → insert page-break paragraph after
         if (el.type === 'para') {
@@ -337,6 +342,8 @@ function extractDims(body: any): PageDims | null {
     const sz = sp?.["w:pgSz"]?.[0]?._attr ?? sp?.pgSz?.[0]?._attr;
     const mar = sp?.["w:pgMar"]?.[0]?._attr ?? sp?.pgMar?.[0]?._attr;
     if (!sz) return null;
+    const headerDxa = Number(mar?.["w:header"] ?? mar?.header ?? 0);
+    const footerDxa = Number(mar?.["w:footer"] ?? mar?.footer ?? 0);
     return {
       wPt: Metric.dxaToPt(Number(sz["w:w"] ?? sz.w ?? 11906)),
       hPt: Metric.dxaToPt(Number(sz["w:h"] ?? sz.h ?? 16838)),
@@ -348,6 +355,8 @@ function extractDims(body: any): PageDims | null {
         (sz["w:orient"] ?? sz.orient) === "landscape"
           ? "landscape"
           : "portrait",
+      headerPt: headerDxa > 0 ? Metric.dxaToPt(headerDxa) : undefined,
+      footerPt: footerDxa > 0 ? Metric.dxaToPt(footerDxa) : undefined,
     };
   } catch {
     return null;
@@ -357,35 +366,33 @@ function extractDims(body: any): PageDims | null {
 function getBodyElements(body: any): { type: string; node: any }[] {
   const paras = toArr(body?.["w:p"] ?? body?.p);
   const tables = toArr(body?.["w:tbl"] ?? body?.tbl);
+  const sdts = toArr(body?.["w:sdt"] ?? body?.sdt);
 
-  if (tables.length === 0)
-    return paras.map((n: any) => ({ type: "para", node: n }));
-  if (paras.length === 0)
-    return tables.map((n: any) => ({ type: "table", node: n }));
-
-  // Use _childOrder from XmlKit to preserve document order
   const childOrder = body?.["_childOrder"] as string[] | undefined;
   if (Array.isArray(childOrder)) {
     const items: { type: string; node: any }[] = [];
-    let pi = 0,
-      ti = 0;
+    let pi = 0, ti = 0, si = 0;
     for (const tag of childOrder) {
       if ((tag === "w:p" || tag === "p") && pi < paras.length) {
         items.push({ type: "para", node: paras[pi++] });
       } else if ((tag === "w:tbl" || tag === "tbl") && ti < tables.length) {
         items.push({ type: "table", node: tables[ti++] });
+      } else if ((tag === "w:sdt" || tag === "sdt") && si < sdts.length) {
+        items.push({ type: "sdt", node: sdts[si++] });
       }
     }
+    // Append any remainders
     while (pi < paras.length) items.push({ type: "para", node: paras[pi++] });
-    while (ti < tables.length)
-      items.push({ type: "table", node: tables[ti++] });
+    while (ti < tables.length) items.push({ type: "table", node: tables[ti++] });
+    while (si < sdts.length) items.push({ type: "sdt", node: sdts[si++] });
     return items;
   }
 
-  // Fallback: paragraphs first, then tables
+  // Fallback: paragraphs, then tables, then sdts
   return [
     ...paras.map((n: any) => ({ type: "para", node: n })),
     ...tables.map((n: any) => ({ type: "table", node: n })),
+    ...sdts.map((n: any) => ({ type: "sdt", node: n })),
   ];
 }
 
@@ -453,7 +460,7 @@ function hasDrawingDeep(node: any): boolean {
 function decodeElement(
   el: { type: string; node: any },
   ctx: DecCtx,
-): ContentNode {
+): ContentNode | ContentNode[] {
   if (el.type === "table") {
     const { value } = ctx.shield.guardGrid(
       el.node,
@@ -464,8 +471,23 @@ function decodeElement(
       "docx:table",
     );
     return value;
+  } else if (el.type === "sdt") {
+    return decodeSdt(el.node, ctx);
   }
   return decodePara(el.node, ctx);
+}
+
+function decodeSdt(sdt: any, ctx: DecCtx): ContentNode[] {
+  const content = sdt?.["w:sdtContent"]?.[0] ?? sdt?.sdtContent?.[0];
+  if (!content) return [];
+  const elements = getBodyElements(content);
+  const kids: ContentNode[] = [];
+  for (const el of elements) {
+    const res = decodeElement(el, ctx);
+    if (Array.isArray(res)) kids.push(...res);
+    else kids.push(res);
+  }
+  return kids;
 }
 
 function decodePara(p: any, ctx: DecCtx): ParaNode {
@@ -541,16 +563,80 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   const hasPageBreakBefore = pbBeforeNode != null &&
     (pbBeforeNode?._attr?.["w:val"] ?? pbBeforeNode?._attr?.val ?? "1") !== "0";
 
-  const runs = toArr(p?.["w:r"] ?? p?.r);
+  // Resolve all children (runs AND hyperlinks) in document order
+  const children = p?.["_childOrder"] as string[] | undefined;
+  const kids: (SpanNode | ImgNode | LinkNode)[] = [];
 
-  // 3/28 이미지 태크를 찾을수 있기 때문에 별도 함수 구현
-  const kids: (SpanNode | ImgNode)[] = ctx.shield.guardAll(
-    runs,
-    (run: any) =>
-      hasDrawingDeep(run) ? decodeRunOrImage(run, ctx) : decodeRun(run, ctx, styleInherited.rPr),
-    () => buildSpan(""),
-    "docx:run",
-  );
+  if (Array.isArray(children)) {
+    const runsArr = toArr(p?.["w:r"] ?? p?.r);
+    const hlArr = toArr(p?.["w:hyperlink"] ?? p?.hyperlink);
+    const sdtArr = toArr(p?.["w:sdt"] ?? p?.sdt);
+    let ri = 0;
+    let hi = 0;
+    let si = 0;
+
+    for (const tag of children) {
+      if (tag === "w:r" || tag === "r") {
+        const run = runsArr[ri++];
+        if (run) {
+          kids.push(
+            ctx.shield.guard(
+              () => hasDrawingDeep(run) ? decodeRunOrImage(run, ctx) : decodeRun(run, ctx, styleInherited.rPr),
+              buildSpan(""),
+              "docx:run"
+            )
+          );
+        }
+      } else if (tag === "w:hyperlink" || tag === "hyperlink") {
+        const hl = hlArr[hi++];
+        if (hl) {
+          const rId = hl?._attr?.["r:id"] ?? hl?._attr?.id;
+          const url = rId ? ctx.relsMap.get(rId) : "";
+          const hlRuns = toArr(hl?.["w:r"] ?? hl?.r);
+          const hlKids = hlRuns.map((r: any) => 
+            decodeRun(r, ctx, { 
+              ...styleInherited.rPr, 
+              u: true, 
+              color: "0000FF" 
+            })
+          );
+          kids.push({
+            tag: "link",
+            href: url || "",
+            kids: hlKids,
+          });
+        }
+      } else if (tag === "w:sdt" || tag === "sdt") {
+        const sdt = sdtArr[si++];
+        if (sdt) {
+          const sdtContent = sdt?.["w:sdtContent"]?.[0] ?? sdt?.sdtContent?.[0];
+          if (sdtContent) {
+            const innerRuns = toArr(sdtContent?.["w:r"] ?? sdtContent?.r);
+            for (const ir of innerRuns) {
+              kids.push(
+                ctx.shield.guard(
+                  () => hasDrawingDeep(ir) ? decodeRunOrImage(ir, ctx) : decodeRun(ir, ctx, styleInherited.rPr),
+                  buildSpan(""),
+                  "docx:run"
+                )
+              );
+            }
+          }
+        }
+      }
+    }
+  } else {
+    // Fallback if _childOrder is missing
+    const runs = toArr(p?.["w:r"] ?? p?.r);
+    const legacyKids: (SpanNode | ImgNode)[] = ctx.shield.guardAll(
+      runs,
+      (run: any) =>
+        hasDrawingDeep(run) ? decodeRunOrImage(run, ctx) : decodeRun(run, ctx, styleInherited.rPr),
+      () => buildSpan(""),
+      "docx:run",
+    );
+    kids.push(...legacyKids);
+  }
 
   const filteredKids = kids.filter(Boolean) as ParaNode["kids"];
 
