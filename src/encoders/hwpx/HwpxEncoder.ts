@@ -1053,9 +1053,10 @@ function buildSecPrXml(dims: PageDims): string {
     `<hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/>` +
     `<hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/>` +
     `<hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/>` +
-    `<hp:pagePr landscape="WIDELY" width="${wHwp}" height="${hHwp}" gutterType="LEFT_ONLY">` +
+    `<hp:pagePr landscape="${dims.orient === 'landscape' ? 'WIDELY' : 'NARROWLY'}" width="${wHwp}" height="${hHwp}" gutterType="LEFT_ONLY">` +
     `<hp:margin header="${headerZone}" footer="${footerZone}" gutter="0" left="${ml}" right="${mr}" top="${mt}" bottom="${mb}"/>` +
     `</hp:pagePr>` +
+    `<hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/>` +
     `<hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar="" supscript="1"/>` +
     `<hp:noteLine length="-1" type="SOLID" width="0.25 mm" color="#000000"/>` +
     `<hp:noteSpacing betweenNotes="283" belowLine="0" aboveLine="1000"/>` +
@@ -1069,8 +1070,7 @@ function buildSecPrXml(dims: PageDims): string {
     `<hp:placement place="END_OF_DOCUMENT" beneathText="0"/>` +
     `</hp:endNotePr>` +
     pageBorderFill +
-    `</hp:secPr>` +
-    `<hp:ctrl><hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/></hp:ctrl>`
+    `</hp:secPr>`
   );
 }
 
@@ -1486,14 +1486,14 @@ function buildGridXml(grid: GridNode, ctx: HwpxCtx): string {
 
       cellsXml +=
         `<hp:tc name="" header="0" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}">` +
-        `<hp:subList id="${subListId}" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${vAlign}" ` +
-        `linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">` +
-        parasXml +
-        `</hp:subList>` +
         `<hp:cellAddr colAddr="${ci}" rowAddr="${ri}"/>` +
         `<hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/>` +
         `<hp:cellSz width="${cellW}" height="${rowHeights[ri]}"/>` +
         `<hp:cellMargin left="141" right="141" top="141" bottom="141"/>` +
+        `<hp:subList id="${subListId}" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${vAlign}" ` +
+        `linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">` +
+        parasXml +
+        `</hp:subList>` +
         `</hp:tc>`;
     }
     rowsXml += `<hp:tr>${cellsXml}</hp:tr>`;
