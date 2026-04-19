@@ -971,13 +971,12 @@ function buildSectionXml(
   const kids = sheet?.kids ?? [];
   const hfRunXml = sheet ? buildHeaderFooterRunXml(sheet, dims, ctx) : "";
 
-  let contentXml = "";
+  let contentXml = secPrXml; // 섹션 루트 바로 아래에 배치
   let vertPos = 0;
 
   for (let i = 0; i < kids.length; i++) {
     const kid = kids[i];
     const isFirst = i === 0;
-    const curSecPr = isFirst ? secPrXml : "";
     const curHfRun = isFirst ? hfRunXml : "";
 
     if (kid.tag === "para") {
@@ -985,7 +984,7 @@ function buildSectionXml(
         kid,
         ctx,
         vertPos,
-        curSecPr,
+        "", // secPr 비움
         undefined,
         curHfRun,
       );
@@ -996,7 +995,7 @@ function buildSectionXml(
         kid,
         ctx,
         vertPos,
-        curSecPr,
+        "", // secPr 비움
         curHfRun,
       );
       contentXml += xml;
@@ -1004,13 +1003,12 @@ function buildSectionXml(
     }
   }
 
-  if (!contentXml) {
+  if (kids.length === 0) {
     // 빈 문서 — 최소 단락 1개 필수
     const fs = 1000;
     const sp = 600;
-    contentXml =
+    contentXml +=
       `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">` +
-      secPrXml +
       hfRunXml +
       `<hp:run charPrIDRef="0"><hp:t> </hp:t></hp:run>` +
       buildLineSeg(0, fs + sp, fs, ctx.availableWidth) +
@@ -1365,7 +1363,7 @@ function encodeGridPositioned(
     `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">` +
     secPr +
     hfRun +
-    `<hp:run charPrIDRef="0">${gridXml}<hp:t> </hp:t></hp:run>` +
+    gridXml +
     linesegXml +
     `</hp:p>`;
 
