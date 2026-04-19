@@ -71,8 +71,16 @@ export interface SheetNode {
   tag: 'sheet';
   dims: PageDims;
   kids: ContentNode[];
-  header?: ParaNode[];
-  footer?: ParaNode[];
+  headers?: {
+    default?: ParaNode[];
+    first?: ParaNode[];
+    even?: ParaNode[];
+  };
+  footers?: {
+    default?: ParaNode[];
+    first?: ParaNode[];
+    even?: ParaNode[];
+  };
 }
 
 // ─── 루트 노드 ─────────────────────────────────────────────

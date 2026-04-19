@@ -44,6 +44,7 @@ export interface ParaProps {
   heading?: Heading;
   styleId?: string;           // DOCX pStyle styleId (e.g. "Heading1", "TOC1")
   indentPt?: number;          // 문단 왼쪽 전체 들여쓰기 (pt)
+  indentRightPt?: number;     // 문단 오른쪽 전체 들여쓰기 (pt)
   firstLineIndentPt?: number; // 첫 줄만 추가 들여쓰기 (pt, 음수=내어쓰기)
   spaceBefore?: number;
   spaceAfter?: number;
@@ -65,7 +66,11 @@ export interface CellProps {
   left?: Stroke;
   right?: Stroke;
   bg?: string;
-  padPt?: number;
+  padPt?: number;      // 모든 방향 균일 패딩 (하위 호환)
+  padT?: number;       // 상단 패딩 (pt)
+  padB?: number;       // 하단 패딩
+  padL?: number;       // 좌측 패딩
+  padR?: number;       // 우측 패딩
   align?: Align;
   va?: VAlign;
   isHeader?: boolean;

@@ -63,15 +63,23 @@ export class DocxDecoder implements Decoder {
     try {
       const files = await ArchiveKit.unzip(data);
 
-      const docXml = files.get("word/document.xml");
+      const getFile = (path: string) => {
+        const lower = path.toLowerCase();
+        for (const [name, data] of files.entries()) {
+          if (name.toLowerCase() === lower) return data;
+        }
+        return undefined;
+      };
+
+      const docXml = getFile("word/document.xml");
       if (!docXml) return fail("DOCX: word/document.xml not found");
 
-      const relsXml = files.get("word/_rels/document.xml.rels");
+      const relsXml = getFile("word/_rels/document.xml.rels");
       const relsMap = relsXml
         ? await parseRels(TextKit.decode(relsXml))
         : new Map<string, string>();
 
-      const coreXml = files.get("docProps/core.xml");
+      const coreXml = getFile("docProps/core.xml");
       let meta: DocMeta = {};
       if (coreXml) {
         try {
@@ -82,7 +90,7 @@ export class DocxDecoder implements Decoder {
       }
 
       // Parse numbering.xml for list support
-      const numXml = files.get("word/numbering.xml");
+      const numXml = getFile("word/numbering.xml");
       let numMap: NumMap = new Map();
       if (numXml) {
         try {
@@ -95,7 +103,7 @@ export class DocxDecoder implements Decoder {
       // Parse styles.xml for table and paragraph/character style defaults
       let stylesMap: StylesMap = new Map();
       let paraStyleMap: ParaStyleMap = new Map();
-      const stylesXml = files.get("word/styles.xml");
+      const stylesXml = getFile("word/styles.xml");
       if (stylesXml) {
         try {
           const stylesStr = TextKit.decode(stylesXml);
@@ -106,7 +114,10 @@ export class DocxDecoder implements Decoder {
         }
       }
 
-      const docStr = TextKit.decode(docXml);
+      const docStr = TextKit.decode(docXml).trim();
+      if (!docStr) {
+        return fail("DOCX decode error: word/document.xml is empty");
+      }
       const docObj: any = await XmlKit.parseStrict(docStr);
 
       const body = getBody(docObj);
@@ -144,25 +155,13 @@ export class DocxDecoder implements Decoder {
       }
 
       // Decode header/footer
-      const headerParas = await decodeHeaderFooter(
-        "header",
-        body,
-        relsMap,
-        files,
-        decCtx,
-      );
-      const footerParas = await decodeHeaderFooter(
-        "footer",
-        body,
-        relsMap,
-        files,
-        decCtx,
-      );
+      const headersMap = await decodeHeaderFooter("header", body, relsMap, files, decCtx);
+      const footersMap = await decodeHeaderFooter("footer", body, relsMap, files, decCtx);
 
       warns.push(...shield.flush());
       const sheet = buildSheet(kids.filter(Boolean) as ContentNode[], dims, {
-        header: headerParas,
-        footer: footerParas,
+        headers: headersMap,
+        footers: footersMap,
       });
       return succeed(buildRoot(meta, [sheet]), warns);
     } catch (e: any) {
@@ -206,6 +205,7 @@ interface ParaStyleDef {
     spaceAfter?: number;
     lineHeight?: number;
     indentPt?: number;
+    indentRightPt?: number;
     firstLineIndentPt?: number;
   };
   basedOn?: string; // parent style id
@@ -253,8 +253,10 @@ function resolveDocxPath(baseDir: string, target: string): string {
 
 async function parseRels(xml: string): Promise<Map<string, string>> {
   const map = new Map<string, string>();
+  const trimmed = xml.trim();
+  if (!trimmed) return map;
   try {
-    const obj: any = await XmlKit.parseStrict(xml);
+    const obj: any = await XmlKit.parseStrict(trimmed);
     for (const rel of toArr(obj?.Relationships?.[0]?.Relationship)) {
       const a = rel?._attr ?? {};
       if (a.Id && a.Target) map.set(a.Id, a.Target);
@@ -266,8 +268,10 @@ async function parseRels(xml: string): Promise<Map<string, string>> {
 }
 
 async function parseCoreProps(xml: string): Promise<DocMeta> {
+  const trimmed = xml.trim();
+  if (!trimmed) return {};
   try {
-    const obj: any = await XmlKit.parseStrict(xml);
+    const obj: any = await XmlKit.parseStrict(trimmed);
     const c = obj?.["cp:coreProperties"]?.[0] ?? obj?.coreProperties?.[0] ?? {};
     return {
       title: c?.["dc:title"]?.[0]?._text ?? undefined,
@@ -283,8 +287,10 @@ async function parseCoreProps(xml: string): Promise<DocMeta> {
 
 async function parseNumbering(xml: string): Promise<NumMap> {
   const map: NumMap = new Map();
+  const trimmed = xml.trim();
+  if (!trimmed) return map;
   try {
-    const obj: any = await XmlKit.parseStrict(xml);
+    const obj: any = await XmlKit.parseStrict(trimmed);
     const root = obj?.["w:numbering"]?.[0] ?? obj?.numbering?.[0] ?? obj;
 
     // Parse abstractNums
@@ -404,43 +410,63 @@ async function decodeHeaderFooter(
   relsMap: Map<string, string>,
   files: Map<string, Uint8Array>,
   ctx: DecCtx,
-): Promise<ParaNode[] | undefined> {
+): Promise<Record<string, ParaNode[]> | undefined> {
   try {
     const sp = body?.["w:sectPr"]?.[0] ?? body?.sectPr?.[0];
     if (!sp) return undefined;
 
-    const refTag =
-      kind === "header" ? "w:headerReference" : "w:footerReference";
+    const refTag = kind === "header" ? "w:headerReference" : "w:footerReference";
     const refs = toArr(sp?.[refTag] ?? sp?.[refTag.replace("w:", "")]);
     if (refs.length === 0) return undefined;
 
-    const rId =
-      refs[0]?._attr?.["r:id"] ??
-      refs[0]?._attr?.["r:Id"] ??
-      refs[0]?._attr?.id;
-    if (!rId) return undefined;
+    const result: Record<string, ParaNode[]> = {};
 
-    const target = relsMap.get(rId);
-    if (!target) return undefined;
+    for (const ref of refs) {
+      const type = ref._attr?.["w:type"] ?? ref._attr?.type ?? "default";
+      const rId = ref._attr?.["r:id"] ?? ref._attr?.["r:Id"] ?? ref._attr?.id;
+      if (!rId) continue;
 
-    const filePath = resolveDocxPath("word", target);
-    const fileData = files.get(filePath);
-    if (!fileData) return undefined;
+      const target = relsMap.get(rId);
+      if (!target) continue;
 
-    const xmlStr = TextKit.decode(fileData);
-    const obj: any = await XmlKit.parseStrict(xmlStr);
+      const filePath = resolveDocxPath("word", target);
+      const fileData = files.get(filePath);
+      if (!fileData) continue;
 
-    const rootTag = kind === "header" ? "w:hdr" : "w:ftr";
-    const root =
-      obj?.[rootTag]?.[0] ?? obj?.[rootTag.replace("w:", "")]?.[0] ?? obj;
+      const xmlStr = TextKit.decode(fileData).trim();
+      if (!xmlStr) continue;
+      
+      // 워터마크 감지 (설명서 방법 3: 간단하게 헤더 텍스트로 처리)
+      const watermark = extractWatermark(xmlStr);
+      if (watermark) {
+        result[type] = [buildPara([buildSpan(watermark, { pt: 80, color: "CCCCCC", b: true })])];
+        continue;
+      }
 
-    const paras = toArr(root?.["w:p"] ?? root?.p);
-    if (paras.length === 0) return undefined;
+      try {
+        const obj: any = await XmlKit.parseStrict(xmlStr);
+        const rootTag = kind === "header" ? "w:hdr" : "w:ftr";
+        const root = obj?.[rootTag]?.[0] ?? obj?.[rootTag.replace("w:", "")]?.[0] ?? obj;
 
-    return paras.map((p: any) => decodePara(p, ctx));
+        const paras = toArr(root?.["w:p"] ?? root?.p);
+        result[type] = paras.map((p: any) => decodePara(p, ctx));
+      } catch (err) {
+        console.warn(`[DocxDecoder] ${kind} (${type}) XML 파싱 실패:`, err);
+        continue;
+      }
+    }
+
+    return Object.keys(result).length > 0 ? result : undefined;
   } catch {
     return undefined;
   }
+}
+
+/** 워터마크 텍스트 추출 (VML v:textpath 기반) */
+function extractWatermark(xml: string): string | null {
+  if (!xml.includes("v:textpath")) return null;
+  const m = xml.match(/string="([^"]+)"/);
+  return m ? m[1] : null;
 }
 
 // ─── Element decoding ──────────────────────────────────────
@@ -526,10 +552,13 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   // Indentation
   const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
   const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
+  const rightVal = Number(indAttr?.["w:right"] ?? indAttr?.right ?? 0);
   const firstLineVal = Number(indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0);
   const hangingVal = Number(indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0);
   if (leftVal > 0) props.indentPt = Metric.dxaToPt(leftVal);
   else if (styleInherited.pPr?.indentPt) props.indentPt = styleInherited.pPr.indentPt;
+  if (rightVal > 0) props.indentRightPt = Metric.dxaToPt(rightVal);
+  else if (styleInherited.pPr?.indentRightPt) props.indentRightPt = styleInherited.pPr.indentRightPt;
   if (firstLineVal > 0) props.firstLineIndentPt = Metric.dxaToPt(firstLineVal);
   else if (hangingVal > 0) props.firstLineIndentPt = -Metric.dxaToPt(hangingVal);
   else if (styleInherited.pPr?.firstLineIndentPt) props.firstLineIndentPt = styleInherited.pPr.firstLineIndentPt;
@@ -706,6 +735,20 @@ function decodeDrawing(drawing: any, ctx: DecCtx): ImgNode | null {
     const graphic = container?.["a:graphic"]?.[0] ?? container?.graphic?.[0];
     const graphicData =
       graphic?.["a:graphicData"]?.[0] ?? graphic?.graphicData?.[0];
+
+    // 1. 차트 감지
+    if (graphicData?.["c:chart"] || graphicData?.chart) {
+      return {
+        tag: "img",
+        b64: "", // 플레이스홀더
+        mime: "image/png",
+        w: wPt,
+        h: hPt,
+        alt: `[차트: ${alt || "차트"}]`,
+        layout: decodeImageLayout(anchor),
+      };
+    }
+
     const pic = graphicData?.["pic:pic"]?.[0] ?? graphicData?.pic?.[0];
     const blipFill = pic?.["pic:blipFill"]?.[0] ?? pic?.blipFill?.[0];
     const blip =
@@ -927,8 +970,10 @@ function parseBorderDef(bdrNode: any): TblBorderDef {
 /** Parse styles.xml and build a map of tblStyle defaults */
 async function parseStylesMap(xml: string): Promise<StylesMap> {
   const map: StylesMap = new Map();
+  const trimmed = xml.trim();
+  if (!trimmed) return map;
   try {
-    const obj: any = await XmlKit.parseStrict(xml);
+    const obj: any = await XmlKit.parseStrict(trimmed);
     const stylesRoot = obj?.["w:styles"]?.[0] ?? obj?.styles?.[0] ?? obj;
     const styleArr = toArr(stylesRoot?.["w:style"] ?? stylesRoot?.style);
     for (const style of styleArr) {
@@ -964,8 +1009,10 @@ async function parseStylesMap(xml: string): Promise<StylesMap> {
 /** Parse styles.xml and build a map of paragraph/character style defaults */
 async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
   const map: ParaStyleMap = new Map();
+  const trimmed = xml.trim();
+  if (!trimmed) return map;
   try {
-    const obj: any = await XmlKit.parseStrict(xml);
+    const obj: any = await XmlKit.parseStrict(trimmed);
     const stylesRoot = obj?.["w:styles"]?.[0] ?? obj?.styles?.[0] ?? obj;
     const styleArr = toArr(stylesRoot?.["w:style"] ?? stylesRoot?.style);
     for (const style of styleArr) {
@@ -1015,6 +1062,7 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
         const lineRule = spacingAttr?.["w:lineRule"] ?? spacingAttr?.lineRule ?? "auto";
         const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
         const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
+        const rightVal = Number(indAttr?.["w:right"] ?? indAttr?.right ?? 0);
         const firstLineVal = Number(indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0);
         const hangingVal = Number(indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0);
         const alignVal = pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ?? pPr?.["w:jc"]?.[0]?._attr?.val;
@@ -1024,6 +1072,7 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
           spaceAfter: afterVal > 0 ? Metric.dxaToPt(afterVal) : undefined,
           lineHeight: lineVal > 0 && lineRule === "auto" ? lineVal / 240 : undefined,
           indentPt: leftVal > 0 ? Metric.dxaToPt(leftVal) : undefined,
+          indentRightPt: rightVal > 0 ? Metric.dxaToPt(rightVal) : undefined,
           firstLineIndentPt: firstLineVal > 0 ? Metric.dxaToPt(firstLineVal)
             : hangingVal > 0 ? -Metric.dxaToPt(hangingVal) : undefined,
         };
@@ -1245,6 +1294,20 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
           top: "top", center: "mid", bottom: "bot",
         };
         cp.va = vaMap[vaVal];
+      }
+
+      // Cell margins (padding)
+      const tcMar = tcPr?.["w:tcMar"]?.[0] ?? tcPr?.tcMar?.[0];
+      if (tcMar) {
+        const top = tcMar?.["w:top"]?.[0]?._attr ?? tcMar?.top?.[0]?._attr;
+        const bot = tcMar?.["w:bottom"]?.[0]?._attr ?? tcMar?.bottom?.[0]?._attr;
+        const left = tcMar?.["w:left"]?.[0]?._attr ?? tcMar?.left?.[0]?._attr;
+        const right = tcMar?.["w:right"]?.[0]?._attr ?? tcMar?.right?.[0]?._attr;
+
+        if (top) cp.padT = Metric.dxaToPt(Number(top?.["w:w"] ?? top?.w ?? 0));
+        if (bot) cp.padB = Metric.dxaToPt(Number(bot?.["w:w"] ?? bot?.w ?? 0));
+        if (left) cp.padL = Metric.dxaToPt(Number(left?.["w:w"] ?? left?.w ?? 0));
+        if (right) cp.padR = Metric.dxaToPt(Number(right?.["w:w"] ?? right?.w ?? 0));
       }
 
       const rs = rsMap.get(`${ri},${ci}`) ?? 1;

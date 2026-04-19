@@ -344,6 +344,7 @@ interface ParaPrDef {
   id: number;
   align: string;
   leftHwp: number;
+  rightHwp: number;
   intentHwp: number;
   prevHwp: number;
   nextHwp: number;
@@ -428,6 +429,7 @@ function registerParaPr(props: ParaProps, ctx: HwpxCtx): number {
     id,
     align: (props.align ?? "left").toUpperCase(),
     leftHwp: props.indentPt ? Metric.ptToHwp(props.indentPt) : 0,
+    rightHwp: props.indentRightPt ? Metric.ptToHwp(props.indentRightPt) : 0,
     intentHwp: props.firstLineIndentPt
       ? Metric.ptToHwp(props.firstLineIndentPt)
       : 0,
@@ -784,9 +786,10 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
     const italic = cp.italic ? "<hh:italic/>" : "";
     const hid = cp.hangulId;
     const lid = cp.latinId;
+    const shadeColor = cp.bg ? (cp.bg.startsWith("#") ? cp.bg : `#${cp.bg}`) : "none";
     charPrXml +=
       `<hh:charPr id="${cp.id}" height="${cp.height}" textColor="${cp.textColor}" ` +
-      `shadeColor="none" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="1">` +
+      `shadeColor="${shadeColor}" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="1">` +
       `<hh:fontRef hangul="${hid}" latin="${lid}" hanja="${hid}" japanese="${hid}" other="${lid}" symbol="${lid}" user="${lid}"/>` +
       `<hh:ratio hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100"/>` +
       `<hh:spacing hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>` +
@@ -813,7 +816,7 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
       `<hh:margin>` +
       `<hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/>` +
       `<hc:left value="${pp.leftHwp}" unit="HWPUNIT"/>` +
-      `<hc:right value="0" unit="HWPUNIT"/>` +
+      `<hc:right value="${pp.rightHwp}" unit="HWPUNIT"/>` +
       `<hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/>` +
       `<hc:next value="${pp.nextHwp}" unit="HWPUNIT"/>` +
       `</hh:margin>` +
@@ -901,59 +904,56 @@ function buildHeaderFooterRunXml(
   dims: PageDims,
   ctx: HwpxCtx,
 ): string {
-  const hasHeader = sheet.header && sheet.header.length > 0;
-  const hasFooter = sheet.footer && sheet.footer.length > 0;
-  if (!hasHeader && !hasFooter) return "";
+  const headers = sheet.headers || {};
+  const footers = sheet.footers || {};
+  const hasAny = Object.keys(headers).length > 0 || Object.keys(footers).length > 0;
+  if (!hasAny) return "";
 
   const availW = ctx.availableWidth;
   const mtHwp = Metric.ptToHwp(dims.mt);
   const mbHwp = Metric.ptToHwp(dims.mb);
-  const headerZoneH = dims.headerPt
-    ? Math.max(100, mtHwp - Metric.ptToHwp(dims.headerPt))
-    : 2125;
-  const footerZoneH = dims.footerPt
-    ? Math.max(100, mbHwp - Metric.ptToHwp(dims.footerPt))
-    : 4255;
+  const headerZoneH = dims.headerPt ? Math.max(100, mtHwp - Metric.ptToHwp(dims.headerPt)) : 3600;
+  const footerZoneH = dims.footerPt ? Math.max(100, mbHwp - Metric.ptToHwp(dims.footerPt)) : 3600;
 
   let inner = "";
 
-  // pageHiding: first-page hides header/footer when they exist
-  inner += `<hp:ctrl><hp:pageHiding hideHeader="0" hideFooter="0" hideMasterPage="0" hideBorder="0" hideFill="0" hidePageNum="0"/></hp:ctrl>`;
+  // 1. 첫 페이지 숨김 설정 (first 헤더/푸터가 있으면 활성화)
+  const hideFirst = !!(headers.first || footers.first);
+  inner += `<hp:ctrl><hp:pageHiding hideHeader="${hideFirst ? 1 : 0}" hideFooter="${hideFirst ? 1 : 0}" hideMasterPage="0" hideBorder="0" hideFill="0" hidePageNum="0"/></hp:ctrl>`;
 
-  if (hasHeader) {
-    // header/footer 내부 단락 ID는 원본처럼 0부터 시작하는 별도 공간 사용
+  // 2. 헤더들 생성
+  for (const [type, paras] of Object.entries(headers)) {
+    const applyPageType = type === "even" ? "EVEN" : (type === "default" || type === "first" ? "BOTH" : "ODD");
     const savedId = ctx.nextElementId;
     ctx.nextElementId = 0;
-    const headerParasXml = sheet.header!
-      .map((p) => encodeParaPositioned(p, ctx, 0, "", availW).xml)
-      .join("");
+    const parasXml = paras.map((p) => encodeParaPositioned(p, ctx, 0, "", availW).xml).join("");
     ctx.nextElementId = savedId;
     inner +=
       `<hp:ctrl>` +
-      `<hp:header id="1" applyPageType="BOTH">` +
+      `<hp:header id="1" applyPageType="${applyPageType}">` +
       `<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" ` +
       `linkListIDRef="0" linkListNextIDRef="0" textWidth="${availW}" textHeight="${headerZoneH}" ` +
       `hasTextRef="0" hasNumRef="0">` +
-      headerParasXml +
+      parasXml +
       `</hp:subList>` +
       `</hp:header>` +
       `</hp:ctrl>`;
   }
 
-  if (hasFooter) {
+  // 3. 푸터들 생성
+  for (const [type, paras] of Object.entries(footers)) {
+    const applyPageType = type === "even" ? "EVEN" : (type === "default" || type === "first" ? "BOTH" : "ODD");
     const savedId = ctx.nextElementId;
     ctx.nextElementId = 0;
-    const footerParasXml = sheet.footer!
-      .map((p) => encodeParaPositioned(p, ctx, 0, "", availW).xml)
-      .join("");
+    const parasXml = paras.map((p) => encodeParaPositioned(p, ctx, 0, "", availW).xml).join("");
     ctx.nextElementId = savedId;
     inner +=
       `<hp:ctrl>` +
-      `<hp:footer id="2" applyPageType="BOTH">` +
+      `<hp:footer id="2" applyPageType="${applyPageType}">` +
       `<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="BOTTOM" ` +
       `linkListIDRef="0" linkListNextIDRef="0" textWidth="${availW}" textHeight="${footerZoneH}" ` +
       `hasTextRef="0" hasNumRef="0">` +
-      footerParasXml +
+      parasXml +
       `</hp:subList>` +
       `</hp:footer>` +
       `</hp:ctrl>`;
@@ -1015,12 +1015,13 @@ function buildSectionXml(
     // 빈 문서 — 최소 단락 1개 필수
     const fs = 1000;
     const vs = 1600;
+    const { xml: linesegXml } = buildLinesegarray(" ", 0, fs, vs / (fs / 100), availWidth);
     contentXml =
       `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">` +
       secPrXml +
       hfRunXml +
-      `<hp:run charPrIDRef="0"><hp:t> </hp:t></hp:run>` +
-      buildLineSeg(0, vs, fs, availWidth) +
+      `<hp:run charPrIDRef="0"><hp:t xml:space="preserve"> </hp:t></hp:run>` +
+      linesegXml +
       `</hp:p>`;
   }
 
@@ -1082,23 +1083,57 @@ function buildSecPrXml(dims: PageDims): string {
 }
 
 // ─── 줄 정보 XML (linesegarray) ──────────────────────────────
-// ANYTOHWP 방식: vertPos를 정확히 추적하며 lineseg 생성
+// 가이드 준수: 실제 시각적 줄 단위로 lineseg 생성
 
-function buildLineSeg(
-  vertPos: number,
-  vertSize: number,
-  textHeight: number,
+function buildLinesegarray(
+  text: string,
+  vertPosStart: number,
+  fontSize: number,
+  lineSpacingPct: number,
   horzSize: number,
-): string {
-  const baseline = Math.round(textHeight * 0.85);
-  const spacing = vertSize - textHeight;
-  return (
-    `<hp:linesegarray>` +
-    `<hp:lineseg textpos="0" vertpos="${vertPos}" vertsize="${vertSize}" ` +
-    `textheight="${textHeight}" baseline="${baseline}" spacing="${spacing}" ` +
-    `horzpos="0" horzsize="${Math.max(1, horzSize)}" flags="393216"/>` +
-    `</hp:linesegarray>`
-  );
+): { xml: string; totalHeight: number } {
+  const vertsizeLine = Math.round((fontSize * lineSpacingPct) / 100);
+  const spacing = vertsizeLine - fontSize;
+  const baseline = Math.round(fontSize * 0.83);
+
+  // 글자 너비 추정 (영문 0.47, 한글 1.0)
+  const isKorean = /[\uAC00-\uD7A3\u3131-\u318E]/.test(text);
+  const charW = isKorean ? fontSize : Math.round(fontSize * 0.47);
+  const charsPerLine = Math.max(1, Math.floor(horzSize / charW));
+  const lineCount = text.length === 0 ? 1 : Math.ceil(text.length / charsPerLine);
+
+  let innerXml = "";
+  for (let i = 0; i < lineCount; i++) {
+    const flags = i === 0 ? 1441792 : 393216;
+    innerXml +=
+      `<hp:lineseg textpos="${i * charsPerLine}" ` +
+      `vertpos="${vertPosStart + i * vertsizeLine}" ` +
+      `vertsize="${vertsizeLine}" textheight="${fontSize}" ` +
+      `baseline="${baseline}" spacing="${spacing}" ` +
+      `horzpos="0" horzsize="${horzSize}" ` +
+      `flags="${flags}"/>`;
+  }
+
+  return {
+    xml: `<hp:linesegarray>${innerXml}</hp:linesegarray>`,
+    totalHeight: lineCount * vertsizeLine,
+  };
+}
+
+/** 단락에서 순수 텍스트 추출 (줄바꿈 계산용) */
+function extractParaText(para: ParaNode): string {
+  let text = "";
+  const walk = (kids: any[]) => {
+    for (const k of kids) {
+      if (k.tag === "span") {
+        for (const c of k.kids) if (c.tag === "txt") text += c.content;
+      } else if (k.tag === "link") {
+        walk(k.kids);
+      }
+    }
+  };
+  walk(para.kids);
+  return text;
 }
 
 function fontSizeForPara(para: ParaNode, ctx: HwpxCtx): number {
@@ -1121,6 +1156,12 @@ function encodeParaPositioned(
   availWidth?: number,
   hfRun = "",
 ): { xml: string; nextVertPos: number } {
+  // ✅ 표(Grid)를 포함하는 단락인지 확인
+  const gridKid = para.kids.find((k) => k.tag === "grid");
+  if (gridKid) {
+    return encodeTablePara(para, gridKid as GridNode, ctx, vertPos, secPr, hfRun);
+  }
+
   const paraPrId = ctx.paraPrMap.get(paraPrKey(para.props)) ?? 0;
   const styleIDRef = para.props.styleId
     ? (ctx.styleIdToHwpxId.get(para.props.styleId) ?? 0)
@@ -1157,30 +1198,20 @@ function encodeParaPositioned(
     );
 
   let runsXml = encodeParaKids(para.kids, ctx);
-  if (!runsXml) runsXml = `<hp:run charPrIDRef="0"><hp:t> </hp:t></hp:run>`;
+  if (!runsXml) runsXml = `<hp:run charPrIDRef="0"><hp:t xml:space="preserve"> </hp:t></hp:run>`;
 
-  // 단락 높이 예측 고도화 (줄바꿈 대응)
-  // 텍스트 길이를 기반으로 대략적인 줄 수 계산 (한글/영문 평균 폭 고려)
-  const totalTextLen = para.kids.reduce((acc, k) => {
-    if (k.tag === "span") {
-      return acc + k.kids.reduce((sacc, c) => (c.tag === "txt" ? sacc + c.content.length : sacc), 0);
-    }
-    return acc;
-  }, 0);
-  
-  // 가용 너비(horzSize) 대비 글자 수로 줄 수 예측 (대략 1글자당 폰트크기의 0.6배 폭 가정)
-  const estimatedCharWidth = fontSize * 0.6;
-  const charsPerLine = Math.max(10, Math.floor(horzSize / estimatedCharWidth));
-  const estimatedLines = Math.max(1, Math.ceil(totalTextLen / charsPerLine));
-  
-  // 실제 점유 높이 = (글자크기 * 줄간격) * 예측 줄 수
-  vertSize = (fontSize + spacing) * estimatedLines;
+  const paraText = extractParaText(para);
+  const { xml: linesegXml, totalHeight } = buildLinesegarray(
+    paraText,
+    vertPos,
+    fontSize,
+    lineSpacing,
+    horzSize,
+  );
 
   const hasPageBreak = para.kids.some(
     (k) => k.tag === "span" && k.kids.some((c) => c.tag === "pb"),
   );
-  // 줄 정보에는 첫 줄 정보를 넣되, 단락 전체 높이를 vertsize로 설정하여 겹침 방지
-  const linesegXml = buildLineSeg(vertPos, vertSize, fontSize, horzSize);
 
   const xml =
     `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="${paraPrId}" styleIDRef="${styleIDRef}" ` +
@@ -1191,7 +1222,46 @@ function encodeParaPositioned(
     linesegXml +
     `</hp:p>`;
 
-  return { xml, nextVertPos: vertPos + vertSize };
+  return { xml, nextVertPos: vertPos + totalHeight };
+}
+
+/** ✅ 가이드 준수: 표를 포함하는 단락 인코딩 */
+function encodeTablePara(
+  para: ParaNode,
+  grid: GridNode,
+  ctx: HwpxCtx,
+  vertPos: number,
+  secPr: string,
+  hfRun: string,
+): { xml: string; nextVertPos: number } {
+  const paraPrId = ctx.paraPrMap.get(paraPrKey(para.props)) ?? 0;
+  
+  // 표 알맹이 생성 (기존 로직 재사용)
+  const { xml: gridXml, height: tblHeight } = buildGridXml(grid, ctx);
+  
+  // 가이드: 표 단락의 lineseg는 1개여야 하고, vertsize는 표 전체 높이여야 함
+  const fontSize = 1000; 
+  const totalHeight = Math.max(1600, tblHeight);
+  const baseline = 850;
+  const spacing = Math.max(0, totalHeight - fontSize);
+
+  const linesegXml =
+    `<hp:linesegarray>` +
+    `<hp:lineseg textpos="0" vertpos="${vertPos}" vertsize="${totalHeight}" ` +
+    `textheight="${fontSize}" baseline="${baseline}" spacing="${spacing}" ` +
+    `horzpos="0" horzsize="${ctx.availableWidth}" flags="1441792"/>` +
+    `</hp:linesegarray>`;
+
+  const xml =
+    `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="${paraPrId}" styleIDRef="0" ` +
+    `pageBreak="0" columnBreak="0" merged="0">` +
+    secPr +
+    gridXml +
+    hfRun +
+    linesegXml +
+    `</hp:p>`;
+
+  return { xml, nextVertPos: vertPos + totalHeight };
 }
 
 function encodeCodeBlockPositioned(
@@ -1212,10 +1282,12 @@ function encodeCodeBlockPositioned(
   const subListId = ctx.nextElementId++;
   const { xml: innerXml } = encodeParaPositioned(para, ctx, 0, "", innerW);
 
-  const linesegXml = buildLineSeg(
+  const paraText = extractParaText(para);
+  const { xml: linesegXml, totalHeight } = buildLinesegarray(
+    paraText,
     vertPos,
-    vertSize,
     fontSize,
+    160, // 코드 블록 기본 줄간격 160%
     ctx.availableWidth,
   );
 
@@ -1236,47 +1308,108 @@ function encodeCodeBlockPositioned(
     `<hp:cellSpan colSpan="1" rowSpan="1"/>` +
     `<hp:cellSz width="${cellW}" height="0"/>` +
     `<hp:cellMargin left="283" right="283" top="141" bottom="141"/>` +
-    `</hp:tc></hp:tr></hp:tbl><hp:t> </hp:t></hp:run>` +
+    `</hp:tc></hp:tr></hp:tbl><hp:t xml:space="preserve"> </hp:t></hp:run>` +
     linesegXml +
     `</hp:p>`;
 
-  return { xml, nextVertPos: vertPos + vertSize };
+  return { xml, nextVertPos: vertPos + totalHeight };
 }
 
 function encodeParaKids(kids: ParaNode["kids"], ctx: HwpxCtx): string {
   let xml = "";
+  let currentRunCharPrId: number | null = null;
+  let currentRunContent = "";
+
+  const flushRun = () => {
+    if (currentRunCharPrId !== null && currentRunContent) {
+      xml += `<hp:run charPrIDRef="${currentRunCharPrId}">${currentRunContent}</hp:run>`;
+    }
+    currentRunCharPrId = null;
+    currentRunContent = "";
+  };
+
   for (const kid of kids) {
-    if (kid.tag === "span") xml += encodeRun(kid, ctx);
-    else if (kid.tag === "img") xml += encodeImgWrapped(kid, ctx);
-    else if (kid.tag === "link")
-      xml += encodeParaKids((kid as LinkNode).kids as ParaNode["kids"], ctx);
+    if (kid.tag === "span") {
+      const span = kid as SpanNode;
+      const charPrId = ctx.charPrMap.get(charPrKey(span.props)) ?? 0;
+      
+      if (currentRunCharPrId !== null && currentRunCharPrId !== charPrId) {
+        flushRun();
+      }
+      
+      currentRunCharPrId = charPrId;
+      currentRunContent += encodeRunInner(span);
+    } 
+    else if (kid.tag === "link") {
+      const link = kid as LinkNode;
+      // 링크의 첫 번째 span 스타일을 기준으로 함
+      let charPrId = 0;
+      if (link.kids.length > 0 && link.kids[0].tag === "span") {
+        charPrId = ctx.charPrMap.get(charPrKey((link.kids[0] as SpanNode).props)) ?? 0;
+      }
+
+      if (currentRunCharPrId !== null && currentRunCharPrId !== charPrId) {
+        flushRun();
+      }
+
+      currentRunCharPrId = charPrId;
+      currentRunContent += encodeLinkInner(link, ctx);
+    }
+    else if (kid.tag === "img") {
+      flushRun();
+      xml += encodeImgWrapped(kid, ctx);
+    }
+  }
+
+  flushRun();
+  return xml;
+}
+
+/** hp:run 내부의 태그들만 생성 (span용) */
+function encodeRunInner(span: SpanNode): string {
+  let xml = "";
+  for (const kid of span.kids) {
+    if (kid.tag === "txt") {
+      const content = esc(kid.content);
+      if (content) xml += `<hp:t xml:space="preserve">${content}</hp:t>`;
+    } else if (kid.tag === "br") {
+      xml += `<hp:t xml:space="preserve">\n</hp:t>`;
+    } else if (kid.tag === "pagenum") {
+      const fmt = (kid as any).format === "roman" ? "ROMAN_LOWER" 
+                : (kid as any).format === "romanCaps" ? "ROMAN_UPPER" : "DIGIT";
+      xml += `<hp:pageNum pageStartsOn="BOTH" formatType="${fmt}"/>`;
+    }
   }
   return xml;
 }
 
-function encodeRun(span: SpanNode, ctx: HwpxCtx): string {
-  const charPrId = ctx.charPrMap.get(charPrKey(span.props)) ?? 0;
-  const parts: string[] = [];
+/** hp:run 내부의 태그들만 생성 (link용) */
+function encodeLinkInner(link: LinkNode, ctx: HwpxCtx): string {
+  const fieldId = 600000000 + (ctx.nextElementId++ % 100000000);
+  const instanceId = 2100000000 + (ctx.nextElementId++ % 100000000);
+  const url = link.href;
 
-  for (const kid of span.kids) {
-    if (kid.tag === "txt") {
-      const content = esc(kid.content);
-      if (content) parts.push(`<hp:t xml:space="preserve">${content}</hp:t>`);
-    } else if (kid.tag === "br") {
-      parts.push(`<hp:t xml:space="preserve">\n</hp:t>`);
-    } else if (kid.tag === "pagenum") {
-      const fmt =
-        (kid as any).format === "roman"
-          ? "ROMAN_LOWER"
-          : (kid as any).format === "romanCaps"
-            ? "ROMAN_UPPER"
-            : "DIGIT";
-      parts.push(`<hp:pageNum pageStartsOn="BOTH" formatType="${fmt}"/>`);
+  let xml = `<hp:ctrl>` +
+    `<hp:fieldBegin id="${instanceId}" type="HYPERLINK" name="" editable="0" dirty="1" zorder="-1" fieldid="${fieldId}">` +
+    `<hp:parameters cnt="6" name="">` +
+    `<hp:integerParam name="Prop">0</hp:integerParam>` +
+    `<hp:stringParam name="Command">${esc(url.replace(/:/g, "\\:"))};1;5;-1;</hp:stringParam>` +
+    `<hp:stringParam name="Path">${esc(url)}</hp:stringParam>` +
+    `<hp:stringParam name="Category">HWPHYPERLINK_TYPE_URL</hp:stringParam>` +
+    `<hp:stringParam name="TargetType">HWPHYPERLINK_TARGET_HYPERLINK</hp:stringParam>` +
+    `<hp:stringParam name="DocOpenType">HWPHYPERLINK_JUMP_DONTCARE</hp:stringParam>` +
+    `</hp:parameters>` +
+    `</hp:fieldBegin>` +
+    `</hp:ctrl>`;
+
+  for (const kid of link.kids) {
+    if (kid.tag === "span") {
+      xml += encodeRunInner(kid as SpanNode);
     }
   }
 
-  if (!parts.length) return "";
-  return `<hp:run charPrIDRef="${charPrId}">${parts.join("")}</hp:run>`;
+  xml += `<hp:ctrl><hp:fieldEnd beginIDRef="${instanceId}"/></hp:ctrl>`;
+  return xml;
 }
 
 // ─── 이미지 인코딩 (ANYTOHWP 영감: 픽셀 치수 추출) ──────────
@@ -1301,6 +1434,11 @@ const FLOW_MAP: Record<string, string> = {
 };
 
 function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
+  // 0. 플레이스홀더 처리 (차트 등 b64가 없는 경우)
+  if (!img.b64) {
+    return `<hp:t xml:space="preserve">${esc(img.alt || "[개체]")}</hp:t>`;
+  }
+
   const binId = ctx.imgMap.get(img);
   if (!binId) return "";
 
@@ -1367,7 +1505,11 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
 }
 
 function encodeImgWrapped(img: ImgNode, ctx: HwpxCtx): string {
-  return `<hp:run charPrIDRef="0">${encodeImage(img, ctx)}<hp:t> </hp:t></hp:run>`;
+  const content = encodeImage(img, ctx);
+  if (!img.b64) {
+    return `<hp:run charPrIDRef="0">${content}</hp:run>`;
+  }
+  return `<hp:run charPrIDRef="0">${content}<hp:t xml:space="preserve"> </hp:t></hp:run>`;
 }
 
 // ─── 표(Grid) 인코딩 ─────────────────────────────────────────
@@ -1380,10 +1522,11 @@ function encodeGridPositioned(
   hfRun = "",
 ): { xml: string; nextVertPos: number } {
   const { xml: gridXml, height: tblHeight } = buildGridXml(grid, ctx);
-  const fs = 1000;
-  // 표의 실제 높이를 반영 (최소 1600)
-  const vs = Math.max(1600, tblHeight);
-  const linesegXml = buildLineSeg(vertPos, vs, fs, ctx.availableWidth);
+  const totalHeight = Math.max(1600, tblHeight);
+  
+  // 표가 단독으로(단락 밖에서) 호출되는 경우를 위해 hp:p로 감쌈
+  const fontSize = 1000;
+  const { xml: linesegXml } = buildLinesegarray(" ", vertPos, fontSize, totalHeight / (fontSize / 100), ctx.availableWidth);
 
   const xml =
     `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">` +
@@ -1393,7 +1536,7 @@ function encodeGridPositioned(
     linesegXml +
     `</hp:p>`;
 
-  return { xml, nextVertPos: vertPos + vs };
+  return { xml, nextVertPos: vertPos + totalHeight };
 }
 
 function buildGridXml(
@@ -1512,12 +1655,17 @@ function buildGridXml(
       const vAlign =
         cp.va === "mid" ? "CENTER" : cp.va === "bot" ? "BOTTOM" : "TOP";
 
+      const padL = cp.padL !== undefined ? Metric.ptToHwp(cp.padL) : 141;
+      const padR = cp.padR !== undefined ? Metric.ptToHwp(cp.padR) : 141;
+      const padT = cp.padT !== undefined ? Metric.ptToHwp(cp.padT) : 141;
+      const padB = cp.padB !== undefined ? Metric.ptToHwp(cp.padB) : 141;
+
       cellsXml +=
         `<hp:tc name="" header="0" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}">` +
         `<hp:cellAddr colAddr="${ci}" rowAddr="${ri}"/>` +
         `<hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/>` +
         `<hp:cellSz width="${cellW}" height="${rowHeights[ri]}"/>` +
-        `<hp:cellMargin left="141" right="141" top="141" bottom="141"/>` +
+        `<hp:cellMargin left="${padL}" right="${padR}" top="${padT}" bottom="${padB}"/>` +
         `<hp:subList id="${subListId}" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${vAlign}" ` +
         `linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">` +
         parasXml +
