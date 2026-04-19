@@ -53,11 +53,19 @@ export class HwpxDecoder implements Decoder {
     try {
       const files = await ArchiveKit.unzip(data);
 
-      const bodyXml = files.get('Contents/section0.xml')
-        ?? files.get('section0.xml')
-        ?? findSectionFile(files);
+      const sectionFiles: Uint8Array[] = [];
+      for (let i = 0; ; i++) {
+        const sec = files.get(`Contents/section${i}.xml`)
+                  ?? files.get(`section${i}.xml`);
+        if (!sec) break;
+        sectionFiles.push(sec);
+      }
+      if (sectionFiles.length === 0) {
+        const fallback = findSectionFile(files);
+        if (fallback) sectionFiles.push(fallback);
+      }
 
-      if (!bodyXml) return fail('HWPX: section0.xml not found in archive');
+      if (sectionFiles.length === 0) return fail('HWPX: No section files found');
 
       const headXml = files.get('Contents/header.xml') ?? files.get('header.xml');
 
@@ -85,12 +93,15 @@ export class HwpxDecoder implements Decoder {
 
       const ctx: DecCtx = { files, shield, borderFills, charPrs, paraPrs, warns };
 
-      const bodyStr = TextKit.decode(bodyXml);
-      const bodyObj: any = await XmlKit.parseStrict(bodyStr);
+      const allSections: any[] = [];
+      for (const secFile of sectionFiles) {
+        const bodyStr = TextKit.decode(secFile);
+        const bodyObj: any = await XmlKit.parseStrict(bodyStr);
+        allSections.push(...normalizeSections(bodyObj));
+      }
 
-      const sections = normalizeSections(bodyObj);
       const kids = shield.guardAll(
-        sections,
+        allSections,
         (sec: any) => decodeSection(sec, dims, ctx),
         () => buildSheet([buildPara([buildSpan('[섹션 파싱 실패]')])], dims),
         'hwpx:section',
@@ -377,20 +388,13 @@ function addParaItems(p: any, items: { type: string; node: any }[]): void {
   let hasTable = false;
   for (const run of runs) {
     const tbls = getTag(run, 'hp:tbl', 'hp:TABLE');
-    for (const tbl of tbls) {
-      items.push({ type: 'table', node: tbl });
+    if (tbls.length > 0) {
+      for (const tbl of tbls) items.push({ type: 'table', node: tbl });
       hasTable = true;
     }
   }
-  // Also add as paragraph unless it's just a table container
-  const hasText = runs.some((run: any) => {
-    const ts = getTag(run, 'hp:t', 'hp:T', 'hp:CHAR');
-    return ts.some((t: any) => {
-      const text = typeof t === 'string' ? t : t?._text ?? '';
-      return text.trim().length > 0;
-    });
-  });
-  if (hasText || !hasTable) {
+  // 테이블을 포함한 단락은 일반 단락으로 다시 추가하지 않음 (중복 방지)
+  if (!hasTable) {
     items.push({ type: 'para', node: p });
   }
 }
@@ -403,14 +407,18 @@ function decodeSection(sec: any, dims: PageDims, ctx: DecCtx) {
   // Build items list preserving document order via _childOrder
   const items: { type: string; node: any }[] = [];
   const paras = getTag(sec, 'hp:p', 'hp:P');
+
+  // Also check for direct tables in section (rare but possible in some variants)
+  const directTbls = getTag(sec, 'hp:tbl', 'hp:TABLE');
+  for (const tbl of directTbls) items.push({ type: 'table', node: tbl });
+
   const childOrder = sec?.['_childOrder'] as string[] | undefined;
 
   if (Array.isArray(childOrder)) {
     let pi = 0;
     for (const tag of childOrder) {
       if ((tag === 'hp:p' || tag === 'hp:P') && pi < paras.length) {
-        const p = paras[pi++];
-        addParaItems(p, items);
+        addParaItems(paras[pi++], items);
       }
     }
     // Append any remaining
@@ -424,15 +432,17 @@ function decodeSection(sec: any, dims: PageDims, ctx: DecCtx) {
     items,
     (item: any) => {
       if (item.type === 'table') {
-        const { value } = ctx.shield.guardGrid(
-          item.node,
-          (n) => decodeGrid(n, ctx),
-          (n) => decodeGridSimple(n, ctx),
-          (n) => decodeGridFlat(n),
-          (n) => decodeGridText(n) as unknown as GridNode,
-          'hwpx:table',
-        );
-        return value;
+        try {
+          const { value } = ctx.shield.guardGrid(
+            item.node,
+            (n) => decodeGrid(n, ctx),
+            (n) => decodeGridSimple(n, ctx),
+            (n) => decodeGridFlat(n),
+            (n) => decodeGridText(n) as unknown as GridNode,
+            'hwpx:table',
+          );
+          return value;
+        } catch { return buildPara([buildSpan('[표 파싱 실패]')]); }
       }
       return decodePara(item.node, ctx);
     },
@@ -570,10 +580,13 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
 
     // Text
     const textNodes = getTag(run, 'hp:t', 'hp:T', 'hp:CHAR');
-    const content = textNodes.map((t: any) => typeof t === 'string' ? t : t?._text ?? t?._ ?? '').join('');
+    const content = textNodes.map((t: any) => {
+      const val = typeof t === 'string' ? t : (t?._text ?? t?._ ?? t?.['#text'] ?? '');
+      return val.replace(/__EXT_\d+__/g, ''); // Skip placeholder strings
+    }).join('');
 
     // Skip empty secPr-only runs
-    if (content === '' && (run?.['hp:secPr']?.[0] || run?.['hp:SECPR']?.[0]) && pics.length === 0) continue;
+    if (content === '' && (run?.['hp:secPr']?.[0] || run?.['hp:SECPR']?.[0]) && pics.length === 0 && pageNums.length === 0) continue;
 
     const spanProps = resolveCharPr(run, ctx);
     kids.push(buildSpan(content, spanProps));
@@ -766,12 +779,21 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
       const rs = Number(cellSpan.rowSpan ?? ca.RowSpan ?? 1);
 
       // Parse paragraphs
-      let paras: ParaNode[];
+      let paras: ParaNode[] = [];
       if (subList) {
         const subParas = getTag(subList, 'hp:p', 'hp:P');
-        paras = subParas.map((p: any) => decodePara(p, ctx));
+        for (const sp of subParas) {
+          try {
+            paras.push(decodePara(sp, ctx));
+          } catch { /* skip corrupted para in cell */ }
+        }
       } else {
-        paras = getTag(cell, 'hp:p', 'hp:P').map((p: any) => decodePara(p, ctx));
+        const directParas = getTag(cell, 'hp:p', 'hp:P');
+        for (const dp of directParas) {
+          try {
+            paras.push(decodePara(dp, ctx));
+          } catch { /* skip */ }
+        }
       }
 
       return buildCell(
@@ -814,7 +836,10 @@ function cellText(cell: any): string {
   const source = subList ?? cell;
   return getTag(source, 'hp:p', 'hp:P').map((p: any) =>
     getTag(p, 'hp:run', 'hp:RUN').map((r: any) =>
-      getTag(r, 'hp:t', 'hp:T').map((t: any) => typeof t === 'string' ? t : t?._text ?? t?._ ?? '').join(''),
+      getTag(r, 'hp:t', 'hp:T').map((t: any) => {
+        const val = typeof t === 'string' ? t : (t?._text ?? t?._ ?? t?.['#text'] ?? '');
+        return val.replace(/__EXT_\d+__/g, '');
+      }).join(''),
     ).join(''),
   ).join(' ');
 }

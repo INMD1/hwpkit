@@ -1010,8 +1010,9 @@ function buildSectionXml(
     const sp = 600;
     contentXml =
       `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">` +
-      `<hp:run charPrIDRef="0">${secPrXml}<hp:t></hp:t></hp:run>` +
+      secPrXml +
       hfRunXml +
+      `<hp:run charPrIDRef="0"><hp:t> </hp:t></hp:run>` +
       buildLineSeg(0, fs + sp, fs, ctx.availableWidth) +
       `</hp:p>`;
   }
@@ -1148,10 +1149,9 @@ function encodeParaPositioned(
       vertSize,
     );
 
-  const prefix = secPr ? `<hp:run charPrIDRef="0">${secPr}</hp:run>` : "";
   let runsXml = encodeParaKids(para.kids, ctx);
   if (!runsXml && !secPr)
-    runsXml = `<hp:run charPrIDRef="0"><hp:t></hp:t></hp:run>`;
+    runsXml = `<hp:run charPrIDRef="0"><hp:t> </hp:t></hp:run>`;
 
   const hasPageBreak = para.kids.some(
     (k) => k.tag === "span" && k.kids.some((c) => c.tag === "pb"),
@@ -1161,7 +1161,7 @@ function encodeParaPositioned(
   const xml =
     `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="${paraPrId}" styleIDRef="${styleIDRef}" ` +
     `pageBreak="${hasPageBreak ? 1 : 0}" columnBreak="0" merged="0">` +
-    prefix +
+    secPr +
     hfRun +
     runsXml +
     linesegXml +
@@ -1188,7 +1188,6 @@ function encodeCodeBlockPositioned(
   const subListId = ctx.nextElementId++;
   const { xml: innerXml } = encodeParaPositioned(para, ctx, 0, "", innerW);
 
-  const prefix = secPr ? `<hp:run charPrIDRef="0">${secPr}</hp:run>` : "";
   const linesegXml = buildLineSeg(
     vertPos,
     vertSize,
@@ -1198,7 +1197,7 @@ function encodeCodeBlockPositioned(
 
   const xml =
     `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0">` +
-    prefix +
+    secPr +
     `<hp:run charPrIDRef="0">` +
     `<hp:tbl id="${ctx.nextElementId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE" rowCnt="1" colCnt="1" cellSpacing="0" borderFillIDRef="${codeBfId}" noAdjust="0">` +
     `<hp:sz width="${cellW}" widthRelTo="ABSOLUTE" height="0" heightRelTo="ABSOLUTE" protect="0"/>` +
@@ -1213,7 +1212,7 @@ function encodeCodeBlockPositioned(
     `<hp:cellSpan colSpan="1" rowSpan="1"/>` +
     `<hp:cellSz width="${cellW}" height="0"/>` +
     `<hp:cellMargin left="283" right="283" top="141" bottom="141"/>` +
-    `</hp:tc></hp:tr></hp:tbl><hp:t></hp:t></hp:run>` +
+    `</hp:tc></hp:tr></hp:tbl><hp:t> </hp:t></hp:run>` +
     linesegXml +
     `</hp:p>`;
 
@@ -1344,7 +1343,7 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
 }
 
 function encodeImgWrapped(img: ImgNode, ctx: HwpxCtx): string {
-  return `<hp:run charPrIDRef="0">${encodeImage(img, ctx)}<hp:t></hp:t></hp:run>`;
+  return `<hp:run charPrIDRef="0">${encodeImage(img, ctx)}<hp:t> </hp:t></hp:run>`;
 }
 
 // ─── 표(Grid) 인코딩 ─────────────────────────────────────────
@@ -1357,7 +1356,6 @@ function encodeGridPositioned(
   hfRun = "",
 ): { xml: string; nextVertPos: number } {
   const gridXml = buildGridXml(grid, ctx);
-  const prefix = secPr ? `<hp:run charPrIDRef="0">${secPr}</hp:run>` : "";
   const fs = 1000;
   const sp = 600;
   const vs = fs + sp;
@@ -1365,9 +1363,9 @@ function encodeGridPositioned(
 
   const xml =
     `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">` +
-    prefix +
+    secPr +
     hfRun +
-    `<hp:run charPrIDRef="0">${gridXml}<hp:t></hp:t></hp:run>` +
+    `<hp:run charPrIDRef="0">${gridXml}<hp:t> </hp:t></hp:run>` +
     linesegXml +
     `</hp:p>`;
 
@@ -1406,34 +1404,28 @@ function buildGridXml(grid: GridNode, ctx: HwpxCtx): string {
     colCount = Math.max(colCount, tableMap[ri].length);
   if (colCount === 0) colCount = 1;
 
-  // 컬럼 너비 계산
+  // 컬럼 너비 계산 (Bug 6: 균등 배분 금지, 원본 보존)
   const totalW = ctx.availableWidth;
-  const defW = Math.round(totalW / colCount);
   const colWidths: number[] = [];
 
   if (grid.props.colWidths && grid.props.colWidths.length === colCount) {
-    const src = [...grid.props.colWidths];
-    const avPt = Metric.hwpToPt(totalW);
-    const known = src.filter((w) => w > 0).reduce((s, w) => s + w, 0);
-    const zeroCnt = src.filter((w) => w <= 0).length;
-    const fill = zeroCnt > 0 ? (avPt - known) / zeroCnt : 0;
-    for (let i = 0; i < src.length; i++) {
-      colWidths.push(
-        Metric.ptToHwp(
-          src[i] > 0 ? src[i] : Math.max(fill, Metric.hwpToPt(defW)),
-        ),
-      );
+    // pt -> HWPUNIT 변환하여 원본 값 보존
+    for (const wPt of grid.props.colWidths) {
+      colWidths.push(Metric.ptToHwp(wPt));
     }
   } else {
+    // 너비 정보가 없을 때만 균등 배분
+    const defW = Math.round(totalW / colCount);
     for (let c = 0; c < colCount; c++) colWidths.push(defW);
   }
 
-  // 너비 비율 보정
+  // 본문 너비 초과 시에만 비율 축소 보정
   const rawTotal = colWidths.reduce((s, w) => s + w, 0);
-  if (rawTotal > totalW * 1.05) {
+  if (rawTotal > totalW && rawTotal > 0) {
     const scale = totalW / rawTotal;
-    for (let i = 0; i < colWidths.length; i++)
-      colWidths[i] = Math.round(colWidths[i] * scale);
+    for (let i = 0; i < colWidths.length; i++) {
+      colWidths[i] = Math.max(100, Math.round(colWidths[i] * scale));
+    }
   }
   const actualTotal = colWidths.reduce((s, w) => s + w, 0);
 
@@ -1478,7 +1470,7 @@ function buildGridXml(grid: GridNode, ctx: HwpxCtx): string {
       let cellW = 0;
       for (let sc = ci; sc < ci + cell.cs && sc < colWidths.length; sc++)
         cellW += colWidths[sc];
-      if (!cellW) cellW = defW * cell.cs;
+      if (!cellW) cellW = Math.round(totalW / colCount) * cell.cs;
 
       const innerW = Math.max(cellW - 282, 100);
       const parasXml =
@@ -1486,7 +1478,7 @@ function buildGridXml(grid: GridNode, ctx: HwpxCtx): string {
           ? cell.kids
               .map((p) => encodeParaPositioned(p, ctx, 0, "", innerW).xml)
               .join("")
-          : `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0"><hp:run charPrIDRef="0"><hp:t></hp:t></hp:run></hp:p>`;
+          : `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0"><hp:run charPrIDRef="0"><hp:t> </hp:t></hp:run></hp:p>`;
 
       const subListId = ctx.nextElementId++;
       const vAlign =

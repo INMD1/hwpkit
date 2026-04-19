@@ -24,7 +24,7 @@ export interface ImgLayout {
 }
 export type VAlign = 'top' | 'mid' | 'bot';
 export type Heading = 1 | 2 | 3 | 4 | 5 | 6;
-export type StrokeKind = 'solid' | 'dash' | 'dot' | 'double' | 'none';
+export type StrokeKind = 'solid' | 'dash' | 'dot' | 'double' | 'none' | 'dashDot' | 'dashDotDot' | 'wave';
 
 export interface TextProps {
   b?: boolean;
