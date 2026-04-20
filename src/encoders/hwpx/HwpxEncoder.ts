@@ -610,7 +610,7 @@ export class HwpxEncoder implements Encoder {
       const entries: { name: string; data: Uint8Array; mime: string }[] = [
         {
           name: "mimetype",
-          data: TextKit.encode("application/hwp+zip"),
+          data: new TextEncoder().encode("application/hwp+zip"),
           mime: "",
         },
         {
@@ -685,7 +685,7 @@ export class HwpxEncoder implements Encoder {
 const VERSION_XML =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
   `<hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" ` +
-  `targetApplication="WORDPROCESSOR" major="5" minor="1" micro="0" buildNumber="1" ` +
+  `targetApplication="WORDPROCESSING" major="5" minor="1" micro="0" buildNumber="1" ` +
   `os="1" xmlVersion="1.4" application="Hancom Office Hangul" appVersion="11, 0, 0, 0"/>`;
 
 const CONTAINER_XML =
@@ -773,6 +773,29 @@ function buildSettingsXml(): string {
   );
 }
 
+function buildNumberingsXml(): string {
+  return (
+    `<hh:numberings itemCnt="1">` +
+    `<hh:numbering id="1" start="1">` +
+    `<hh:paraHead start="1" level="1" align="LEFT" ` +
+    `useInstWidth="1" autoIndent="0" widthAdjust="0" ` +
+    `textOffsetType="PERCENT" textOffset="50" ` +
+    `numFormat="BULLET" charPrIDRef="0" checkable="0"/>` +
+    `</hh:numbering></hh:numberings>`
+  );
+}
+
+function buildBulletsXml(): string {
+  return (
+    `<hh:bullets itemCnt="1">` +
+    `<hh:bullet id="1" charPrIDRef="0" start="1" numFormat="BULLET">` +
+    `<hh:paraHead level="1" numChar="&#x2022;"/>` +
+    `<hh:paraHead level="2" numChar="&#x2022;"/>` +
+    `<hh:paraHead level="3" numChar="&#x2022;"/>` +
+    `</hh:bullet></hh:bullets>`
+  );
+}
+
 // ─── header.xml ──────────────────────────────────────────────
 
 function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
@@ -849,6 +872,8 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
     borderFillXml +
     `<hh:charProperties itemCnt="${ctx.charPrs.length}">${charPrXml}</hh:charProperties>` +
     `<hh:tabProperties itemCnt="1"><hh:tabPr id="0" autoTabLeft="0" autoTabRight="0"/></hh:tabProperties>` +
+    buildNumberingsXml() +
+    buildBulletsXml() +
     `<hh:paraProperties itemCnt="${ctx.paraPrs.length}">${paraPrXml}</hh:paraProperties>` +
     stylesXml +
     `</hh:refList>` +
@@ -1056,12 +1081,12 @@ function buildSecPrXml(dims: PageDims): string {
     `</hp:pageBorderFill>`;
 
   return (
-    `<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">` +
+    `<hp:secPr id="0" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">` +
     `<hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/>` +
     `<hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/>` +
     `<hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/>` +
     `<hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/>` +
-    `<hp:pagePr landscape="${dims.orient === 'landscape' ? 'WIDELY' : 'NARROWLY'}" width="${wHwp}" height="${hHwp}" gutterType="LEFT_ONLY">` +
+    `<hp:pagePr landscape="${dims.orient === 'landscape' ? 'NARROWLY' : 'WIDELY'}" width="${wHwp}" height="${hHwp}" gutterType="LEFT_ONLY">` +
     `<hp:margin header="${headerZone}" footer="${footerZone}" gutter="0" left="${ml}" right="${mr}" top="${mt}" bottom="${mb}"/>` +
     `</hp:pagePr>` +
     `<hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/>` +
@@ -1074,7 +1099,7 @@ function buildSecPrXml(dims: PageDims): string {
     `<hp:endNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar="" supscript="1"/>` +
     `<hp:noteLine length="-1" type="SOLID" width="0.25 mm" color="#000000"/>` +
     `<hp:noteSpacing betweenNotes="0" belowLine="0" aboveLine="1000"/>` +
-    `<hh:numbering type="CONTINUOUS" newNum="1"/>` +
+    `<hp:numbering type="CONTINUOUS" newNum="1"/>` +
     `<hp:placement place="END_OF_DOCUMENT" beneathText="0"/>` +
     `</hp:endNotePr>` +
     pageBorderFill +
@@ -1321,8 +1346,10 @@ function encodeParaKids(kids: ParaNode["kids"], ctx: HwpxCtx): string {
   let currentRunContent = "";
 
   const flushRun = () => {
-    if (currentRunCharPrId !== null && currentRunContent) {
-      xml += `<hp:run charPrIDRef="${currentRunCharPrId}">${currentRunContent}</hp:run>`;
+    if (currentRunCharPrId !== null) {
+      // 내용이 없더라도 빈 hp:t를 생성하여 '텍스트 없음' 오류 방지
+      const content = currentRunContent || `<hp:t xml:space="preserve"> </hp:t>`;
+      xml += `<hp:run charPrIDRef="${currentRunCharPrId}">${content}</hp:run>`;
     }
     currentRunCharPrId = null;
     currentRunContent = "";
@@ -1643,22 +1670,24 @@ function buildGridXml(
         cellW += colWidths[sc];
       if (!cellW) cellW = Math.round(totalW / colCount) * cell.cs;
 
-      const innerW = Math.max(cellW - 282, 100);
+      const subListId = ctx.nextElementId++;
+
+      // 셀 여백 (기본 141)
+      const padL = cp.padL !== undefined ? Metric.ptToHwp(cp.padL) : 141;
+      const padR = cp.padR !== undefined ? Metric.ptToHwp(cp.padR) : 141;
+      const padT = cp.padT !== undefined ? Metric.ptToHwp(cp.padT) : 141;
+      const padB = cp.padB !== undefined ? Metric.ptToHwp(cp.padB) : 141;
+
+      const innerW = Math.max(cellW - padL - padR, 100);
       const parasXml =
         cell.kids.length > 0
           ? cell.kids
               .map((p) => encodeParaPositioned(p, ctx, 0, "", innerW).xml)
               .join("")
-          : `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0"><hp:run charPrIDRef="0"><hp:t> </hp:t></hp:run></hp:p>`;
+          : `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0"><hp:run charPrIDRef="0"><hp:t xml:space="preserve"> </hp:t></hp:run></hp:p>`;
 
-      const subListId = ctx.nextElementId++;
       const vAlign =
         cp.va === "mid" ? "CENTER" : cp.va === "bot" ? "BOTTOM" : "TOP";
-
-      const padL = cp.padL !== undefined ? Metric.ptToHwp(cp.padL) : 141;
-      const padR = cp.padR !== undefined ? Metric.ptToHwp(cp.padR) : 141;
-      const padT = cp.padT !== undefined ? Metric.ptToHwp(cp.padT) : 141;
-      const padB = cp.padB !== undefined ? Metric.ptToHwp(cp.padB) : 141;
 
       cellsXml +=
         `<hp:tc name="" header="0" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}">` +
@@ -1667,7 +1696,7 @@ function buildGridXml(
         `<hp:cellSz width="${cellW}" height="${rowHeights[ri]}"/>` +
         `<hp:cellMargin left="${padL}" right="${padR}" top="${padT}" bottom="${padB}"/>` +
         `<hp:subList id="${subListId}" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${vAlign}" ` +
-        `linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">` +
+        `linkListIDRef="0" linkListNextIDRef="0" textWidth="${innerW}" textHeight="${Math.max(100, rowHeights[ri] - padT - padB)}" hasTextRef="0" hasNumRef="0">` +
         parasXml +
         `</hp:subList>` +
         `</hp:tc>`;
@@ -1681,7 +1710,7 @@ function buildGridXml(
     `<hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="${totalH}" heightRelTo="ABSOLUTE" protect="0"/>` +
     `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>` +
     `<hp:outMargin left="138" right="138" top="138" bottom="138"/>` +
-    `<hp:inMargin left="138" right="138" top="138" bottom="138"/>` +
+    `<hp:inMargin left="0" right="0" top="0" bottom="0"/>` +
     rowsXml +
     `</hp:tbl>`;
 
