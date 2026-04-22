@@ -8,7 +8,6 @@
  *  4. 두 패스 구조   — Pre-scan(등록) → Encode(생성)
  */
 
-import type { Encoder } from "../../contract/encoder";
 import type {
   DocRoot,
   ParaNode,
@@ -21,6 +20,7 @@ import type {
   LinkNode,
 } from "../../model/doc-tree";
 import type { Outcome } from "../../contract/result";
+import { BaseEncoder } from "../../core/BaseEncoder";
 import type {
   DocMeta,
   PageDims,
@@ -549,8 +549,8 @@ function scanContent(kids: ContentNode[], ctx: HwpxCtx): void {
 
 // ─── Encoder 클래스 ──────────────────────────────────────────
 
-export class HwpxEncoder implements Encoder {
-  readonly format = "hwpx";
+export class HwpxEncoder extends BaseEncoder {
+  protected getFormat(): string { return "hwpx"; }
 
   async encode(doc: DocRoot): Promise<Outcome<Uint8Array>> {
     try {
@@ -599,38 +599,38 @@ export class HwpxEncoder implements Encoder {
 
       // 패스 1: Pre-scan — 모든 charPr/paraPr/이미지/테두리 사전 등록
       scanContent(sheet?.kids ?? [], ctx);
-      if (sheet?.header) for (const p of sheet.header) scanPara(p, ctx);
-      if (sheet?.footer) for (const p of sheet.footer) scanPara(p, ctx);
+      if (sheet?.headers?.default) for (const p of sheet.headers.default) scanPara(p, ctx);
+      if (sheet?.footers?.default) for (const p of sheet.footers.default) scanPara(p, ctx);
 
       // 패스 2: Encode — section 먼저 (borderFill 동적 등록 완료 후 header 생성)
-      const sectionData = TextKit.encode(buildSectionXml(sheet, dims, ctx));
-      const headerData = TextKit.encode(buildHeaderXml(dims, doc.meta, ctx));
+      const sectionData = this.stringToBytes(buildSectionXml(sheet, dims, ctx));
+      const headerData = this.stringToBytes(buildHeaderXml(dims, doc.meta, ctx));
       const previewText = extractPreviewText(sheet);
 
       const entries: { name: string; data: Uint8Array; mime: string }[] = [
         {
           name: "mimetype",
-          data: new TextEncoder().encode("application/hwp+zip"),
+          data: new TextEncoder().encode("application/vnd.hancom.hwpx"),
           mime: "",
         },
         {
           name: "version.xml",
-          data: TextKit.encode(VERSION_XML),
+          data: this.stringToBytes(VERSION_XML),
           mime: "application/xml",
         },
         {
           name: "META-INF/container.xml",
-          data: TextKit.encode(CONTAINER_XML),
+          data: this.stringToBytes(CONTAINER_XML),
           mime: "application/xml",
         },
         {
           name: "META-INF/container.rdf",
-          data: TextKit.encode(CONTAINER_RDF),
+          data: this.stringToBytes(CONTAINER_RDF),
           mime: "application/rdf+xml",
         },
         {
           name: "Contents/content.hpf",
-          data: TextKit.encode(buildContentHpf(ctx, doc.meta)),
+          data: this.stringToBytes(buildContentHpf(ctx, doc.meta)),
           mime: "application/hwpml-package+xml",
         },
         {
@@ -645,17 +645,17 @@ export class HwpxEncoder implements Encoder {
         },
         {
           name: "Preview/PrvText.txt",
-          data: TextKit.encode(previewText),
+          data: this.stringToBytes(previewText),
           mime: "text/plain",
         },
         {
           name: "settings.xml",
-          data: TextKit.encode(buildSettingsXml()),
+          data: this.stringToBytes(buildSettingsXml()),
           mime: "application/xml",
         },
         {
           name: "META-INF/manifest.xml",
-          data: TextKit.encode(MANIFEST_XML),
+          data: this.stringToBytes(MANIFEST_XML),
           mime: "text/xml",
         },
       ];
@@ -673,7 +673,7 @@ export class HwpxEncoder implements Encoder {
         entries.push({ name: `BinData/${bin.name}`, data: bin.data, mime: ct });
       }
 
-      return succeed(await ArchiveKit.zip(entries));
+      return succeed(await this.zip(entries));
     } catch (e: any) {
       return fail(`HWPX 인코딩 오류: ${e?.message ?? String(e)}`);
     }
@@ -1182,9 +1182,9 @@ function encodeParaPositioned(
   hfRun = "",
 ): { xml: string; nextVertPos: number } {
   // ✅ 표(Grid)를 포함하는 단락인지 확인
-  const gridKid = para.kids.find((k) => k.tag === "grid");
+  const gridKid = para.kids.find((k): k is GridNode => k.tag === "grid");
   if (gridKid) {
-    return encodeTablePara(para, gridKid as GridNode, ctx, vertPos, secPr, hfRun);
+    return encodeTablePara(para, gridKid, ctx, vertPos, secPr, hfRun);
   }
 
   const paraPrId = ctx.paraPrMap.get(paraPrKey(para.props)) ?? 0;

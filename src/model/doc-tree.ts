@@ -44,7 +44,7 @@ export interface LinkNode {
 export interface ParaNode {
   tag: 'para';
   props: ParaProps;
-  kids: (SpanNode | ImgNode | LinkNode)[];
+  kids: (SpanNode | ImgNode | LinkNode | GridNode)[];
 }
 
 // ─── 표(Grid) 노드 ─────────────────────────────────────────

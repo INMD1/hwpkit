@@ -1,13 +1,13 @@
-import type { Encoder } from '../../contract/encoder';
 import type { DocRoot, ParaNode, SpanNode, GridNode, ContentNode, ImgNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
 import type { Stroke } from '../../model/doc-props';
 import { succeed, fail } from '../../contract/result';
 import { TextKit } from '../../toolkit/TextKit';
 import { registry } from '../../pipeline/registry';
+import { BaseEncoder } from '../../core/BaseEncoder';
 
-export class MdEncoder implements Encoder {
-  readonly format = 'md';
+export class MdEncoder extends BaseEncoder {
+  protected getFormat(): string { return 'md'; }
 
   async encode(doc: DocRoot): Promise<Outcome<Uint8Array>> {
     try {
@@ -15,12 +15,12 @@ export class MdEncoder implements Encoder {
       const parts: string[] = [];
       for (const sheet of doc.kids) {
         // Warn about header/footer loss
-        if (sheet.header && sheet.header.length > 0) warns.push('[SHIELD] MD: 머리글(header) 표현 불가 — 손실됨');
-        if (sheet.footer && sheet.footer.length > 0) warns.push('[SHIELD] MD: 바닥글(footer) 표현 불가 — 손실됨');
+        if (sheet.headers && sheet.headers.default && sheet.headers.default.length > 0) warns.push('[SHIELD] MD: 머리글(header) 표현 불가 — 손실됨');
+        if (sheet.footers && sheet.footers.default && sheet.footers.default.length > 0) warns.push('[SHIELD] MD: 바닥글(footer) 표현 불가 — 손실됨');
 
         for (const kid of sheet.kids) parts.push(encodeContent(kid, warns));
       }
-      return succeed(TextKit.encode(parts.join('\n\n')), warns);
+      return succeed(this.stringToBytes(parts.join('\n\n')), warns);
     } catch (e: any) {
       return fail(`MD encode error: ${e?.message ?? String(e)}`);
     }

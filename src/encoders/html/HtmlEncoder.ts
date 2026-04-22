@@ -1,12 +1,12 @@
-import type { Encoder } from '../../contract/encoder';
 import type { DocRoot, ParaNode, SpanNode, GridNode, ContentNode, ImgNode, LinkNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
 import { succeed, fail } from '../../contract/result';
 import { TextKit } from '../../toolkit/TextKit';
 import { registry } from '../../pipeline/registry';
+import { BaseEncoder } from '../../core/BaseEncoder';
 
-export class HtmlEncoder implements Encoder {
-  readonly format = 'html';
+export class HtmlEncoder extends BaseEncoder {
+  protected getFormat(): string { return 'html'; }
 
   async encode(doc: DocRoot): Promise<Outcome<Uint8Array>> {
     try {
@@ -15,8 +15,8 @@ export class HtmlEncoder implements Encoder {
 
       for (const sheet of doc.kids) {
         // Header/footer as comments
-        if (sheet.header && sheet.header.length > 0) {
-          const hText = sheet.header.map(p => encodePara(p, warns)).join('');
+        if (sheet.headers?.default && sheet.headers.default.length > 0) {
+          const hText = sheet.headers.default.map((p: ParaNode) => encodePara(p, warns)).join('');
           bodyParts.push(`<div class="hwp-header">${hText}</div>`);
         }
 
@@ -24,16 +24,16 @@ export class HtmlEncoder implements Encoder {
           bodyParts.push(encodeContent(kid, warns));
         }
 
-        if (sheet.footer && sheet.footer.length > 0) {
-          const fText = sheet.footer.map(p => encodePara(p, warns)).join('');
+        if (sheet.footers?.default && sheet.footers.default.length > 0) {
+          const fText = sheet.footers.default.map((p: ParaNode) => encodePara(p, warns)).join('');
           bodyParts.push(`<div class="hwp-footer">${fText}</div>`);
         }
       }
 
-      const title = esc(doc.meta?.title ?? '');
+      const title = this.escapeXml(doc.meta?.title ?? '');
       const html = `<!DOCTYPE html>\n<html lang="ko">\n<head>\n<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width, initial-scale=1.0">\n<title>${title}</title>\n<style>\n${BASE_CSS}\n</style>\n</head>\n<body>\n<div class="hwp-doc">\n${bodyParts.join('\n')}\n</div>\n</body>\n</html>`;
 
-      return succeed(TextKit.encode(html), warns);
+      return succeed(this.stringToBytes(html), warns);
     } catch (e: any) {
       return fail(`HTML encode error: ${e?.message ?? String(e)}`);
     }
@@ -62,7 +62,7 @@ function encodePara(para: ParaNode, warns: string[]): string {
     if (k.tag === 'link') {
       const link = k as LinkNode;
       const inner = link.kids.map(s => encodeSpan(s, warns)).join('');
-      return `<a href="${esc(link.href)}">${inner}</a>`;
+      return `<a href="${TextKit.escapeXml(link.href)}">${inner}</a>`;
     }
     return '';
   }).join('');
@@ -100,7 +100,7 @@ function encodeSpan(span: SpanNode, warns: string[]): string {
 
   for (const kid of span.kids) {
     if (kid.tag === 'txt') {
-      parts.push(esc(kid.content));
+      parts.push(TextKit.escapeXml(kid.content));
     } else if (kid.tag === 'br') {
       parts.push('<br>');
     } else if (kid.tag === 'pb') {
@@ -119,7 +119,7 @@ function encodeSpan(span: SpanNode, warns: string[]): string {
 
   const p = span.props;
   const css: string[] = [];
-  if (p.font) css.push(`font-family:${esc(p.font)}`);
+  if (p.font) css.push(`font-family:${TextKit.escapeXml(p.font)}`);
   if (p.pt) css.push(`font-size:${p.pt}pt`);
   if (p.color) css.push(`color:#${p.color}`);
   if (p.bg) css.push(`background-color:#${p.bg}`);
@@ -140,7 +140,7 @@ function encodeSpan(span: SpanNode, warns: string[]): string {
 function encodeImage(img: ImgNode): string {
   const wStyle = img.w ? ` width="${Math.round(img.w / 72 * 96)}px"` : '';
   const hStyle = img.h ? ` height="${Math.round(img.h / 72 * 96)}px"` : '';
-  const alt = esc(img.alt ?? '');
+  const alt = TextKit.escapeXml(img.alt ?? '');
   return `<img src="data:${img.mime};base64,${img.b64}" alt="${alt}"${wStyle}${hStyle}>`;
 }
 
@@ -196,10 +196,6 @@ function encodeGrid(grid: GridNode, warns: string[]): string {
   }
 
   return `<table>\n<tbody>\n${rows}</tbody>\n</table>\n`;
-}
-
-function esc(s: string): string {
-  return TextKit.escapeXml(s);
 }
 
 registry.registerEncoder(new HtmlEncoder());

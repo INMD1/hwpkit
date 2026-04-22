@@ -8,9 +8,12 @@ import '../decoders/hwpx/HwpxDecoder';
 import '../decoders/hwp/HwpScanner';
 import '../decoders/docx/DocxDecoder';
 import '../decoders/md/MdDecoder';
+import '../decoders/html/HtmlDecoder';
 import '../encoders/hwpx/HwpxEncoder';
 import '../encoders/docx/DocxEncoder';
 import '../encoders/md/MdEncoder';
+import '../encoders/html/HtmlEncoder';
+import '../encoders/hwp/HwpEncoder';
 
 export class Pipeline {
   private constructor(private raw: Uint8Array, private srcFmt: string) {}

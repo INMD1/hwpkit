@@ -1,4 +1,3 @@
-import type { Encoder } from '../../contract/encoder';
 import type { DocRoot, ParaNode, SpanNode, GridNode, ContentNode, ImgNode, SheetNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
 import type { PageDims, GridProps, CellProps } from '../../model/doc-props';
@@ -8,11 +7,12 @@ import { Metric } from '../../safety/StyleBridge';
 import { ArchiveKit } from '../../toolkit/ArchiveKit';
 import { TextKit } from '../../toolkit/TextKit';
 import { registry } from '../../pipeline/registry';
+import { BaseEncoder } from '../../core/BaseEncoder';
 
 interface ImageEntry { rId: string; name: string; data: Uint8Array; ext: string }
 
-export class DocxEncoder implements Encoder {
-  readonly format = 'docx';
+export class DocxEncoder extends BaseEncoder {
+  protected getFormat(): string { return 'docx'; }
 
   async encode(doc: DocRoot): Promise<Outcome<Uint8Array>> {
     try {
@@ -27,8 +27,8 @@ export class DocxEncoder implements Encoder {
       collectImages(kids, ctx);
 
       // Header / footer
-      let headerParas = sheet?.header;
-      let footerParas = sheet?.footer;
+      let headerParas = sheet?.headers?.default;
+      let footerParas = sheet?.footers?.default;
       const hasHeader = headerParas && headerParas.length > 0;
       const hasFooter = footerParas && footerParas.length > 0;
 
@@ -43,27 +43,27 @@ export class DocxEncoder implements Encoder {
       const numInfo = collectNumbering(kids);
 
       const entries: { name: string; data: Uint8Array }[] = [
-        { name: '[Content_Types].xml', data: TextKit.encode(contentTypes(images, hasHeader, hasFooter)) },
-        { name: '_rels/.rels', data: TextKit.encode(pkgRels()) },
-        { name: 'word/document.xml', data: TextKit.encode(documentXml(kids, dims, ctx, headerRId, footerRId)) },
-        { name: 'word/styles.xml', data: TextKit.encode(stylesXml()) },
-        { name: 'word/settings.xml', data: TextKit.encode(settingsXml()) },
-        { name: 'word/_rels/document.xml.rels', data: TextKit.encode(docRels(images, headerRId, footerRId, numInfo.hasLists)) },
-        { name: 'docProps/app.xml', data: TextKit.encode(appXml()) },
-        { name: 'docProps/core.xml', data: TextKit.encode(coreXml(doc.meta)) },
+        { name: '[Content_Types].xml', data: this.stringToBytes(contentTypes(images, hasHeader, hasFooter)) },
+        { name: '_rels/.rels', data: this.stringToBytes(pkgRels()) },
+        { name: 'word/document.xml', data: this.stringToBytes(documentXml(kids, dims, ctx, headerRId, footerRId)) },
+        { name: 'word/styles.xml', data: this.stringToBytes(stylesXml()) },
+        { name: 'word/settings.xml', data: this.stringToBytes(settingsXml()) },
+        { name: 'word/_rels/document.xml.rels', data: this.stringToBytes(docRels(images, headerRId, footerRId, numInfo.hasLists)) },
+        { name: 'docProps/app.xml', data: this.stringToBytes(appXml()) },
+        { name: 'docProps/core.xml', data: this.stringToBytes(coreXml(doc.meta)) },
       ];
 
       // Add numbering.xml if needed
       if (numInfo.hasLists) {
-        entries.push({ name: 'word/numbering.xml', data: TextKit.encode(numberingXml(numInfo)) });
+        entries.push({ name: 'word/numbering.xml', data: this.stringToBytes(numberingXml(numInfo)) });
       }
 
       // Add header/footer files
       if (hasHeader) {
-        entries.push({ name: 'word/header1.xml', data: TextKit.encode(headerFooterXml('hdr', headerParas!, ctx)) });
+        entries.push({ name: 'word/header1.xml', data: this.stringToBytes(headerFooterXml('hdr', headerParas!, ctx)) });
       }
       if (hasFooter) {
-        entries.push({ name: 'word/footer1.xml', data: TextKit.encode(headerFooterXml('ftr', footerParas!, ctx)) });
+        entries.push({ name: 'word/footer1.xml', data: this.stringToBytes(headerFooterXml('ftr', footerParas!, ctx)) });
       }
 
       // Add image media files
@@ -71,7 +71,7 @@ export class DocxEncoder implements Encoder {
         entries.push({ name: `word/media/${img.name}`, data: img.data });
       }
 
-      return succeed(await ArchiveKit.zip(entries));
+      return succeed(await this.zip(entries));
     } catch (e: any) {
       return fail(`DOCX encode error: ${e?.message ?? String(e)}`);
     }

@@ -1,4 +1,3 @@
-import type { Decoder } from '../../contract/decoder';
 import type { DocRoot, ContentNode, ParaNode, SpanNode, GridNode, ImgNode, PageNumNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
 import type { DocMeta, PageDims, TextProps, ParaProps, CellProps, GridProps, Stroke, ImgLayout, ImgWrap, ImgHorzAlign, ImgVertAlign, ImgHorzRelTo, ImgVertRelTo } from '../../model/doc-props';
@@ -11,6 +10,7 @@ import { ArchiveKit } from '../../toolkit/ArchiveKit';
 import { XmlKit } from '../../toolkit/XmlKit';
 import { TextKit } from '../../toolkit/TextKit';
 import { registry } from '../../pipeline/registry';
+import { BaseDecoder } from '../../core/BaseDecoder';
 
 interface BorderFillInfo {
   stroke?: Stroke;   // uniform fallback (used when all sides are the same)
@@ -43,8 +43,8 @@ interface DecCtx {
   warns: string[];
 }
 
-export class HwpxDecoder implements Decoder {
-  readonly format = 'hwpx';
+export class HwpxDecoder extends BaseDecoder {
+  protected getFormat(): string { return 'hwpx'; }
 
   async decode(data: Uint8Array): Promise<Outcome<DocRoot>> {
     const shield = new ShieldedParser();
@@ -457,7 +457,7 @@ function decodeSection(sec: any, dims: PageDims, ctx: DecCtx) {
   return buildSheet(
     kids.filter(Boolean) as ContentNode[],
     pageDims,
-    { header: headerParas, footer: footerParas },
+    { headers: { default: headerParas }, footers: { default: footerParas } },
   );
 }
 
@@ -557,9 +557,15 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   const runs = getTag(p, 'hp:run', 'hp:RUN');
   const kids: (SpanNode | ImgNode)[] = [];
 
+  // DEBUG: Check for images in paragraph
+  let picCount = 0;
   for (const run of runs) {
     // Images inside run
     const pics = getTag(run, 'hp:pic', 'hp:PIC');
+    if (pics.length > 0) {
+      console.log(`[HwpxDecoder:decodePara] Found ${pics.length} images in run`);
+      picCount += pics.length;
+    }
     for (const pic of pics) {
       const img = decodePic(pic, ctx);
       if (img) kids.push(img);
@@ -590,6 +596,9 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
 
     const spanProps = resolveCharPr(run, ctx);
     kids.push(buildSpan(content, spanProps));
+  }
+  if (picCount > 0) {
+    console.log(`[HwpxDecoder:decodePara] Total ${picCount} images decoded in paragraph`);
   }
 
   // pageBreak="1" → prepend a pb node in its own span
@@ -671,14 +680,14 @@ function extractHwpxLayout(posAttr: any, pic: any): ImgLayout {
   const treatAsChar = posAttr.treatAsChar === '1' || posAttr.treatAsChar === 'true';
   if (treatAsChar) return { wrap: 'inline' };
 
-  // textWrap → wrap
-  const textWrap: string = (pic?._attr?.textWrap ?? pic?.['hp:pic']?.[0]?._attr?.textWrap ?? 'TOP_AND_BOTTOM');
+  // textWrap → wrap (direct attribute of hp:pic element)
+  const textWrap: string = (pic?._attr?.textWrap ?? pic?.pic?.[0]?._attr?.textWrap ?? 'TOP_AND_BOTTOM');
   const wrapMap: Record<string, ImgWrap> = {
-    TOP_AND_BOTTOM: 'square',
+    TOP_AND_BOTTOM: 'inline',  // inline wrapping (text flows above and below)
     SQUARE: 'square',
     BOTH_SIDES: 'tight',
-    LEFT: 'tight',
-    RIGHT: 'tight',
+    LEFT: 'left',     // text flows only on left side
+    RIGHT: 'right',   // text flows only on right side
     LARGER_ONLY: 'tight',
     SMALLER_ONLY: 'tight',
     LARGEST_ONLY: 'tight',

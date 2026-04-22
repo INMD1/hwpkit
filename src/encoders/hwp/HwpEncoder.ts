@@ -14,8 +14,7 @@
  *     Section0 (stream) — zlib 압축된 PAGE_DEF + 문단/표 레코드
  */
 
-import type { Encoder }       from '../../contract/encoder';
-import type { DocRoot, ContentNode, ParaNode, SpanNode, GridNode, ImgNode } from '../../model/doc-tree';
+import type { DocRoot, ContentNode, ParaNode, SpanNode, GridNode, ImgNode, LinkNode } from '../../model/doc-tree';
 import type { Outcome }       from '../../contract/result';
 import type { TextProps, ParaProps, Stroke, PageDims } from '../../model/doc-props';
 import { succeed, fail }      from '../../contract/result';
@@ -24,6 +23,7 @@ import { registry }           from '../../pipeline/registry';
 import { A4 }                 from '../../model/doc-props';
 import pako                   from 'pako';
 import { TextKit }            from '../../toolkit/TextKit';
+import { BaseEncoder }        from '../../core/BaseEncoder';
 
 // ─── HWP 5.0 태그 ID ────────────────────────────────────────
 const T = 16; // HWPTAG_BEGIN
@@ -1139,8 +1139,8 @@ function validateOle2Magic(hwp: Uint8Array): boolean {
 
 // ─── Encoder 진입점 ──────────────────────────────────────────
 
-export class HwpEncoder implements Encoder {
-  readonly format = 'hwp';
+export class HwpEncoder extends BaseEncoder {
+  protected getFormat(): string { return 'hwp'; }
 
   async encode(doc: DocRoot): Promise<Outcome<Uint8Array>> {
     try {

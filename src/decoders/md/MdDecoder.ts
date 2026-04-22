@@ -1,4 +1,3 @@
-import type { Decoder } from '../../contract/decoder';
 import type { DocRoot, ContentNode, ParaNode, SpanNode, ImgNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
 import type { ParaProps, TextProps } from '../../model/doc-props';
@@ -8,16 +7,17 @@ import { buildRoot, buildSheet, buildPara, buildSpan, buildImg, buildGrid, build
 import { ShieldedParser } from '../../safety/ShieldedParser';
 import { TextKit } from '../../toolkit/TextKit';
 import { registry } from '../../pipeline/registry';
+import { BaseDecoder } from '../../core/BaseDecoder';
 
-export class MdDecoder implements Decoder {
-  readonly format = 'md';
+export class MdDecoder extends BaseDecoder {
+  protected getFormat(): string { return 'md'; }
 
   async decode(data: Uint8Array): Promise<Outcome<DocRoot>> {
     const shield = new ShieldedParser();
     const warns: string[] = [];
 
     try {
-      const text = TextKit.decode(data);
+      const text = this.bytesToString(data);
       const lines = text.split(/\r?\n/);
       const kids: ContentNode[] = [];
 

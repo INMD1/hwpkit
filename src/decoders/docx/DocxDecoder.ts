@@ -1,4 +1,3 @@
-import type { Decoder } from "../../contract/decoder";
 import type {
   DocRoot,
   ContentNode,
@@ -48,13 +47,14 @@ import {
   safeHex,
   safeStrokeDocx,
 } from "../../safety/StyleBridge";
+import { BaseDecoder } from "../../core/BaseDecoder";
 import { ArchiveKit } from "../../toolkit/ArchiveKit";
 import { XmlKit } from "../../toolkit/XmlKit";
 import { TextKit } from "../../toolkit/TextKit";
 import { registry } from "../../pipeline/registry";
 
-export class DocxDecoder implements Decoder {
-  readonly format = "docx";
+export class DocxDecoder extends BaseDecoder {
+  protected getFormat(): string { return "docx"; }
 
   async decode(data: Uint8Array): Promise<Outcome<DocRoot>> {
     const shield = new ShieldedParser();
@@ -709,6 +709,32 @@ function decodeRunOrImage(run: any, ctx: DecCtx): SpanNode | ImgNode {
 
   return decodeRun(run, ctx);
 }
+/** Decode image layout from anchor element */
+function decodeImageLayout(anchor: any): ImgLayout {
+  const wrap = anchor?.["wp:wrapTop"]?.[0] ?? anchor?.wrapTop?.[0];
+  const anchorPos = anchor?.["wp:anchorPos"]?.[0]?._attr ?? anchor?.anchorPos?.[0]?._attr ?? {};
+
+  const layout: ImgLayout = {
+    wrap: 'square',
+    horzAlign: 'left',
+    vertAlign: 'top',
+    horzRelTo: 'page',
+    vertRelTo: 'page',
+    xPt: Number(anchorPos?.x ?? 0) / 12700, // emu to pt
+    yPt: Number(anchorPos?.y ?? 0) / 12700, // emu to pt
+  };
+
+  // Parse wrap type
+  if (wrap?.["wp:none"]) layout.wrap = 'none';
+  else if (wrap?.["wp:square"]) layout.wrap = 'square';
+  else if (wrap?.["wp:tight"]) layout.wrap = 'tight';
+  else if (wrap?.["wp:through"]) layout.wrap = 'through';
+  else if (wrap?.["wp:behind"]) layout.wrap = 'behind';
+  else if (wrap?.["wp:inFront"]) layout.wrap = 'front';
+
+  return layout;
+}
+
 function decodeDrawing(drawing: any, ctx: DecCtx): ImgNode | null {
   try {
     const inline = drawing?.["wp:inline"]?.[0] ?? drawing?.inline?.[0];

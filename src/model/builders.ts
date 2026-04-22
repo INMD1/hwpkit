@@ -12,11 +12,11 @@ export function buildRoot(meta: DocMeta = {}, kids: SheetNode[] = []): DocRoot {
 export function buildSheet(
   kids: ContentNode[] = [],
   dims: PageDims = A4,
-  opts?: { header?: ParaNode[]; footer?: ParaNode[] },
+  opts?: { headers?: SheetNode["headers"]; footers?: SheetNode["footers"] },
 ): SheetNode {
   const node: SheetNode = { tag: 'sheet', dims, kids };
-  if (opts?.header) node.header = opts.header;
-  if (opts?.footer) node.footer = opts.footer;
+  if (opts?.headers) node.headers = opts.headers;
+  if (opts?.footers) node.footers = opts.footers;
   return node;
 }
 
