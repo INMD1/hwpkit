@@ -35,6 +35,7 @@ import { Metric, safeFontToKr } from "../../safety/StyleBridge";
 import { ArchiveKit } from "../../toolkit/ArchiveKit";
 import { TextKit } from "../../toolkit/TextKit";
 import { registry } from "../../pipeline/registry";
+import { HWPX_MIME_TYPE } from "./constants";
 
 // ─── HWPX 네임스페이스 ──────────────────────────────────────
 const NS = [
@@ -551,6 +552,7 @@ function scanContent(kids: ContentNode[], ctx: HwpxCtx): void {
 
 export class HwpxEncoder extends BaseEncoder {
   protected getFormat(): string { return "hwpx"; }
+  protected getAliases(): string[] { return [HWPX_MIME_TYPE, "application/hwp+zip"]; }
 
   async encode(doc: DocRoot): Promise<Outcome<Uint8Array>> {
     try {
@@ -610,7 +612,7 @@ export class HwpxEncoder extends BaseEncoder {
       const entries: { name: string; data: Uint8Array; mime: string }[] = [
         {
           name: "mimetype",
-          data: new TextEncoder().encode("application/hwp+zip"),
+          data: new TextEncoder().encode(HWPX_MIME_TYPE),
           mime: "",
         },
         {

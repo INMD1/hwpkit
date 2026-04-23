@@ -819,6 +819,7 @@ function buildParaProps(ps?: HwpParaShape): ParaProps {
 
 export class HwpScanner implements Decoder {
   readonly format = 'hwp';
+  readonly aliases = ['application/vnd.hancom.hwp'];
 
   async decode(data: Uint8Array): Promise<Outcome<DocRoot>> {
     const shield = new ShieldedParser();

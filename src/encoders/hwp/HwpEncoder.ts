@@ -1187,6 +1187,7 @@ function validateOle2Magic(hwp: Uint8Array): boolean {
 
 export class HwpEncoder extends BaseEncoder {
   protected getFormat(): string { return 'hwp'; }
+  protected getAliases(): string[] { return ['application/vnd.hancom.hwp']; }
 
   async encode(doc: DocRoot): Promise<Outcome<Uint8Array>> {
     try {

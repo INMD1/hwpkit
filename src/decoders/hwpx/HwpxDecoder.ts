@@ -11,6 +11,7 @@ import { XmlKit } from '../../toolkit/XmlKit';
 import { TextKit } from '../../toolkit/TextKit';
 import { registry } from '../../pipeline/registry';
 import { BaseDecoder } from '../../core/BaseDecoder';
+import { HWPX_MIME_TYPE } from '../../encoders/hwpx/constants';
 
 interface BorderFillInfo {
   stroke?: Stroke;   // uniform fallback (used when all sides are the same)
@@ -45,6 +46,7 @@ interface DecCtx {
 
 export class HwpxDecoder extends BaseDecoder {
   protected getFormat(): string { return 'hwpx'; }
+  protected getAliases(): string[] { return [HWPX_MIME_TYPE, 'application/hwp+zip']; }
 
   async decode(data: Uint8Array): Promise<Outcome<DocRoot>> {
     const shield = new ShieldedParser();

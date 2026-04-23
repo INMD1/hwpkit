@@ -27,9 +27,13 @@ export interface ZipEntry {
 
 export abstract class BaseEncoder implements Encoder {
   readonly format: string = this.getFormat();
+  readonly aliases: string[] = this.getAliases();
 
   /** 포맷 이름 반환 (하위 클래스에서 오버라이드) */
   protected abstract getFormat(): string;
+
+  /** 별칭 목록 반환 (하위 클래스에서 필요 시 오버라이드) */
+  protected getAliases(): string[] { return []; }
 
   /** 문서 인코딩 (하위 클래스에서 오버라이드) */
   abstract encode(doc: DocRoot): Promise<Outcome<Uint8Array>>;
