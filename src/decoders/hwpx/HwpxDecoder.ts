@@ -686,8 +686,8 @@ function extractHwpxLayout(posAttr: any, pic: any): ImgLayout {
     TOP_AND_BOTTOM: 'inline',  // inline wrapping (text flows above and below)
     SQUARE: 'square',
     BOTH_SIDES: 'tight',
-    LEFT: 'left',     // text flows only on left side
-    RIGHT: 'right',   // text flows only on right side
+    LEFT: 'tight',     // text flows only on left side
+    RIGHT: 'tight',   // text flows only on right side
     LARGER_ONLY: 'tight',
     SMALLER_ONLY: 'tight',
     LARGEST_ONLY: 'tight',

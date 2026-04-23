@@ -528,14 +528,60 @@ function mkParaCharShape(pairs: [pos: number, id: number][]): Uint8Array {
   return w.build();
 }
 
-function mkLineSeg(availWidthHwp: number, fontHwp = 1000): Uint8Array {
-  const vertSize = Math.round(fontHwp * 1.6);
-  const spacing  = vertSize - fontHwp;
-  const baseline = Math.round(fontHwp * 0.85);
+/**
+ * 5가지 LineSpacing(줄 간격) 타입에 따른 height 계산 로직
+ */
+function calcLineHeight(type: number, value: number, textHeight: number): number {
+  switch (type) {
+    case 0: return Math.floor((textHeight * value) / 100);
+    case 1: return value;
+    case 2: return Math.max(textHeight, value);
+    case 3: return textHeight + value;
+    case 4: return Math.floor(textHeight * value);
+    default: return Math.floor((textHeight * value) / 100);
+  }
+}
+
+/**
+ * LineSeg 36바이트 구조체 (HWP 5.0 공식 규격)
+ */
+function mkLineSeg(
+  textStartPos: number, vertPos: number,
+  vertSize: number, textHeight: number,
+  baseline: number, spacing: number,
+  horzPos: number, horzSize: number,
+  flags: number
+): Uint8Array {
   return new BufWriter()
-    .u32(0).i32(0).i32(vertSize).i32(fontHwp)
-    .i32(baseline).i32(spacing).i32(0).i32(availWidthHwp)
-    .build();
+    .u32(textStartPos)
+    .i32(vertPos)
+    .i32(vertSize)
+    .i32(textHeight)
+    .i32(baseline)
+    .i32(spacing)
+    .i32(horzPos)
+    .i32(horzSize)
+    .u32(flags)
+    .build(); // 36 bytes
+}
+
+function buildDefaultLineSeg(
+  availWidthHwp: number, fontHwp: number, nchars: number, paraProps?: ParaProps
+): Uint8Array {
+  const ratio = paraProps?.lineHeight ? Math.round(paraProps.lineHeight * 100) : 160;
+  const vertSize = calcLineHeight(0, ratio, fontHwp);
+  const baseline = Math.round(fontHwp * 0.85);
+  const spacing = vertSize - fontHwp;
+  // flags: bit 0 (페이지 첫 줄), bit 1 (컬럼 첫 줄)
+  const flags = 3; 
+  
+  return mkLineSeg(
+    0, 0,
+    vertSize, fontHwp,
+    baseline, spacing,
+    0, availWidthHwp,
+    flags
+  );
 }
 
 function mkSecdParaText(): Uint8Array {
@@ -647,7 +693,7 @@ function encodePicPara(
     mkRec(TAG_PARA_HEADER,            lv,     mkParaHeader(9, CTRL_MASK, psId, 1, 1, instanceId)),
     mkRec(TAG_PARA_TEXT,              lv + 1, mkPicParaText()),
     mkRec(TAG_PARA_CHAR_SHAPE,        lv + 1, mkParaCharShape([[0, 0]])),
-    mkRec(TAG_PARA_LINE_SEG,          lv + 1, mkLineSeg(availWidthHwp, hHwp)),
+    mkRec(TAG_PARA_LINE_SEG,          lv + 1, buildDefaultLineSeg(availWidthHwp, hHwp, 9)),
     mkRec(TAG_CTRL_HEADER,            lv + 1, mkObjectCtrl(CTRL_PIC, wHwp, hHwp, idGen(), imgNode.layout)),
     mkRec(TAG_SHAPE_COMPONENT_PICTURE,lv + 2, mkShapeComponentPicture(binDataId, wHwp, hHwp)),
   ];
@@ -717,7 +763,7 @@ function encodePara(
     mkRec(TAG_PARA_HEADER,     lv,     mkParaHeader(nchars, mask, psId, csPairs.length, 1, instanceId)),
     mkRec(TAG_PARA_TEXT,       lv + 1, mkParaText(text)),
     mkRec(TAG_PARA_CHAR_SHAPE, lv + 1, mkParaCharShape(csPairs)),
-    mkRec(TAG_PARA_LINE_SEG,   lv + 1, mkLineSeg(availWidthHwp, fontHwp)),
+    mkRec(TAG_PARA_LINE_SEG,   lv + 1, buildDefaultLineSeg(availWidthHwp, fontHwp, nchars, para.props)),
     ...ctrlRecords,
   ];
 }
@@ -834,7 +880,7 @@ function buildSectionParagraph(dims: PageDims, instanceId: number): Uint8Array[]
     mkRec(TAG_PARA_HEADER,    0, mkParaHeader(nchars, SECD_CTRL_MASK, 0, 1, 1, instanceId)),
     mkRec(TAG_PARA_TEXT,      1, mkSecdParaText()),
     mkRec(TAG_PARA_CHAR_SHAPE,1, mkParaCharShape([[0, 0]])),
-    mkRec(TAG_PARA_LINE_SEG,  1, mkLineSeg(availWidthHwp, 1000)),
+    mkRec(TAG_PARA_LINE_SEG,  1, buildDefaultLineSeg(availWidthHwp, 1000, nchars)),
     mkRec(TAG_CTRL_HEADER,    1, mkSectionCtrl()),
     mkRec(TAG_PAGE_DEF,       2, mkPageDef(dims)),
     mkRec(TAG_FOOTNOTE_SHAPE, 2, new Uint8Array(28)),
@@ -899,7 +945,7 @@ function buildBodyTextStream(doc: DocRoot, bank: HwpStyleBank, images: BinImage[
           chunks.push(mkRec(TAG_PARA_HEADER,     0, mkParaHeader(9, TABLE_CTRL_MASK | paraMask, 0, 1, 1, idGen())));
           chunks.push(mkRec(TAG_PARA_TEXT,       1, mkTableParaText()));
           chunks.push(mkRec(TAG_PARA_CHAR_SHAPE, 1, mkParaCharShape([[0, 0]])));
-          chunks.push(mkRec(TAG_PARA_LINE_SEG,   1, mkLineSeg(availWidthHwp, 1000)));
+          chunks.push(mkRec(TAG_PARA_LINE_SEG,   1, buildDefaultLineSeg(availWidthHwp, 1000, 9)));
           for (const r of encodeGrid(gridNode, bank, 1, idGen, availWidthHwp)) chunks.push(r);
           continue;
         }
@@ -935,7 +981,7 @@ function buildBodyTextStream(doc: DocRoot, bank: HwpStyleBank, images: BinImage[
         chunks.push(mkRec(TAG_PARA_HEADER,     0, mkParaHeader(9, TABLE_CTRL_MASK, 0, 1, 1, idGen())));
         chunks.push(mkRec(TAG_PARA_TEXT,       1, mkTableParaText()));
         chunks.push(mkRec(TAG_PARA_CHAR_SHAPE, 1, mkParaCharShape([[0, 0]])));
-        chunks.push(mkRec(TAG_PARA_LINE_SEG,   1, mkLineSeg(availWidthHwp, 1000)));
+        chunks.push(mkRec(TAG_PARA_LINE_SEG,   1, buildDefaultLineSeg(availWidthHwp, 1000, 9)));
         for (const r of encodeGrid(node as GridNode, bank, 1, idGen, availWidthHwp)) chunks.push(r);
       }
     }

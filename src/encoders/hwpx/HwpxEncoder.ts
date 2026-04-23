@@ -610,7 +610,7 @@ export class HwpxEncoder extends BaseEncoder {
       const entries: { name: string; data: Uint8Array; mime: string }[] = [
         {
           name: "mimetype",
-          data: new TextEncoder().encode("application/vnd.hancom.hwpx"),
+          data: new TextEncoder().encode("application/hwp+zip"),
           mime: "",
         },
         {
@@ -686,7 +686,7 @@ const VERSION_XML =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
   `<hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" ` +
   `targetApplication="WORDPROCESSING" major="5" minor="1" micro="0" buildNumber="1" ` +
-  `os="1" xmlVersion="1.4" application="Hancom Office Hangul" appVersion="11, 0, 0, 0"/>`;
+  `os="1" xmlVersion="1.2" application="Hancom Office Hangul" appVersion="11, 0, 0, 0"/>`;
 
 const CONTAINER_XML =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
@@ -769,6 +769,16 @@ function buildSettingsXml(): string {
     `<ha:HWPApplicationSetting xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app" ` +
     `xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0">` +
     `<ha:CaretPosition listIDRef="0" paraIDRef="0" pos="0"/>` +
+    `<config:config-item-set name="PrintInfo">` +
+    `<config:config-item name="PrintAutoFootNote" type="boolean">false</config:config-item>` +
+    `<config:config-item name="PrintAutoHeadNote" type="boolean">false</config:config-item>` +
+    `<config:config-item name="PrintMethod" type="short">4</config:config-item>` +
+    `<config:config-item name="OverlapSize" type="short">0</config:config-item>` +
+    `<config:config-item name="PrintCropMark" type="short">0</config:config-item>` +
+    `<config:config-item name="BinderHoleType" type="short">0</config:config-item>` +
+    `<config:config-item name="ZoomX" type="short">100</config:config-item>` +
+    `<config:config-item name="ZoomY" type="short">100</config:config-item>` +
+    `</config:config-item-set>` +
     `</ha:HWPApplicationSetting>`
   );
 }

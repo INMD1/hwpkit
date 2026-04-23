@@ -32,6 +32,11 @@ export const ptTo = {
   pixel: (pt: number): number => Math.round(pt * 1.333),
 };
 
+export const mmTo = {
+  /** mm → HWP unit (오버플로 방지 및 한컴 엔진 내림 처리 반영) */
+  hwpunit: (mm: number): number => Math.floor((mm * 283465) / 1000),
+};
+
 /** 다양한 단위를 pt 로 변환 */
 export const toPt = {
   /** HWP unit → pt */
