@@ -114,9 +114,10 @@ export class DocxDecoder extends BaseDecoder {
         }
       }
 
-      const docStr = TextKit.decode(docXml).trim();
+      let docStr = TextKit.decode(docXml).trim();
       if (!docStr) {
-        return fail("DOCX decode error: word/document.xml is empty");
+        warns.push("DOCX: word/document.xml is empty, using fallback empty document");
+        docStr = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>';
       }
       const docObj: any = await XmlKit.parseStrict(docStr);
 

@@ -409,25 +409,28 @@ function decodeSection(sec: any, dims: PageDims, ctx: DecCtx) {
   // Build items list preserving document order via _childOrder
   const items: { type: string; node: any }[] = [];
   const paras = getTag(sec, 'hp:p', 'hp:P');
-
-  // Also check for direct tables in section (rare but possible in some variants)
-  const directTbls = getTag(sec, 'hp:tbl', 'hp:TABLE');
-  for (const tbl of directTbls) items.push({ type: 'table', node: tbl });
+  const tbls = getTag(sec, 'hp:tbl', 'hp:TABLE');
 
   const childOrder = sec?.['_childOrder'] as string[] | undefined;
 
   if (Array.isArray(childOrder)) {
     let pi = 0;
+    let ti = 0;
     for (const tag of childOrder) {
       if ((tag === 'hp:p' || tag === 'hp:P') && pi < paras.length) {
         addParaItems(paras[pi++], items);
+      } else if ((tag === 'hp:tbl' || tag === 'hp:TABLE') && ti < tbls.length) {
+        items.push({ type: 'table', node: tbls[ti++] });
       }
     }
-    // Append any remaining
+    // Append any remaining (fallback)
     while (pi < paras.length) addParaItems(paras[pi++], items);
+    while (ti < tbls.length) items.push({ type: 'table', node: tbls[ti++] });
   } else {
-    // No order info — process paragraphs sequentially
+    // No order info — process paragraphs sequentially (fallback to previous logic)
     for (const p of paras) addParaItems(p, items);
+    // Note: direct tables are appended after paras in this fallback
+    for (const t of tbls) items.push({ type: 'table', node: t });
   }
 
   const kids: ContentNode[] = ctx.shield.guardAll(
@@ -475,8 +478,7 @@ function parseSecPrDims(secPr: any): PageDims | null {
     mb:     Metric.hwpToPt(Number(margin.bottom ?? 4252)),
     ml:     Metric.hwpToPt(Number(margin.left ?? 8504)),
     mr:     Metric.hwpToPt(Number(margin.right ?? 8504)),
-    orient: pagePr.landscape === 'NARROWLY' ? 'landscape' : 'portrait',
-  };
+    orient: pagePr.landscape === 'WIDELY' ? 'landscape' : 'portrait',  };
 }
 
 function extractSecPrDims(p: any): PageDims | null {

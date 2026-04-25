@@ -49,7 +49,7 @@ const NS = [
   'xmlns:hm="http://www.hancom.co.kr/hwpml/2011/master-page"',
   'xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf"',
   'xmlns:dc="http://purl.org/dc/elements/1.1/"',
-  'xmlns:opf="http://www.idpf.org/2007/opf/"',
+  'xmlns:opf="http://www.idpf.org/2007/opf"',
   'xmlns:ooxmlchart="http://www.hancom.co.kr/hwpml/2016/ooxmlchart"',
   'xmlns:epub="http://www.idpf.org/2007/ops"',
   'xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"',
@@ -609,10 +609,11 @@ export class HwpxEncoder extends BaseEncoder {
       const headerData = this.stringToBytes(buildHeaderXml(dims, doc.meta, ctx));
       const previewText = extractPreviewText(sheet);
 
-      const entries: { name: string; data: Uint8Array; mime: string }[] = [
+      const entries: { name: string; data: Uint8Array; mime: string; compression?: 'STORE' | 'DEFLATE' }[] = [
         {
           name: "mimetype",
           data: new TextEncoder().encode(HWPX_MIME_TYPE),
+          compression: "STORE",
           mime: "",
         },
         {
@@ -655,11 +656,6 @@ export class HwpxEncoder extends BaseEncoder {
           data: this.stringToBytes(buildSettingsXml()),
           mime: "application/xml",
         },
-        {
-          name: "META-INF/manifest.xml",
-          data: this.stringToBytes(MANIFEST_XML),
-          mime: "text/xml",
-        },
       ];
 
       for (const bin of ctx.bins) {
@@ -686,9 +682,9 @@ export class HwpxEncoder extends BaseEncoder {
 
 const VERSION_XML =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
-  `<hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" ` +
+  `<hv:HCFVersion xmlns:hv="http://www.owpml.org/owpml/2024/version" ` +
   `targetApplication="WORDPROCESSING" major="5" minor="1" micro="0" buildNumber="1" ` +
-  `os="1" xmlVersion="1.2" application="Hancom Office Hangul" appVersion="11, 0, 0, 0"/>`;
+  `os="1" xmlVersion="1.4" application="Hancom Office Hangul" appVersion="11, 0, 0, 0"/>`;
 
 const CONTAINER_XML =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
@@ -996,7 +992,7 @@ function buildHeaderFooterRunXml(
       `</hp:ctrl>`;
   }
 
-  return `<hp:run charPrIDRef="0">${inner}</hp:run>`;
+  return `<hp:run charPrIDRef="0" charTcId="0">${inner}</hp:run>`;
 }
 
 function buildSectionXml(
@@ -1054,15 +1050,15 @@ function buildSectionXml(
     const vs = 1600;
     const { xml: linesegXml } = buildLinesegarray(" ", 0, fs, vs / (fs / 100), availWidth);
     contentXml =
-      `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">` +
+      `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0" paraTcId="0">` +
       secPrXml +
       hfRunXml +
-      `<hp:run charPrIDRef="0"><hp:t xml:space="preserve"> </hp:t></hp:run>` +
+      `<hp:run charPrIDRef="0" charTcId="0"><hp:t xml:space="preserve"> </hp:t></hp:run>` +
       linesegXml +
       `</hp:p>`;
   }
 
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hs:sec ${NS}>${contentXml}</hs:sec>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hs:sec ${NS} xmlns:hwpunitchar="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">${contentXml}</hs:sec>`;
 }
 
 function buildSecPrXml(dims: PageDims): string {
@@ -1098,7 +1094,7 @@ function buildSecPrXml(dims: PageDims): string {
     `<hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/>` +
     `<hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/>` +
     `<hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/>` +
-    `<hp:pagePr landscape="${dims.orient === 'landscape' ? 'NARROWLY' : 'WIDELY'}" width="${wHwp}" height="${hHwp}" gutterType="LEFT_ONLY">` +
+    `<hp:pagePr landscape="${dims.wPt >= dims.hPt ? 'WIDELY' : 'NARROWLY'}" width="${wHwp}" height="${hHwp}" gutterType="LEFT_ONLY">` +
     `<hp:margin header="${headerZone}" footer="${footerZone}" gutter="0" left="${ml}" right="${mr}" top="${mt}" bottom="${mb}"/>` +
     `</hp:pagePr>` +
     `<hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/>` +
@@ -1235,7 +1231,7 @@ function encodeParaPositioned(
     );
 
   let runsXml = encodeParaKids(para.kids, ctx);
-  if (!runsXml) runsXml = `<hp:run charPrIDRef="0"><hp:t xml:space="preserve"> </hp:t></hp:run>`;
+  if (!runsXml) runsXml = `<hp:run charPrIDRef="0" charTcId="0"><hp:t xml:space="preserve"> </hp:t></hp:run>`;
 
   const paraText = extractParaText(para);
   const { xml: linesegXml, totalHeight } = buildLinesegarray(
@@ -1252,7 +1248,7 @@ function encodeParaPositioned(
 
   const xml =
     `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="${paraPrId}" styleIDRef="${styleIDRef}" ` +
-    `pageBreak="${hasPageBreak ? 1 : 0}" columnBreak="0" merged="0">` +
+    `pageBreak="${hasPageBreak ? 1 : 0}" columnBreak="0" merged="0" paraTcId="0">` +
     secPr +
     hfRun +
     runsXml +
@@ -1291,7 +1287,7 @@ function encodeTablePara(
 
   const xml =
     `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="${paraPrId}" styleIDRef="0" ` +
-    `pageBreak="0" columnBreak="0" merged="0">` +
+    `pageBreak="0" columnBreak="0" merged="0" paraTcId="0">` +
     secPr +
     gridXml +
     hfRun +
@@ -1329,9 +1325,9 @@ function encodeCodeBlockPositioned(
   );
 
   const xml =
-    `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0">` +
+    `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" paraTcId="0">` +
     secPr +
-    `<hp:run charPrIDRef="0">` +
+    `<hp:run charPrIDRef="0" charTcId="0">` +
     `<hp:tbl id="${ctx.nextElementId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE" rowCnt="1" colCnt="1" cellSpacing="0" borderFillIDRef="${codeBfId}" noAdjust="0">` +
     `<hp:sz width="${cellW}" widthRelTo="ABSOLUTE" height="0" heightRelTo="ABSOLUTE" protect="0"/>` +
     `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>` +
@@ -1361,7 +1357,7 @@ function encodeParaKids(kids: ParaNode["kids"], ctx: HwpxCtx): string {
     if (currentRunCharPrId !== null) {
       // 내용이 없더라도 빈 hp:t를 생성하여 '텍스트 없음' 오류 방지
       const content = currentRunContent || `<hp:t xml:space="preserve"> </hp:t>`;
-      xml += `<hp:run charPrIDRef="${currentRunCharPrId}">${content}</hp:run>`;
+      xml += `<hp:run charPrIDRef="${currentRunCharPrId}" charTcId="0">${content}</hp:run>`;
     }
     currentRunCharPrId = null;
     currentRunContent = "";
@@ -1546,9 +1542,9 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
 function encodeImgWrapped(img: ImgNode, ctx: HwpxCtx): string {
   const content = encodeImage(img, ctx);
   if (!img.b64) {
-    return `<hp:run charPrIDRef="0">${content}</hp:run>`;
+    return `<hp:run charPrIDRef="0" charTcId="0">${content}</hp:run>`;
   }
-  return `<hp:run charPrIDRef="0">${content}<hp:t xml:space="preserve"> </hp:t></hp:run>`;
+  return `<hp:run charPrIDRef="0" charTcId="0">${content}<hp:t xml:space="preserve"> </hp:t></hp:run>`;
 }
 
 // ─── 표(Grid) 인코딩 ─────────────────────────────────────────
@@ -1568,7 +1564,7 @@ function encodeGridPositioned(
   const { xml: linesegXml } = buildLinesegarray(" ", vertPos, fontSize, totalHeight / (fontSize / 100), ctx.availableWidth);
 
   const xml =
-    `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">` +
+    `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0" paraTcId="0">` +
     secPr +
     hfRun +
     gridXml +
@@ -1696,7 +1692,7 @@ function buildGridXml(
           ? cell.kids
               .map((p) => encodeParaPositioned(p, ctx, 0, "", innerW).xml)
               .join("")
-          : `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0"><hp:run charPrIDRef="0"><hp:t xml:space="preserve"> </hp:t></hp:run></hp:p>`;
+          : `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" paraTcId="0"><hp:run charPrIDRef="0" charTcId="0"><hp:t xml:space="preserve"> </hp:t></hp:run></hp:p>`;
 
       const vAlign =
         cp.va === "mid" ? "CENTER" : cp.va === "bot" ? "BOTTOM" : "TOP";

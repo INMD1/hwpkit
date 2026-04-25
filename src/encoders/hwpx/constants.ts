@@ -8,7 +8,7 @@
 // ==================== 파일 형식 관련 ====================
 
 /** HWPX 파일의 MIME 타입 (ZIP 파일 내 mimetype 파일에 저장됨) */
-export const HWPX_MIME_TYPE = "application/vnd.hancom.hwpx";
+export const HWPX_MIME_TYPE = "application/hwp+zip";
 
 /** HWPX 파일의 버전 */
 export const HWPX_VERSION = "1.2";
