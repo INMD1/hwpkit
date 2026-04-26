@@ -45,7 +45,7 @@ body { margin: 0; padding: 0; background: #f0f0f0; }
 .hwp-doc { max-width: 800px; margin: 0 auto; background: #fff; padding: 40px 60px; box-shadow: 0 0 8px rgba(0,0,0,0.15); }
 .hwp-header, .hwp-footer { color: #666; font-size: 0.9em; border-bottom: 1px solid #ddd; margin-bottom: 8px; padding-bottom: 4px; }
 .hwp-footer { border-top: 1px solid #ddd; border-bottom: none; margin-top: 8px; padding-top: 4px; }
-p { margin: 0; padding: 0; line-height: 1.6; }
+p { margin: 0; padding: 0; line-height: 1; }
 table { border-collapse: collapse; width: 100%; margin: 8px 0; }
 td, th { border: 1px solid #ccc; padding: 4px 8px; vertical-align: top; }
 img { max-width: 100%; height: auto; }
@@ -100,7 +100,9 @@ function encodeSpan(span: SpanNode, warns: string[]): string {
 
   for (const kid of span.kids) {
     if (kid.tag === 'txt') {
-      parts.push(TextKit.escapeXml(kid.content));
+      // __EXT_N__ 또는 __EXT_N_W<w>_H<h>__ 자리표시자 제거
+      const content = kid.content.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, '');
+      if (content) parts.push(TextKit.escapeXml(content));
     } else if (kid.tag === 'br') {
       parts.push('<br>');
     } else if (kid.tag === 'pb') {

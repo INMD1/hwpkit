@@ -173,14 +173,16 @@ function extractDims(headObj: any): PageDims | null {
     const pa = sec?.['hh:PAGEPROPERTY']?.[0]?._attr ?? sec?.PAGEPROPERTY?.[0]?._attr;
     if (!pa) return null;
 
+    const ew = Number(pa.Width ?? 59528);
+    const eh = Number(pa.Height ?? 84188);
     return {
-      wPt:    Metric.hwpToPt(Number(pa.Width ?? 59528)),
-      hPt:    Metric.hwpToPt(Number(pa.Height ?? 84188)),
+      wPt:    Metric.hwpToPt(ew),
+      hPt:    Metric.hwpToPt(eh),
       mt:     Metric.hwpToPt(Number(pa.TopMargin ?? 5670)),
       mb:     Metric.hwpToPt(Number(pa.BottomMargin ?? 4252)),
       ml:     Metric.hwpToPt(Number(pa.LeftMargin ?? 8504)),
       mr:     Metric.hwpToPt(Number(pa.RightMargin ?? 8504)),
-      orient: Number(pa.Landscape) === 1 ? 'landscape' : 'portrait',
+      orient: ew > eh ? 'landscape' : 'portrait',
     };
   } catch { return null; }
 }
@@ -373,7 +375,8 @@ function extractParaPrs(headObj: any): Map<number, ParaPrInfo> {
         const lsAttr = lineSpEl._attr ?? {};
         const lsType = lsAttr.type ?? 'PERCENT';
         const lsVal  = Number(lsAttr.value ?? 160);
-        if (lsType === 'PERCENT' && lsVal > 0) lineHeight = lsVal / 100;
+        // 160% = HWP/HWPX 기본값 → DOCX 기본(1.0x)에 맡김. 비기본값만 명시 인코딩.
+        if (lsType === 'PERCENT' && lsVal > 0 && lsVal !== 160) lineHeight = lsVal / 100;
       }
 
       map.set(id, { align, indentPt, spaceBefore, spaceAfter, lineHeight });
@@ -384,6 +387,29 @@ function extractParaPrs(headObj: any): Map<number, ParaPrInfo> {
 
 // ─── Section decoding ──────────────────────────────────────
 
+// Recursively extract tables nested inside cells (e.g. approval signature blocks).
+function extractNestedTables(tbl: any, items: { type: string; node: any }[]): void {
+  const rows = getTag(tbl, 'hp:tr', 'hp:ROW');
+  for (const row of rows) {
+    const cells = getTag(row, 'hp:tc', 'hp:CELL');
+    for (const cell of cells) {
+      const subList = cell?.['hp:subList']?.[0] ?? cell?.subList?.[0];
+      const source = subList ?? cell;
+      const paras = getTag(source, 'hp:p', 'hp:P');
+      for (const p of paras) {
+        const runs = getTag(p, 'hp:run', 'hp:RUN');
+        for (const run of runs) {
+          const nestedTbls = getTag(run, 'hp:tbl', 'hp:TABLE');
+          for (const nestedTbl of nestedTbls) {
+            items.push({ type: 'table', node: nestedTbl });
+            extractNestedTables(nestedTbl, items);
+          }
+        }
+      }
+    }
+  }
+}
+
 function addParaItems(p: any, items: { type: string; node: any }[]): void {
   // Check if this paragraph contains a table in its runs
   const runs = getTag(p, 'hp:run', 'hp:RUN');
@@ -391,7 +417,10 @@ function addParaItems(p: any, items: { type: string; node: any }[]): void {
   for (const run of runs) {
     const tbls = getTag(run, 'hp:tbl', 'hp:TABLE');
     if (tbls.length > 0) {
-      for (const tbl of tbls) items.push({ type: 'table', node: tbl });
+      for (const tbl of tbls) {
+        items.push({ type: 'table', node: tbl });
+        extractNestedTables(tbl, items);
+      }
       hasTable = true;
     }
   }
@@ -471,14 +500,17 @@ function parseSecPrDims(secPr: any): PageDims | null {
   if (!pagePr) return null;
   const margin = secPr?.['hp:pagePr']?.[0]?.['hp:margin']?.[0]?._attr
     ?? secPr?.['hp:PAGEPR']?.[0]?.['hp:MARGIN']?.[0]?._attr ?? {};
+  const pw = Number(pagePr.width ?? 59528);
+  const ph = Number(pagePr.height ?? 84188);
   return {
-    wPt:    Metric.hwpToPt(Number(pagePr.width ?? 59528)),
-    hPt:    Metric.hwpToPt(Number(pagePr.height ?? 84188)),
+    wPt:    Metric.hwpToPt(pw),
+    hPt:    Metric.hwpToPt(ph),
     mt:     Metric.hwpToPt(Number(margin.top ?? 5670)),
     mb:     Metric.hwpToPt(Number(margin.bottom ?? 4252)),
     ml:     Metric.hwpToPt(Number(margin.left ?? 8504)),
     mr:     Metric.hwpToPt(Number(margin.right ?? 8504)),
-    orient: pagePr.landscape === 'WIDELY' ? 'landscape' : 'portrait',  };
+    orient: pw > ph ? 'landscape' : 'portrait',
+  };
 }
 
 function extractSecPrDims(p: any): PageDims | null {
@@ -561,16 +593,23 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   const runs = getTag(p, 'hp:run', 'hp:RUN');
   const kids: (SpanNode | ImgNode)[] = [];
 
-  // DEBUG: Check for images in paragraph
-  let picCount = 0;
+  // Helper: collect hp:pic elements from a container (direct child OR inside hp:ctrl)
+  const collectPics = (container: any): any[] => {
+    const direct = getTag(container, 'hp:pic', 'hp:PIC');
+    const ctrls  = getTag(container, 'hp:ctrl', 'hp:CTRL');
+    const nested = ctrls.flatMap((c: any) => getTag(c, 'hp:pic', 'hp:PIC'));
+    return [...direct, ...nested];
+  };
+
+  // Images that are direct children of <hp:p> (common in table cells and floats)
+  for (const pic of collectPics(p)) {
+    const img = decodePic(pic, ctx);
+    if (img) kids.push(img);
+  }
+
   for (const run of runs) {
-    // Images inside run
-    const pics = getTag(run, 'hp:pic', 'hp:PIC');
-    if (pics.length > 0) {
-      console.log(`[HwpxDecoder:decodePara] Found ${pics.length} images in run`);
-      picCount += pics.length;
-    }
-    for (const pic of pics) {
+    // Images: directly in run OR in run→ctrl (both patterns appear in practice)
+    for (const pic of collectPics(run)) {
       const img = decodePic(pic, ctx);
       if (img) kids.push(img);
     }
@@ -589,20 +628,21 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
     }
 
     // Text
+    const runPics = collectPics(run);
     const textNodes = getTag(run, 'hp:t', 'hp:T', 'hp:CHAR');
     const content = textNodes.map((t: any) => {
       const val = typeof t === 'string' ? t : (t?._text ?? t?._ ?? t?.['#text'] ?? '');
-      return val.replace(/__EXT_\d+__/g, ''); // Skip placeholder strings
+      return val.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, '');
     }).join('');
 
-    // Skip empty secPr-only runs
-    if (content === '' && (run?.['hp:secPr']?.[0] || run?.['hp:SECPR']?.[0]) && pics.length === 0 && pageNums.length === 0) continue;
+    // Skip empty secPr-only runs that produced no images
+    if (content === '' && (run?.['hp:secPr']?.[0] || run?.['hp:SECPR']?.[0]) && runPics.length === 0 && pageNums.length === 0) continue;
 
-    const spanProps = resolveCharPr(run, ctx);
-    kids.push(buildSpan(content, spanProps));
-  }
-  if (picCount > 0) {
-    console.log(`[HwpxDecoder:decodePara] Total ${picCount} images decoded in paragraph`);
+    // Only push text span when there's actual content and no image already pushed for this run
+    if (content !== '' || (runPics.length === 0 && pageNums.length === 0)) {
+      const spanProps = resolveCharPr(run, ctx);
+      kids.push(buildSpan(content, spanProps));
+    }
   }
 
   // pageBreak="1" → prepend a pb node in its own span
@@ -738,7 +778,7 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
 
   const rowArr = getTag(tbl, 'hp:tr', 'hp:ROW');
 
-  // Read column widths from the first row that has all cs=1 cells
+  // Read column widths: first try a row where ALL cells have cs=1
   for (const row of rowArr) {
     const cells = getTag(row, 'hp:tc', 'hp:CELL');
     const rowWidths: number[] = [];
@@ -756,6 +796,45 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
       break;
     }
   }
+
+  // Fallback: proportional distribution when no all-single row exists
+  if (!gridProps.colWidths) {
+    // Determine colCount first: max column index reached across all rows
+    let detectedCols = 0;
+    for (const row of rowArr) {
+      let ci = 0;
+      for (const cell of getTag(row, 'hp:tc', 'hp:CELL')) {
+        const csEl = cell?.['hp:cellSpan']?.[0]?._attr ?? {};
+        ci += Number(csEl.colSpan ?? cell?._attr?.ColSpan ?? 1);
+      }
+      if (ci > detectedCols) detectedCols = ci;
+    }
+    if (detectedCols > 0) {
+      const sums = new Float64Array(detectedCols);
+      const counts = new Int32Array(detectedCols);
+      for (const row of rowArr) {
+        let ci = 0;
+        for (const cell of getTag(row, 'hp:tc', 'hp:CELL')) {
+          const csEl = cell?.['hp:cellSpan']?.[0]?._attr ?? {};
+          const cs = Number(csEl.colSpan ?? cell?._attr?.ColSpan ?? 1);
+          const szAttr = cell?.['hp:cellSz']?.[0]?._attr ?? {};
+          const w = Number(szAttr.width ?? 0);
+          if (w > 0 && cs > 0) {
+            const perCol = w / cs;
+            for (let k = 0; k < cs && ci + k < detectedCols; k++) {
+              sums[ci + k] += perCol;
+              counts[ci + k]++;
+            }
+          }
+          ci += cs;
+        }
+      }
+      const estimated = Array.from(sums).map((s, i) =>
+        counts[i] > 0 ? Metric.hwpToPt(s / counts[i]) : 0,
+      );
+      if (estimated.some(w => w > 0)) gridProps.colWidths = estimated;
+    }
+  }
   const rowNodes = rowArr.map((row: any) => {
     const cellArr = getTag(row, 'hp:tc', 'hp:CELL');
     const cellNodes = cellArr.map((cell: any) => {
@@ -770,13 +849,15 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
       };
 
       if (cellBf) {
+        // Preserve explicit NONE so it overrides table-level defaultStroke in DOCX tcBorders.
+        // Only skip when the side is truly undefined (not specified in borderFill).
         cellProps.top   = cellBf.top    ?? cellBf.stroke;
         cellProps.bot   = cellBf.bottom ?? cellBf.stroke;
         cellProps.left  = cellBf.left   ?? cellBf.stroke;
         cellProps.right = cellBf.right  ?? cellBf.stroke;
       }
 
-      // Vertical alignment from subList
+      // Vertical alignment and cell padding from subList
       const subList = cell?.['hp:subList']?.[0] ?? cell?.subList?.[0];
       const subAttr = subList?._attr ?? {};
       if (subAttr.vertAlign) {
@@ -785,6 +866,17 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
         };
         cellProps.va = vaMap[subAttr.vertAlign];
       }
+      // Cell margins (stored in HWPUNIT on subList attributes)
+      const HWPX_DEFAULT_MARGIN_LR = 360;  // typical default: 3.6pt
+      const HWPX_DEFAULT_MARGIN_TB = 141;  // typical default: ~1.4pt
+      const mL = Number(subAttr.marginLeft  ?? HWPX_DEFAULT_MARGIN_LR);
+      const mR = Number(subAttr.marginRight ?? HWPX_DEFAULT_MARGIN_LR);
+      const mT = Number(subAttr.marginTop   ?? HWPX_DEFAULT_MARGIN_TB);
+      const mB = Number(subAttr.marginBottom ?? HWPX_DEFAULT_MARGIN_TB);
+      if (mL !== HWPX_DEFAULT_MARGIN_LR) cellProps.padL = Metric.hwpToPt(mL);
+      if (mR !== HWPX_DEFAULT_MARGIN_LR) cellProps.padR = Metric.hwpToPt(mR);
+      if (mT !== HWPX_DEFAULT_MARGIN_TB) cellProps.padT = Metric.hwpToPt(mT);
+      if (mB !== HWPX_DEFAULT_MARGIN_TB) cellProps.padB = Metric.hwpToPt(mB);
 
       // Colspan/rowspan from cellSpan element or attributes
       const cellSpan = cell?.['hp:cellSpan']?.[0]?._attr ?? {};
@@ -814,13 +906,19 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
         { cs, rs, props: cellProps },
       );
     });
-    // Row height: read from the first cell's cellSz height
+    // Row height: prefer a non-merged cell (rs=1) for accuracy.
+    // For merged cells, divide total height by rowSpan to get per-row height.
     let rowHeightPt: number | undefined;
-    const firstCellForH = cellArr[0];
-    if (firstCellForH) {
-      const hSz = firstCellForH?.['hp:cellSz']?.[0]?._attr ?? {};
+    for (const cell of cellArr) {
+      const ca = cell?._attr ?? {};
+      const cellSpan = cell?.['hp:cellSpan']?.[0]?._attr ?? {};
+      const cellRs = Math.max(1, Number(cellSpan.rowSpan ?? ca.RowSpan ?? 1));
+      const hSz = cell?.['hp:cellSz']?.[0]?._attr ?? {};
       const hVal = Number(hSz.height ?? 0);
-      if (hVal > 0) rowHeightPt = Metric.hwpToPt(hVal);
+      if (hVal > 0) {
+        rowHeightPt = Metric.hwpToPt(hVal) / cellRs;
+        if (cellRs === 1) break;  // exact match — stop searching
+      }
     }
     return buildRow(cellNodes, rowHeightPt);
   });
@@ -851,7 +949,7 @@ function cellText(cell: any): string {
     getTag(p, 'hp:run', 'hp:RUN').map((r: any) =>
       getTag(r, 'hp:t', 'hp:T').map((t: any) => {
         const val = typeof t === 'string' ? t : (t?._text ?? t?._ ?? t?.['#text'] ?? '');
-        return val.replace(/__EXT_\d+__/g, '');
+        return val.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, '');
       }).join(''),
     ).join(''),
   ).join(' ');

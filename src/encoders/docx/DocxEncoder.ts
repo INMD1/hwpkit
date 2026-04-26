@@ -241,7 +241,7 @@ function stylesXml(): string {
       <w:szCs w:val="20"/>
     </w:rPr></w:rPrDefault>
     <w:pPrDefault><w:pPr>
-      <w:spacing w:after="0" w:line="384" w:lineRule="auto"/>
+      <w:spacing w:after="0" w:line="240" w:lineRule="auto"/>
       <w:jc w:val="both"/>
     </w:pPr></w:pPrDefault>
   </w:docDefaults>
@@ -360,29 +360,30 @@ function encodeParaInner(para: ParaNode, ctx: EncCtx): string {
     numPr = `<w:pStyle w:val="ListParagraph"/><w:numPr><w:ilvl w:val="${ilvl}"/><w:numId w:val="${numId}"/></w:numPr>`;
   }
 
-  // Spacing (before / after / line height)
+  // Spacing (before / after / line height) - ensure all values are non-negative
   let spacingXml = '';
   const { spaceBefore, spaceAfter, lineHeight } = para.props;
   if (spaceBefore !== undefined || spaceAfter !== undefined || lineHeight !== undefined) {
     const parts: string[] = [];
-    if (spaceBefore !== undefined) parts.push(`w:before="${Metric.ptToDxa(spaceBefore)}"`);
-    if (spaceAfter !== undefined) parts.push(`w:after="${Metric.ptToDxa(spaceAfter)}"`);
+    if (spaceBefore !== undefined) parts.push(`w:before="${Math.max(0, Metric.ptToDxa(spaceBefore))}"`);
+    if (spaceAfter !== undefined) parts.push(`w:after="${Math.max(0, Metric.ptToDxa(spaceAfter))}"`);
     if (lineHeight !== undefined) parts.push(`w:line="${Math.round(lineHeight * 240)}" w:lineRule="auto"`);
     spacingXml = `<w:spacing ${parts.join(' ')}/>`;
   }
 
-  // Indentation
+  // Indentation - ensure all values are non-negative (starting from 0, negatives fallback to 0)
   let indentXml = '';
-  const leftDxa  = para.props.indentPt !== undefined ? Metric.ptToDxa(para.props.indentPt) : 0;
-  const firstPt  = para.props.firstLineIndentPt;
-  if (leftDxa > 0 || firstPt !== undefined) {
+  const indentPt = para.props.indentPt ?? 0;
+  const leftDxa = Math.round(Math.max(0, Metric.ptToDxa(indentPt)));
+
+  const firstPt = para.props.firstLineIndentPt ?? 0;
+  const firstLineDxa = Math.round(Math.max(0, Metric.ptToDxa(firstPt)));
+
+  if (leftDxa > 0 || firstLineDxa > 0) {
     const parts: string[] = [];
     if (leftDxa > 0) parts.push(`w:left="${leftDxa}"`);
-    if (firstPt !== undefined) {
-      const dxa = Metric.ptToDxa(Math.abs(firstPt));
-      if (firstPt >= 0) parts.push(`w:firstLine="${dxa}"`);
-      else              parts.push(`w:hanging="${dxa}"`);
-    }
+    if (firstLineDxa > 0) parts.push(`w:firstLine="${firstLineDxa}"`);
+
     if (parts.length > 0) indentXml = `<w:ind ${parts.join(' ')}/>`;
   }
 
@@ -416,7 +417,11 @@ function encodeRun(span: SpanNode, _ctx: EncCtx): string {
   const parts: string[] = [];
   for (const kid of span.kids) {
     if (kid.tag === 'txt') {
-      parts.push(`<w:r><w:rPr>${rPr.join('')}</w:rPr><w:t xml:space="preserve">${esc(kid.content)}</w:t></w:r>`);
+      // __EXT_N__ or __EXT_N_W<w>_H<h>__ 자리표시자 제거
+      const content = kid.content.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, '');
+      if (content) {
+        parts.push(`<w:r><w:rPr>${rPr.join('')}</w:rPr><w:t xml:space="preserve">${esc(content)}</w:t></w:r>`);
+      }
     } else if (kid.tag === 'pagenum') {
       parts.push(`<w:r><w:rPr>${rPr.join('')}</w:rPr><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:rPr>${rPr.join('')}</w:rPr><w:instrText> PAGE </w:instrText></w:r><w:r><w:rPr>${rPr.join('')}</w:rPr><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr>${rPr.join('')}</w:rPr><w:t>1</w:t></w:r><w:r><w:rPr>${rPr.join('')}</w:rPr><w:fldChar w:fldCharType="end"/></w:r>`);
     } else if (kid.tag === 'br') {
@@ -433,8 +438,9 @@ function encodeImage(img: ImgNode, ctx: EncCtx): string {
   const rId = ctx.imgMap.get(img);
   if (!rId) return '';
 
-  const cx = Metric.ptToEmu(img.w);
-  const cy = Metric.ptToEmu(img.h);
+  // Fallback to 72pt (1 inch) when w/h are 0 to prevent invisible images
+  const cx = Metric.ptToEmu(img.w > 0 ? img.w : 72);
+  const cy = Metric.ptToEmu(img.h > 0 ? img.h : 72);
   const alt = esc(img.alt ?? '');
   const docPrId = ctx.nextId++;
 
@@ -613,11 +619,11 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
   const gridCols = colWidthsDxa.map(w => `<w:gridCol w:w="${w}"/>`).join('');
 
   // 3단계: XML 렌더링
-  const rows = grid.kids.map((row, ri) => {
+  const rows = tableMap.map((rowMap, ri) => {
     const cellXmls: string[] = [];
 
     for (let c = 0; c < colCount; c++) {
-      const mapEntry = tableMap[ri][c];
+      const mapEntry = rowMap[c];
 
       // 가로 병합으로 흡수된 칸은 렌더링하지 않음 (앞선 칸의 gridSpan이 차지)
       if (mapEntry.type === 'absorbed') continue;
@@ -632,10 +638,12 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
         const cellWidth = mapEntry.width || 1;
 
         // 너비 계산: 현재 칸부터 colspan(width) 만큼의 컬럼 너비 합산
-        for (let sc = c; sc < c + cellWidth && sc < colWidthsDxa.length; sc++) {
-          cw += colWidthsDxa[sc];
+        // colWidthsDxa 가 colCount 보다 작은 경우를 대비하여 safe 하게 처리
+        const safeColWidths = colWidthsDxa.length >= colCount ? colWidthsDxa : [...colWidthsDxa, ...Array(colCount - colWidthsDxa.length).fill(defaultColDxa)];
+        for (let sc = c; sc < c + cellWidth && sc < safeColWidths.length; sc++) {
+          cw += safeColWidths[sc];
         }
-        if (cw === 0) cw = defaultColDxa * cellWidth;
+        if (cw <= 0) cw = defaultColDxa * cellWidth;
 
         const tcPrParts: string[] = [];
         tcPrParts.push(`<w:tcW w:w="${Math.round(cw)}" w:type="dxa"/>`);
@@ -661,6 +669,16 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
             const vaMap: Record<string, string> = { top: 'top', mid: 'center', bot: 'bottom' };
             tcPrParts.push(`<w:vAlign w:val="${vaMap[cp.va] ?? 'top'}"/>`);
           }
+          // Per-cell margin override (only when explicitly set)
+          const cPadT = cp.padT != null ? Math.round(Metric.ptToDxa(cp.padT)) : null;
+          const cPadB = cp.padB != null ? Math.round(Metric.ptToDxa(cp.padB)) : null;
+          const cPadL = cp.padL != null ? Math.round(Metric.ptToDxa(cp.padL)) : null;
+          const cPadR = cp.padR != null ? Math.round(Metric.ptToDxa(cp.padR)) : null;
+          if (cPadT != null || cPadB != null || cPadL != null || cPadR != null) {
+            const t = cPadT ?? 28; const b = cPadB ?? 28;
+            const l = cPadL ?? 72; const r = cPadR ?? 72;
+            tcPrParts.push(`<w:tcMar><w:top w:w="${t}" w:type="dxa"/><w:left w:w="${l}" w:type="dxa"/><w:bottom w:w="${b}" w:type="dxa"/><w:right w:w="${r}" w:type="dxa"/></w:tcMar>`);
+          }
           cellContent = cell.kids.map((p: any) => encodeParaInner(p, ctx)).join('');
         } else {
           // continue 거나 void 인 경우 빈 단락 추가
@@ -676,9 +694,11 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
     if (ri === 0 && (gp.headerRow || look?.firstRow)) {
       trPrParts.push('<w:tblHeader/>');
     }
-    if (row.heightPt != null && row.heightPt > 0) {
-      const hDxa = Math.round(Metric.ptToDxa(row.heightPt));
-      trPrParts.push(`<w:trHeight w:val="${hDxa}" w:hRule="exact"/>`);
+    // 원본 행 정보에서 높이 가져오기 (tableMap 과 grid.kids 는 같은 인덱스)
+    const originalRow = grid.kids[ri];
+    if (originalRow?.heightPt != null && originalRow.heightPt > 0) {
+      const hDxa = Math.round(Metric.ptToDxa(originalRow.heightPt));
+      trPrParts.push(`<w:trHeight w:val="${hDxa}" w:hRule="atLeast"/>`);
     }
     const trPr = trPrParts.length > 0 ? `<w:trPr>${trPrParts.join('')}</w:trPr>` : '';
 
@@ -710,7 +730,7 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
   }
 
   return `    <w:tbl>
-      <w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="${Math.round(totalDxa)}" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="${firstRow}" w:lastRow="${lastRow}" w:firstColumn="${firstCol}" w:lastColumn="${lastCol}" w:noHBand="${noHBand}" w:noVBand="${noVBand}"/>${tblBorders}<w:tblCellMar><w:top w:w="28" w:type="dxa"/><w:left w:w="102" w:type="dxa"/><w:bottom w:w="28" w:type="dxa"/><w:right w:w="102" w:type="dxa"/></w:tblCellMar></w:tblPr>
+      <w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="${Math.round(totalDxa)}" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="${firstRow}" w:lastRow="${lastRow}" w:firstColumn="${firstCol}" w:lastColumn="${lastCol}" w:noHBand="${noHBand}" w:noVBand="${noVBand}"/>${tblBorders}<w:tblCellMar><w:top w:w="28" w:type="dxa"/><w:left w:w="72" w:type="dxa"/><w:bottom w:w="28" w:type="dxa"/><w:right w:w="72" w:type="dxa"/></w:tblCellMar></w:tblPr>
       <w:tblGrid>${gridCols}</w:tblGrid>
 ${rows}
     </w:tbl>`;
@@ -744,8 +764,8 @@ function encodeCellBorders(cp: CellProps): string {
 
 function esc(s: string): string {
   if (!s) return '';
-  // 1. 내부 처리용 플레이스홀더(__EXT_0__ 등) 제거
-  s = s.replace(/__EXT_\d+__/g, '');
+  // 1. 내부 처리용 플레이스홀더(__EXT_0__ 또는 __EXT_0_W144_H108__ 등) 제거
+  s = s.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, '');
 
   // 2. 글자 깨짐을 유발하는 쓰레기값 및 BOM 기호 명시적 제거 (이 부분 추가!)
   s = s.replace(/湰灧/g, '');

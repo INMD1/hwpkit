@@ -103,14 +103,37 @@ export function safeStrokeDocx(val?: string, sz?: number, c?: string): Stroke {
 
 // ─── 폰트 정규화 ───────────────────────────────────────────
 const FONT_MAP: Record<string, string> = {
+  // 맑은 고딕 계열
   '맑은 고딕': 'Malgun Gothic',
+  '맑은고딕': 'Malgun Gothic',
+  // 바탕 계열 (serif)
   '바탕': 'Batang',
-  '돋움': 'Dotum',
-  '굴림': 'Gulim',
+  '바탕체': 'BatangChe',
   '한컴바탕': 'Batang',
-  '한컴돋움': 'Malgun Gothic',
   '함초롬바탕': 'Batang',
+  'HY신명조': 'Batang',
+  'HY견명조': 'Batang',
+  'HY그래픽': 'Batang',
+  '궁서': 'Gungsuh',
+  '궁서체': 'GungsuhChe',
+  // 고딕 계열 (sans-serif)
+  '돋움': 'Dotum',
+  '돋움체': 'DotumChe',
+  '굴림': 'Gulim',
+  '굴림체': 'GulimChe',
+  '한컴돋움': 'Malgun Gothic',
   '함초롬돋움': 'Malgun Gothic',
+  'HY견고딕': 'Malgun Gothic',
+  'HY중고딕': 'Malgun Gothic',
+  'HY헤드라인M': 'Malgun Gothic',
+  'HY강B': 'Malgun Gothic',
+  'HY나무M': 'Malgun Gothic',
+  'HY목각파임B': 'Malgun Gothic',
+  'HY엽서M': 'Malgun Gothic',
+  'HY엽서L': 'Malgun Gothic',
+  // 나눔 계열
+  '나눔고딕': 'Malgun Gothic',
+  '나눔명조': 'Batang',
 };
 export function safeFont(raw?: string): string {
   return FONT_MAP[raw ?? ''] ?? raw ?? 'Malgun Gothic';

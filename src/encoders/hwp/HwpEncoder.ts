@@ -16,7 +16,7 @@
 
 import type { DocRoot, ContentNode, ParaNode, SpanNode, GridNode, ImgNode, LinkNode } from '../../model/doc-tree';
 import type { Outcome }       from '../../contract/result';
-import type { TextProps, ParaProps, Stroke, PageDims } from '../../model/doc-props';
+import type { TextProps, ParaProps, Stroke, PageDims, Align } from '../../model/doc-props';
 import { succeed, fail }      from '../../contract/result';
 import { Metric, safeFontToKr } from '../../safety/StyleBridge';
 import { registry }           from '../../pipeline/registry';
@@ -566,17 +566,17 @@ function mkLineSeg(
 }
 
 function buildDefaultLineSeg(
-  availWidthHwp: number, fontHwp: number, nchars: number, paraProps?: ParaProps
+  availWidthHwp: number, fontHwp: number, nchars: number, paraProps?: ParaProps, vertPos = 0
 ): Uint8Array {
   const ratio = paraProps?.lineHeight ? Math.round(paraProps.lineHeight * 100) : 160;
   const vertSize = calcLineHeight(0, ratio, fontHwp);
   const baseline = Math.round(fontHwp * 0.85);
   const spacing = vertSize - fontHwp;
   // flags: bit 0 (페이지 첫 줄), bit 1 (컬럼 첫 줄)
-  const flags = 3; 
-  
+  const flags = 3;
+
   return mkLineSeg(
-    0, 0,
+    0, vertPos,
     vertSize, fontHwp,
     baseline, spacing,
     0, availWidthHwp,
@@ -703,7 +703,7 @@ function encodePicPara(
 
 function encodePara(
   para: ParaNode, bank: HwpStyleBank, lv: number,
-  instanceId: number, availWidthHwp: number, mask = 0,
+  instanceId: number, availWidthHwp: number, mask = 0, vertPos = 0,
 ): Uint8Array[] {
   let text = '';
   const csPairs: [number, number][] = [];
@@ -763,19 +763,22 @@ function encodePara(
     mkRec(TAG_PARA_HEADER,     lv,     mkParaHeader(nchars, mask, psId, csPairs.length, 1, instanceId)),
     mkRec(TAG_PARA_TEXT,       lv + 1, mkParaText(text)),
     mkRec(TAG_PARA_CHAR_SHAPE, lv + 1, mkParaCharShape(csPairs)),
-    mkRec(TAG_PARA_LINE_SEG,   lv + 1, buildDefaultLineSeg(availWidthHwp, fontHwp, nchars, para.props)),
+    mkRec(TAG_PARA_LINE_SEG,   lv + 1, buildDefaultLineSeg(availWidthHwp, fontHwp, nchars, para.props, vertPos)),
     ...ctrlRecords,
   ];
 }
 
 // ─── 표 인코딩 ───────────────────────────────────────────────
 
-function mkTableCtrl(wHwp: number, hHwp: number, instanceId: number): Uint8Array {
+function mkTableCtrl(wHwp: number, hHwp: number, instanceId: number, align: Align = 'left'): Uint8Array {
+  // 표 정렬 속성 플래그 (HWP 표 제어 문자)
+  // offset 20-21: 속성 플래그 (align: left=0, center=1, right=2, justify=3)
+  const alignFlags = { left: 0, center: 1, right: 2, justify: 3 }[align] ?? 0;
   return new BufWriter()
     .u32(CTRL_TABLE).u32(0x082a2211).i32(0).i32(0)
     .u32(wHwp).u32(hHwp).i32(7)
     .u16(140).u16(140).u16(140).u16(140)
-    .u32(instanceId).i32(0).u16(0)
+    .u32(instanceId).i32(alignFlags).u16(0)
     .build(); // 46 bytes
 }
 
@@ -827,8 +830,9 @@ function encodeGrid(
   const tblHPt      = grid.kids.reduce((s: number, row: any) =>
     s + (row.heightPt != null && row.heightPt > 0 ? row.heightPt : DEFAULT_ROW_HEIGHT_PT), 0);
   const tblInstanceId = idGen();
+  const tblAlign = grid.props.align ?? 'left';
 
-  records.push(mkRec(TAG_CTRL_HEADER, lv, mkTableCtrl(Metric.ptToHwp(tblWPt), Metric.ptToHwp(tblHPt), tblInstanceId)));
+  records.push(mkRec(TAG_CTRL_HEADER, lv, mkTableCtrl(Metric.ptToHwp(tblWPt), Metric.ptToHwp(tblHPt), tblInstanceId, tblAlign)));
   records.push(mkRec(TAG_TABLE, lv + 1, mkTableRecord(rowCnt, colCnt, rowHwp, defBfId)));
 
   for (let r = 0; r < grid.kids.length; r++) {
@@ -916,6 +920,7 @@ function buildBodyTextStream(doc: DocRoot, bank: HwpStyleBank, images: BinImage[
   for (const r of buildSectionParagraph(dims, idGen())) chunks.push(r);
 
   const TABLE_CTRL_MASK = 1 << 11;
+  let vertPos = 0; // 단락 간격 추적
 
   for (const sheet of doc.kids) {
     for (const node of sheet.kids) {
@@ -945,7 +950,8 @@ function buildBodyTextStream(doc: DocRoot, bank: HwpStyleBank, images: BinImage[
           chunks.push(mkRec(TAG_PARA_HEADER,     0, mkParaHeader(9, TABLE_CTRL_MASK | paraMask, 0, 1, 1, idGen())));
           chunks.push(mkRec(TAG_PARA_TEXT,       1, mkTableParaText()));
           chunks.push(mkRec(TAG_PARA_CHAR_SHAPE, 1, mkParaCharShape([[0, 0]])));
-          chunks.push(mkRec(TAG_PARA_LINE_SEG,   1, buildDefaultLineSeg(availWidthHwp, 1000, 9)));
+          chunks.push(mkRec(TAG_PARA_LINE_SEG,   1, buildDefaultLineSeg(availWidthHwp, 1000, 9, undefined, vertPos)));
+          vertPos += Metric.ptToHwp(20); // 코드 블록 후 간격
           for (const r of encodeGrid(gridNode, bank, 1, idGen, availWidthHwp)) chunks.push(r);
           continue;
         }
@@ -959,12 +965,13 @@ function buildBodyTextStream(doc: DocRoot, bank: HwpStyleBank, images: BinImage[
                 // 첫 레코드가 PARA_HEADER인 경우 페이지 브레이크 마스크 적용
                 chunks.push(r);
               }
+              vertPos += Metric.ptToHwp(img.h ?? 100); // 이미지 높이 추가
             }
           }
           const textKids = para.kids.filter((k: any) => k.tag !== 'img' && k.tag !== 'link');
           if (textKids.length > 0) {
             const textPara: ParaNode = { tag: 'para', props: para.props, kids: textKids as any };
-            for (const r of encodePara(textPara, bank, 0, idGen(), availWidthHwp)) {
+            for (const r of encodePara(textPara, bank, 0, idGen(), availWidthHwp, paraMask, vertPos)) {
                // PARA_HEADER 레코드(목록의 첫 번째)에 마스크 적용
                if (r[0] === (TAG_PARA_HEADER & 0xFF)) {
                  // 레코드 헤더 수정은 복잡하므로 encodePara 내부에서 처리하는 것이 안전하지만 
@@ -972,16 +979,27 @@ function buildBodyTextStream(doc: DocRoot, bank: HwpStyleBank, images: BinImage[
                }
                chunks.push(r);
             }
+            // 단락 높이 계산 및 vertPos 업데이트 (이미지/텍스트 혼합)
+            const fontHwp_img = (textKids.find((k: any) => k.tag === 'span' && k.props?.pt) as SpanNode)?.props.pt ?
+              Metric.ptToHwp((textKids.find((k: any) => k.tag === 'span' && k.props?.pt) as SpanNode).props.pt as number) : 1000;
+            const lineHeight_img = para.props.lineHeight ?? 1.6;
+            vertPos += Metric.ptToHwp((fontHwp_img / 1200) * 72 * lineHeight_img);
           }
         } else {
-          for (const r of encodePara(para, bank, 0, idGen(), availWidthHwp, paraMask)) chunks.push(r);
+          for (const r of encodePara(para, bank, 0, idGen(), availWidthHwp, paraMask, vertPos)) chunks.push(r);
+          // 단락 높이 계산 및 vertPos 업데이트 (일반 단락)
+          const fontHwp_para = (para.kids.find((k: any) => k.tag === 'span' && k.props?.pt) as SpanNode)?.props.pt ?
+            Metric.ptToHwp((para.kids.find((k: any) => k.tag === 'span' && k.props?.pt) as SpanNode).props.pt as number) : 1000;
+          const lineHeight_para = para.props.lineHeight ?? 1.6;
+          vertPos += Metric.ptToHwp((fontHwp_para / 1200) * 72 * lineHeight_para);
         }
 
       } else if (node.tag === 'grid') {
         chunks.push(mkRec(TAG_PARA_HEADER,     0, mkParaHeader(9, TABLE_CTRL_MASK, 0, 1, 1, idGen())));
         chunks.push(mkRec(TAG_PARA_TEXT,       1, mkTableParaText()));
         chunks.push(mkRec(TAG_PARA_CHAR_SHAPE, 1, mkParaCharShape([[0, 0]])));
-        chunks.push(mkRec(TAG_PARA_LINE_SEG,   1, buildDefaultLineSeg(availWidthHwp, 1000, 9)));
+        chunks.push(mkRec(TAG_PARA_LINE_SEG,   1, buildDefaultLineSeg(availWidthHwp, 1000, 9, undefined, vertPos)));
+        vertPos += Metric.ptToHwp(20); // 표 후 간격
         for (const r of encodeGrid(node as GridNode, bank, 1, idGen, availWidthHwp)) chunks.push(r);
       }
     }
@@ -991,14 +1009,52 @@ function buildBodyTextStream(doc: DocRoot, bank: HwpStyleBank, images: BinImage[
 }
 
 // ─── HWP FileHeader ─────────────────────────────────────────
-
+/**
+ * HWP 5.0 FileHeader 를 생성합니다.
+ *
+ * 구조:
+ *  0-15: 시그니처 "HWP Document File" (16 바이트)
+ * 16-31: reserved (16 바이트)
+ * 32-35: version (4 바이트, Little-Endian) - 0x05000300 = 5.0.3.0
+ * 36-39: flags (4 바이트, Little-Endian) - bit 0 = compressed, bit 1 = encrypted
+ * 40-255: reserved (216 바이트)
+ *
+ * 총 256 바이트
+ */
 function buildHwpFileHeader(): Uint8Array {
-  const buf = new Uint8Array(256);
-  const sig = 'HWP Document File';
-  for (let i = 0; i < sig.length; i++) buf[i] = sig.charCodeAt(i);
+  const SIZE = 256;
+  const buf = new Uint8Array(SIZE);
   const dv = new DataView(buf.buffer);
-  dv.setUint32(32, 0x05000300, true); // version 5.0.3.0
-  dv.setUint32(36, 0x00000001, true); // flags: bit 0 = compressed
+
+  // 0-15: 시그니처 "HWP Document File" (16 바이트)
+  const sig = 'HWP Document File';
+  for (let i = 0; i < sig.length; i++) {
+    buf[i] = sig.charCodeAt(i);
+  }
+
+  // 16-31: reserved (0 으로 초기화됨)
+
+  // 32-35: version (4 바이트, Little-Endian) - 0x05000300 = 5.0.3.0
+  dv.setUint32(32, 0x05000300, true);
+
+  // 36-39: flags (4 바이트, Little-Endian)
+  // bit 0 = 1: compressed (압축됨)
+  // bit 1 = 0: not encrypted (암호화 안됨)
+  dv.setUint32(36, 0x00000001, true);
+
+  // 40-255: reserved (0 으로 초기화됨)
+
+  // 검증
+  if (buf.length !== SIZE) {
+    throw new Error(`FileHeader 크기 오류: ${buf.length} (기대: ${SIZE})`);
+  }
+  if (new TextDecoder().decode(buf.subarray(0, sig.length)) !== sig) {
+    throw new Error('FileHeader 시그니처 오류');
+  }
+  if (dv.getUint32(32, true) !== 0x05000300) {
+    throw new Error('FileHeader 버전 오류');
+  }
+
   return buf;
 }
 
@@ -1013,11 +1069,17 @@ function buildHwpOle2(
   const FREESECT   = 0xFFFFFFFF;
   const FATSECT    = 0xFFFFFFFD;
 
+  // FileHeader 크기 검증
+  if (fileHeaderData.length < 256) {
+    throw new Error(`FileHeader 크기 부족: ${fileHeaderData.length} (최소 256)`);
+  }
+
   function padSector(d: Uint8Array): Uint8Array {
     const n = Math.ceil(Math.max(d.length, 1) / SS) * SS;
     if (d.length === n) return d;
     const out = new Uint8Array(n); out.set(d); return out;
   }
+
 
   const fhPad   = padSector(fileHeaderData);
   const diPad   = padSector(docInfoData);
@@ -1137,23 +1199,79 @@ function buildHwpOle2(
 
   const hdr = new Uint8Array(SS);
   const hdv = new DataView(hdr.buffer);
+
+  // OLE2/CFB 헤더 구조:
+  // 0-7:   Magic number (D0 CF 11 E0 A1 B1 1A E1)
+  // 8-23:  CLSID (16 bytes)
+  // 24-25: Minor version (0x003E = 62)
+  // 26-27: Major version (0x0003 = 3)
+  // 28-29: Byte order (0x00FE = Little-Endian)
+  // 30-31: Sector size exponent (0x0009 = 2^9 = 512)
+  // 32-33: Mini sector size exponent (0x0006 = 2^6 = 64)
+  // 34-39: Reserved (6 bytes)
+  // 40-43: Number of FAT sectors
+  // 44-47: Directory start sector location
+  // 48-51: Transaction signature number
+  // 52-55: Mini stream cutoff size (0x1000 = 4096)
+  // 56-59: Mini FAT start sector location
+  // 60-63: Number of mini FAT sectors
+  // 64-67: FAT start sector location
+  // 68-71: Number of backup FAT sectors
+  // 72-75: Backup FAT start sector location
+  // 76-511: Sector bitmap (109 sectors worth)
+
+  // Magic number
   const MAGIC = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
   MAGIC.forEach((b, i) => { hdr[i] = b; });
-  hdv.setUint16(24, 0x003E, true);
-  hdv.setUint16(26, 0x0003, true);
-  hdv.setUint16(28, 0xFFFE, true);
-  hdv.setUint16(30, 9,      true);
-  hdv.setUint16(32, 6,      true);
-  hdv.setUint32(40, 0,          true);
-  hdv.setUint32(44, fatN,       true);
-  hdv.setUint32(48, dir1Sec,    true);
-  hdv.setUint32(52, 0,          true);
-  hdv.setUint32(56, 0x1000,     true);
-  hdv.setUint32(60, ENDOFCHAIN, true);
-  hdv.setUint32(64, 0,          true);
-  hdv.setUint32(68, ENDOFCHAIN, true);
-  hdv.setUint32(72, 0,          true);
-  for (let i = 0; i < 109; i++) hdv.setUint32(76 + i * 4, i < fatN ? i : FREESECT, true);
+
+  // CLSID is already set in dirBuf[0][80:96] for Root Entry
+
+  // Version
+  hdv.setUint16(24, 0x003E, true); // Minor version
+  hdv.setUint16(26, 0x0003, true); // Major version
+
+  // Byte order
+  hdv.setUint16(28, 0x00FE, true); // Little-Endian
+
+  // Sector size exponent (2^9 = 512)
+  hdv.setUint16(30, 0x0009, true);
+
+  // Mini sector size exponent (2^6 = 64)
+  hdv.setUint16(32, 0x0006, true);
+
+  // Reserved (34-39, 6 bytes) - already zero
+
+  // Number of FAT sectors
+  hdv.setUint32(40, fatN, true);
+
+  // Directory start sector location
+  hdv.setUint32(44, dir1Sec, true);
+
+  // Transaction signature number
+  hdv.setUint32(48, 0, true);
+
+  // Mini stream cutoff size
+  hdv.setUint32(52, 0x1000, true);
+
+  // Mini FAT start sector location
+  hdv.setUint32(56, ENDOFCHAIN, true);
+
+  // Number of mini FAT sectors
+  hdv.setUint32(60, 0, true);
+
+  // FAT start sector location
+  hdv.setUint32(64, ENDOFCHAIN, true);
+
+  // Number of backup FAT sectors
+  hdv.setUint32(68, 0, true);
+
+  // Backup FAT start sector location
+  hdv.setUint32(72, 0, true);
+
+  // Sector bitmap (76-511)
+  for (let i = 0; i < 109; i++) {
+    hdv.setUint32(76 + i * 4, i < fatN ? i : FREESECT, true);
+  }
 
   const out = new Uint8Array(SS + totalSec * SS);
   out.set(hdr, 0);
@@ -1235,10 +1353,21 @@ export class HwpEncoder extends BaseEncoder {
       const bodyCmp    = pako.deflateRaw(bodyRaw);
 
       const fileHdr = buildHwpFileHeader();
+
+      // FileHeader 검증
+      if (fileHdr.length !== 256) {
+        return fail(`HwpEncoder: FileHeader 크기 오류 - ${fileHdr.length} bytes (기대: 256 bytes)`);
+      }
+
       const hwp     = buildHwpOle2(fileHdr, docInfoCmp, bodyCmp, images);
 
       if (!validateOle2Magic(hwp)) {
         return fail('HwpEncoder: OLE2 매직 바이트 오류');
+      }
+
+      // HWP 파일 크기 검증 (최소 512 바이트 - OLE2 헤더 1 섹터)
+      if (hwp.length < 512) {
+        return fail(`HwpEncoder: HWP 파일 크기 부족 - ${hwp.length} bytes (최소 512 bytes)`);
       }
 
       return succeed(hwp);

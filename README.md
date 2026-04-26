@@ -27,9 +27,10 @@
 |------------|:----:|:----:|:--------:|
 | **HWPX**   | -    | O    | O        |
 | **HWP**    | □    | O    | O        |
-| **DOCX**   | □    | -    | O        |
+| **DOCX**   | O    | -    | O        |
 | **Markdown** | □  | □    | -        |
 
+> 한글 소프트웨어서는 작동이 안됨 (수정중)
 ---
 
 ## 설치
@@ -111,6 +112,42 @@ const doc = buildRoot({ title: '제목' }, [
     ]),
   ]),
 ]);
+```
+
+### 스타일 적용
+
+```typescript
+// 텍스트 스타일
+buildSpan('스타일 적용 텍스트', {
+  font: 'Malgun Gothic',  // 글꼴
+  pt: 14,                 // 글자 크기 (pt)
+  b: true,                // 볼드
+  i: true,                // 이탤릭
+  u: true,                // 밑줄
+  s: true,                // 취소선
+  color: 'FF0000',        // 글색 (hex, BGR)
+  bg: 'FFFF00'           // 형광펜 (hex, BGR)
+});
+
+// 표 정렬 및 선 스타일
+buildGrid(rows, {
+  align: 'center',        // 표 정렬: 'left' | 'center' | 'right'
+  defaultStroke: {        // 기본 선 스타일
+    kind: 'solid',        // 선 종류: 'solid' | 'double' | 'dash' | 'dot'
+    pt: 1,                // 선 굵기 (pt)
+    color: '000000'       // 선 색상 (hex, BGR)
+  },
+  colWidths: [100, 100]   // 열 너비 (pt)
+});
+
+// 개별 셀의 선 스타일
+buildCell(content, {
+  top: { kind: 'double', pt: 2, color: '0000FF' },  // 상단 선
+  bot: { kind: 'dash', pt: 1.5, color: 'FF0000' },  // 하단 선
+  left: { kind: 'dot', pt: 1, color: '00FF00' },    // 좌측 선
+  right: { kind: 'solid', pt: 3, color: 'FFFF00' }, // 우측 선
+  bg: 'FFFFFF'                                        // 셀 배경색
+});
 ```
 
 ### 트리 순회

@@ -46,6 +46,7 @@ export interface ParaProps {
   indentPt?: number;          // 문단 왼쪽 전체 들여쓰기 (pt)
   indentRightPt?: number;     // 문단 오른쪽 전체 들여쓰기 (pt)
   firstLineIndentPt?: number; // 첫 줄만 추가 들여쓰기 (pt, 음수=내어쓰기)
+  leftMargin?: number;        // 문단 왼쪽 여백 (HWP leftMargin, pt)
   spaceBefore?: number;
   spaceAfter?: number;
   lineHeight?: number;
@@ -91,6 +92,7 @@ export interface GridProps {
   defaultStroke?: Stroke;
   look?: TableLook;
   headerRow?: boolean;
+  align?: Align;          // 표 정렬: 'left' | 'center' | 'right' | 'justify'
 }
 
 export interface PageDims {

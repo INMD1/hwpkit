@@ -55,6 +55,12 @@ const NS = [
   'xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"',
 ].join(" ");
 
+// ─── LinesegArray Flags 상수 (HWPX 스펙) ─────────────────
+// 첫 번째 lineseg: 0x160000 = 1441792 (시작 줄, 고정 위치)
+// 이후 lineseg: 0x60000 = 393216 (일반 줄)
+const LINESEG_FLAGS_FIRST = 0x160000; // 1441792 - 첫 줄 (시작, 고정)
+const LINESEG_FLAGS_OTHER = 0x60000;  // 393216 - 이후 줄
+
 // ─── ANYTOHWP 영감: 언어별 폰트 레지스트리 ─────────────────
 // 7개 언어 그룹을 독립적으로 관리 — charPr fontRef의 정확한 ID 생성
 const LANG_GROUPS = [
@@ -372,6 +378,10 @@ function charPrKey(p: TextProps): string {
   return `${p.b ? 1 : 0}|${p.i ? 1 : 0}|${p.u ? 1 : 0}|${p.s ? 1 : 0}|${p.pt ?? 10}|${p.color ?? "000000"}|${p.font ?? ""}|${p.bg ?? ""}`;
 }
 
+/**
+ * ParaProps 를 해시 키로 변환 (동일 포맷팅 감지용)
+ * null/undefined는 0 으로 처리하여 일관성 유지
+ */
 function paraPrKey(p: ParaProps): string {
   return `${p.align ?? "left"}|${p.listOrd ?? ""}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.firstLineIndentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}|${p.styleId ?? ""}`;
 }
@@ -429,13 +439,11 @@ function registerParaPr(props: ParaProps, ctx: HwpxCtx): number {
   const def: ParaPrDef = {
     id,
     align: (props.align ?? "left").toUpperCase(),
-    leftHwp: props.indentPt ? Metric.ptToHwp(props.indentPt) : 0,
-    rightHwp: props.indentRightPt ? Metric.ptToHwp(props.indentRightPt) : 0,
-    intentHwp: props.firstLineIndentPt
-      ? Metric.ptToHwp(props.firstLineIndentPt)
-      : 0,
-    prevHwp: props.spaceBefore ? Metric.ptToHwp(props.spaceBefore) : 0,
-    nextHwp: props.spaceAfter ? Metric.ptToHwp(props.spaceAfter) : 0,
+    leftHwp: Metric.ptToHwp(props.indentPt ?? 0),
+    rightHwp: Metric.ptToHwp(props.indentRightPt ?? 0),
+    intentHwp: Metric.ptToHwp(props.firstLineIndentPt ?? 0),
+    prevHwp: Metric.ptToHwp(props.spaceBefore ?? 0),
+    nextHwp: Metric.ptToHwp(props.spaceAfter ?? 0),
     lineSpacing: props.lineHeight ? Math.round(props.lineHeight * 100) : 160,
   };
   if (props.listOrd !== undefined) {
@@ -1135,20 +1143,22 @@ function buildLinesegarray(
   const charsPerLine = Math.max(1, Math.floor(horzSize / charW));
   const lineCount = text.length === 0 ? 1 : Math.ceil(text.length / charsPerLine);
 
-  let innerXml = "";
+  // 성능 최적화: 문자열 병합 대신 배열 수집 후 join 사용 (O(n²) → O(n))
+  const linesegParts: string[] = [];
   for (let i = 0; i < lineCount; i++) {
-    const flags = i === 0 ? 1441792 : 393216;
-    innerXml +=
+    const flags = i === 0 ? LINESEG_FLAGS_FIRST : LINESEG_FLAGS_OTHER;
+    linesegParts.push(
       `<hp:lineseg textpos="${i * charsPerLine}" ` +
       `vertpos="${vertPosStart + i * vertsizeLine}" ` +
       `vertsize="${vertsizeLine}" textheight="${fontSize}" ` +
       `baseline="${baseline}" spacing="${spacing}" ` +
       `horzpos="0" horzsize="${horzSize}" ` +
-      `flags="${flags}"/>`;
+      `flags="${flags}"/>`,
+    );
   }
 
   return {
-    xml: `<hp:linesegarray>${innerXml}</hp:linesegarray>`,
+    xml: `<hp:linesegarray>${linesegParts.join("")}</hp:linesegarray>`,
     totalHeight: lineCount * vertsizeLine,
   };
 }
@@ -1497,8 +1507,9 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
     wHwp = ctx.availableWidth;
   }
 
-  const cx = Math.round(wHwp / 2);
-  const cy = Math.round(hHwp / 2);
+  // 회전 중심점 (rotation center) 계산: 이미지 중앙을 기준으로 회전
+  const rotationCenterX = Math.round(wHwp / 2);
+  const rotationCenterY = Math.round(hHwp / 2);
 
   const layout = img.layout;
   const isInline = !layout || layout.wrap === "inline";
@@ -1515,7 +1526,7 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
     `<hp:orgSz width="${wHwp}" height="${hHwp}"/>` +
     `<hp:curSz width="${wHwp}" height="${hHwp}"/>` +
     `<hp:flip horizontal="0" vertical="0"/>` +
-    `<hp:rotationInfo angle="0" centerX="${cx}" centerY="${cy}" rotateimage="1"/>` +
+    `<hp:rotationInfo angle="0" centerX="${rotationCenterX}" centerY="${rotationCenterY}" rotateimage="1"/>` +
     `<hp:renderingInfo>` +
     `<hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>` +
     `<hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>` +
@@ -1712,11 +1723,17 @@ function buildGridXml(
     rowsXml += `<hp:tr>${cellsXml}</hp:tr>`;
   }
 
+  // 표 정렬 처리
+  const alignMap: Record<string, string> = {
+    left: 'LEFT', right: 'RIGHT', center: 'CENTER', justify: 'JUSTIFY',
+  };
+  const horzAlign = alignMap[grid.props.align ?? 'left'] ?? 'LEFT';
+
   const headerRow = grid.props.headerRow ? ' repeatHeader="1"' : "";
   const xml =
     `<hp:tbl id="${ctx.nextElementId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE"${headerRow} rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="0">` +
     `<hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="${totalH}" heightRelTo="ABSOLUTE" protect="0"/>` +
-    `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>` +
+    `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="${horzAlign}" vertOffset="0" horzOffset="0"/>` +
     `<hp:outMargin left="138" right="138" top="138" bottom="138"/>` +
     `<hp:inMargin left="0" right="0" top="0" bottom="0"/>` +
     rowsXml +
@@ -1781,7 +1798,7 @@ function extractPreviewText(sheet?: SheetNode): string {
 
 function esc(s: string): string {
   if (!s) return "";
-  s = s.replace(/__EXT_\d+__/g, "");
+  s = s.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "");
   s = s.replace(/湰灧/g, "").replace(/\uFEFF/g, "");
   // XML 1.0 비허용 제어문자 제거
   // eslint-disable-next-line no-control-regex
