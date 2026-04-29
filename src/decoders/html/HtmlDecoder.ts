@@ -108,6 +108,34 @@ function parseTokens(tokens: Token[]): ContentNode[] {
     if (t.type === 'tag' && !t.close) {
       switch (t.name) {
         case 'html':
+          // Extract body content
+          i++;
+          let bodyStart = -1;
+          let depth = 1;
+          while (i < tokens.length && depth > 0) {
+            if (tokens[i].type === 'tag' && !tokens[i].close && tokens[i].name === 'html') depth++;
+            else if (tokens[i].type === 'tag' && tokens[i].close && tokens[i].name === 'html') depth--;
+            else if (tokens[i].type === 'tag' && !tokens[i].close && tokens[i].name === 'body') {
+              bodyStart = i + 1;
+            }
+            i++;
+          }
+          if (bodyStart > 0) {
+            // Find body end
+            let bodyEnd = bodyStart;
+            let bodyDepth = 1;
+            while (bodyEnd < tokens.length && bodyDepth > 0) {
+              if (tokens[bodyEnd].type === 'tag' && !tokens[bodyEnd].close && tokens[bodyEnd].name === 'body') bodyDepth++;
+              else if (tokens[bodyEnd].type === 'tag' && tokens[bodyEnd].close && tokens[bodyEnd].name === 'body') bodyDepth--;
+              bodyEnd++;
+            }
+            bodyEnd--;
+            const bodyTokens = tokens.slice(bodyStart, bodyEnd);
+            const bodyKids = parseTokens(bodyTokens);
+            kids.push(...bodyKids);
+          }
+          continue;
+
         case 'head':
         case 'style':
         case 'script':
@@ -119,27 +147,27 @@ function parseTokens(tokens: Token[]): ContentNode[] {
         case 'section':
         case 'article':
         case 'main':
-          i++;
-          let depth = 1;
-          const blockKids: ContentNode[] = [];
-          while (i < tokens.length && depth > 0) {
-            const inner = tokens[i];
-            if (inner.type === 'tag') {
-              if (!inner.close) {
-                if (inner.name && ['html', 'head', 'body', 'div', 'section', 'article', 'main'].includes(inner.name)) {
-                  depth++;
-                }
-              } else {
-                if (inner.name && ['html', 'head', 'body', 'div', 'section', 'article', 'main'].includes(inner.name)) {
-                  depth--;
-                }
-              }
-            } else if (inner.type === 'text' && inner.content?.trim()) {
-              blockKids.push(buildPara([buildSpan(inner.content!.trim())], {}));
+          // Find closing tag and process contents
+          const start = i + 1;
+          let end = start;
+          let divDepth = 1;
+          while (end < tokens.length && divDepth > 0) {
+            const t = tokens[end];
+            if (t.type === 'tag' && !t.close) {
+              if (['html', 'head', 'body', 'div', 'section', 'article', 'main'].includes(t.name ?? '')) divDepth++;
+            } else if (t.type === 'tag' && t.close) {
+              if (['html', 'head', 'body', 'div', 'section', 'article', 'main'].includes(t.name ?? '')) divDepth--;
             }
-            i++;
+            end++;
           }
-          kids.push(...blockKids);
+          end--;
+
+          // Process tokens between start and end
+          const subTokens = tokens.slice(start, end);
+          const subKids = parseTokens(subTokens);
+          kids.push(...subKids);
+
+          i = end + 1;
           continue;
 
         case 'p':

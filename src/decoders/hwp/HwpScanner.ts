@@ -585,7 +585,7 @@ function parseTableCtrl(
   const rowCnt = tblData.length >= 6 ? BinaryKit.readU16LE(tblData, 4) : 1;
   const colCnt = tblData.length >= 8 ? BinaryKit.readU16LE(tblData, 6) : 1;
 
-  interface PC { row: number; col: number; cs: number; rs: number; widthHwp: number; props: CellProps; paras: ParaNode[] }
+  interface PC { row: number; col: number; cs: number; rs: number; widthHwp: number; heightHwp?: number; props: CellProps; paras: ParaNode[] }
   const parsed: PC[] = [];
 
   for (let ci = 0; ci < cells.length; ci++) {
@@ -593,7 +593,7 @@ function parseTableCtrl(
     const seqIdx = ci;
     const pc = shield.guard(
       () => parseCellRec(c.data, c.tag, recs, c.cStart, c.cEnd, di, shield, seqIdx, colCnt),
-      { row: Math.floor(ci / (colCnt || 1)), col: ci % (colCnt || 1), cs: 1, rs: 1, widthHwp: 0, props: {}, paras: [buildPara([buildSpan('')])] },
+      { row: Math.floor(ci / (colCnt || 1)), col: ci % (colCnt || 1), cs: 1, rs: 1, widthHwp: 0, heightHwp: undefined, props: {}, paras: [buildPara([buildSpan('')])] },
       `hwp:cell@${c.cStart}`,
     );
     parsed.push(pc);
@@ -646,9 +646,19 @@ function parseTableCtrl(
   for (let r = 0; r < actualRowCnt; r++) {
     const rc = parsed.filter(c => c.row === r).sort((a, b) => a.col - b.col);
     if (rc.length === 0) continue;
+
+    // Calculate row height from cells in this row (max height among cells)
+    let rowHeightPt: number | undefined = undefined;
+    for (const c of rc) {
+      if (c.heightHwp && c.heightHwp > 0) {
+        const hPt = Metric.hwpToPt(c.heightHwp);
+        rowHeightPt = rowHeightPt == null || hPt > rowHeightPt ? hPt : rowHeightPt;
+      }
+    }
+
     rows.push(buildRow(rc.map(c =>
       buildCell(c.paras.length ? c.paras : [buildPara([buildSpan('')])], { cs: c.cs, rs: c.rs, props: c.props }),
-    )));
+    ), rowHeightPt));
   }
   if (rows.length === 0) return { grid: null, next: i };
 
@@ -681,6 +691,7 @@ function parseCellRec(
 ) {
   let col: number, row: number, cs = 1, rs = 1;
   let widthHwp = 0;
+  let heightHwp = 0;
   const props: CellProps = {};
 
   const attr = d.length >= 6 ? BinaryKit.readU32LE(d, 2) : 0;
@@ -700,6 +711,7 @@ function parseCellRec(
     cs  = Math.max(1, BinaryKit.readU16LE(d, 12));
     rs  = Math.max(1, BinaryKit.readU16LE(d, 14));
     widthHwp = BinaryKit.readU32LE(d, 16);
+    heightHwp = d.length >= 24 ? BinaryKit.readU32LE(d, 20) : 0;
 
     // Cell padding (non-default only — default already set by tblCellMar in DocxEncoder)
     if (d.length >= 32) {
@@ -724,6 +736,7 @@ function parseCellRec(
     cs  = d.length >= 12 ? Math.max(1, BinaryKit.readU16LE(d, 10)) : 1;
     rs  = d.length >= 14 ? Math.max(1, BinaryKit.readU16LE(d, 12)) : 1;
     widthHwp = d.length >= 18 ? BinaryKit.readU32LE(d, 14) : 0;
+    heightHwp = d.length >= 22 ? BinaryKit.readU32LE(d, 18) : 0;
 
     // Cell padding (non-default only)
     if (d.length >= 30) {
@@ -819,7 +832,7 @@ function parseCellRec(
     } else { k++; }
   }
 
-  return { row, col, cs, rs, props, widthHwp, paras: paras.length ? paras : [buildPara([buildSpan('')])] };
+  return { row, col, cs, rs, props, widthHwp, heightHwp: heightHwp || undefined, paras: paras.length ? paras : [buildPara([buildSpan('')])] };
 }
 
 /* ── PAGE_DEF ───────────────────────────────────────────────── */

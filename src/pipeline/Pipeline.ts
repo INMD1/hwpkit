@@ -1,5 +1,6 @@
 import type { DocRoot } from '../model/doc-tree';
 import type { Outcome } from '../contract/result';
+import type { EncoderOptions } from '../contract/encoder';
 import { succeed, fail } from '../contract/result';
 import { registry } from './registry';
 
@@ -38,7 +39,7 @@ export class Pipeline {
   }
 
   /** 목표 포맷으로 변환 */
-  async to(targetFmt: string): Promise<Outcome<Uint8Array>> {
+  async to(targetFmt: string, options?: EncoderOptions): Promise<Outcome<Uint8Array>> {
     const decoder = registry.getDecoder(this.srcFmt);
     const encoder = registry.getEncoder(targetFmt);
 
@@ -48,7 +49,7 @@ export class Pipeline {
     const docResult = await decoder.decode(this.raw);
     if (!docResult.ok) return docResult;
 
-    const encResult = await encoder.encode(docResult.data);
+    const encResult = await encoder.encode(docResult.data, options);
     if (!encResult.ok) return { ...encResult, warns: [...docResult.warns, ...encResult.warns] };
 
     return { ...encResult, warns: [...docResult.warns, ...encResult.warns] };

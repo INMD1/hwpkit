@@ -1,6 +1,7 @@
 import type { DocRoot, ParaNode, SpanNode, GridNode, ContentNode, ImgNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
 import type { Stroke } from '../../model/doc-props';
+import type { EncoderOptions } from '../../contract/encoder';
 import { succeed, fail } from '../../contract/result';
 import { TextKit } from '../../toolkit/TextKit';
 import { registry } from '../../pipeline/registry';
@@ -9,7 +10,8 @@ import { BaseEncoder } from '../../core/BaseEncoder';
 export class MdEncoder extends BaseEncoder {
   protected getFormat(): string { return 'md'; }
 
-  async encode(doc: DocRoot): Promise<Outcome<Uint8Array>> {
+  async encode(doc: DocRoot, options?: EncoderOptions): Promise<Outcome<Uint8Array>> {
+    const includeImages = options?.includeImages !== false;  // default: true
     try {
       const warns: string[] = [];
       const parts: string[] = [];
@@ -18,7 +20,7 @@ export class MdEncoder extends BaseEncoder {
         if (sheet.headers && sheet.headers.default && sheet.headers.default.length > 0) warns.push('[SHIELD] MD: 머리글(header) 표현 불가 — 손실됨');
         if (sheet.footers && sheet.footers.default && sheet.footers.default.length > 0) warns.push('[SHIELD] MD: 바닥글(footer) 표현 불가 — 손실됨');
 
-        for (const kid of sheet.kids) parts.push(encodeContent(kid, warns));
+        for (const kid of sheet.kids) parts.push(encodeContent(kid, warns, includeImages));
       }
       return succeed(this.stringToBytes(parts.join('\n\n')), warns);
     } catch (e: any) {
@@ -27,14 +29,14 @@ export class MdEncoder extends BaseEncoder {
   }
 }
 
-function encodeContent(node: ContentNode, warns: string[]): string {
-  return node.tag === 'grid' ? encodeGrid(node, warns) : encodePara(node, warns);
+function encodeContent(node: ContentNode, warns: string[], includeImages: boolean): string {
+  return node.tag === 'grid' ? encodeGrid(node, warns, includeImages) : encodePara(node, warns, includeImages);
 }
 
-function encodePara(para: ParaNode, warns: string[]): string {
+function encodePara(para: ParaNode, warns: string[], includeImages: boolean): string {
   const text = para.kids.map(k => {
     if (k.tag === 'span') return encodeSpan(k, warns);
-    if (k.tag === 'img') return encodeImage(k);
+    if (k.tag === 'img') return encodeImage(k, includeImages);
     return '';
   }).join('');
 
@@ -112,7 +114,10 @@ function encodeSpan(span: SpanNode, warns: string[]): string {
   return r;
 }
 
-function encodeImage(img: ImgNode): string {
+function encodeImage(img: ImgNode, includeImages: boolean): string {
+  if (!includeImages) {
+    return `![${img.alt ?? ''}]`;  // alt text only, no data URI
+  }
   return `![${img.alt ?? ''}](data:${img.mime};base64,${img.b64})`;
 }
 
@@ -126,7 +131,7 @@ function strokeToCss(s?: Stroke): string | undefined {
   return `${px}px ${style} ${color}`;
 }
 
-function encodeGrid(grid: GridNode, warns: string[]): string {
+function encodeGrid(grid: GridNode, warns: string[], includeImages: boolean): string {
   if (grid.kids.length === 0) return '';
 
   // HTML 테이블로 출력 — 테두리/배경색을 인라인 스타일로 유지
@@ -177,7 +182,7 @@ function encodeGrid(grid: GridNode, warns: string[]): string {
       else if (cell.props.va === 'bot') styles[1] = 'vertical-align:bottom';
 
       const tag = (grid.props.headerRow && ri === 0) || cell.props.isHeader ? 'th' : 'td';
-      const content = cell.kids.map(p => encodePara(p, warns)).join('\n');
+      const content = cell.kids.map(p => encodePara(p, warns, includeImages)).join('\n');
       cells += `<${tag}${cs}${rs} style="${styles.join(';')}">${content}</${tag}>`;
       colIdx += cell.cs;
     }
