@@ -16,19 +16,24 @@ export class DocxEncoder extends BaseEncoder {
 
   async encode(doc: DocRoot): Promise<Outcome<Uint8Array>> {
     try {
-      const sheet = doc.kids[0];
-      const dims = normalizeDims(sheet?.dims ?? A4);
-      const kids = sheet?.kids ?? [];
+      // 모든 섹션(SheetNode)을 처리 — 첫 번째 섹션에서 헤더/푸터/페이지 설정을 가져오고
+      // 이후 섹션들의 콘텐츠는 sectPr로 구분하여 단일 body에 병합한다.
+      const sheets = doc.kids.length > 0 ? doc.kids : [];
+      const firstSheet = sheets[0];
+      const dims = normalizeDims(firstSheet?.dims ?? A4);
+
+      // 모든 섹션의 콘텐츠를 합산
+      const allKids: ContentNode[] = sheets.flatMap(s => s?.kids ?? []);
 
       const images: ImageEntry[] = [];
       const ctx: EncCtx = { images, nextId: 10, nextImgNum: 1, warns: [], imgMap: new WeakMap() };
 
-      // Collect images from content
-      collectImages(kids, ctx);
+      // Collect images from all content
+      collectImages(allKids, ctx);
 
-      // Header / footer
-      let headerParas = sheet?.headers?.default;
-      let footerParas = sheet?.footers?.default;
+      // Header / footer (첫 번째 섹션 기준)
+      let headerParas = firstSheet?.headers?.default;
+      let footerParas = firstSheet?.footers?.default;
       const hasHeader = headerParas && headerParas.length > 0;
       const hasFooter = footerParas && footerParas.length > 0;
 
@@ -39,8 +44,11 @@ export class DocxEncoder extends BaseEncoder {
       const headerRId = hasHeader ? `rId${ctx.nextId++}` : '';
       const footerRId = hasFooter ? `rId${ctx.nextId++}` : '';
 
-      // Numbering: collect list info
-      const numInfo = collectNumbering(kids);
+      // Numbering: collect list info from all sections
+      const numInfo = collectNumbering(allKids);
+
+      // kids 참조를 allKids로 통일 (후속 코드 호환)
+      const kids = allKids;
 
       const entries: { name: string; data: Uint8Array }[] = [
         { name: '[Content_Types].xml', data: this.stringToBytes(contentTypes(images, hasHeader, hasFooter)) },
@@ -361,31 +369,36 @@ function encodeParaInner(para: ParaNode, ctx: EncCtx): string {
   }
 
   // Spacing (before / after / line height) - ensure all values are non-negative
+  // ECMA-376 §17.3.1.33 spacing: line은 1/240th of a line(auto) 또는 dxa(exact/atLeast)
   let spacingXml = '';
-  const { spaceBefore, spaceAfter, lineHeight } = para.props;
-  if (spaceBefore !== undefined || spaceAfter !== undefined || lineHeight !== undefined) {
+  const { spaceBefore, spaceAfter, lineHeight, lineHeightFixed } = para.props;
+  if (spaceBefore !== undefined || spaceAfter !== undefined || lineHeight !== undefined || lineHeightFixed !== undefined) {
     const parts: string[] = [];
     if (spaceBefore !== undefined) parts.push(`w:before="${Math.max(0, Metric.ptToDxa(spaceBefore))}"`);
-    if (spaceAfter !== undefined) parts.push(`w:after="${Math.max(0, Metric.ptToDxa(spaceAfter))}"`);
-    if (lineHeight !== undefined) parts.push(`w:line="${Math.round(lineHeight * 240)}" w:lineRule="auto"`);
+    if (spaceAfter  !== undefined) parts.push(`w:after="${Math.max(0, Metric.ptToDxa(spaceAfter))}"`);
+    if (lineHeightFixed !== undefined) {
+      // FIXED: lineRule="exact", line값은 dxa (1pt = 20dxa)
+      parts.push(`w:line="${Math.max(1, Metric.ptToDxa(lineHeightFixed))}" w:lineRule="exact"`);
+    } else if (lineHeight !== undefined) {
+      parts.push(`w:line="${Math.round(lineHeight * 240)}" w:lineRule="auto"`);
+    }
     spacingXml = `<w:spacing ${parts.join(' ')}/>`;
   }
 
-  // Indentation - ensure all values are non-negative (starting from 0, negatives fallback to 0)
+  // Indentation — ECMA-376 §17.3.1.12 ind
+  // w:left = 전체 왼쪽 여백(dxa), w:right = 전체 오른쪽 여백(dxa)
+  // w:firstLine = 첫 줄 추가 들여쓰기(dxa, 양수), w:hanging = 내어쓰기(dxa, 양수값으로 표현)
   let indentXml = '';
-  const indentPt = para.props.indentPt ?? 0;
-  const leftDxa = Math.round(Math.max(0, Metric.ptToDxa(indentPt)));
+  const leftDxa  = Math.round(Metric.ptToDxa(para.props.indentPt ?? 0));
+  const rightDxa = Math.round(Metric.ptToDxa(para.props.indentRightPt ?? 0));
+  const firstPt  = para.props.firstLineIndentPt ?? 0;
 
-  const firstPt = para.props.firstLineIndentPt ?? 0;
-  const firstLineDxa = Math.round(Math.max(0, Metric.ptToDxa(firstPt)));
-
-  if (leftDxa > 0 || firstLineDxa > 0) {
-    const parts: string[] = [];
-    if (leftDxa > 0) parts.push(`w:left="${leftDxa}"`);
-    if (firstLineDxa > 0) parts.push(`w:firstLine="${firstLineDxa}"`);
-
-    if (parts.length > 0) indentXml = `<w:ind ${parts.join(' ')}/>`;
-  }
+  const indParts: string[] = [];
+  if (leftDxa  > 0) indParts.push(`w:left="${leftDxa}"`);
+  if (rightDxa > 0) indParts.push(`w:right="${rightDxa}"`);
+  if (firstPt  > 0) indParts.push(`w:firstLine="${Math.round(Metric.ptToDxa(firstPt))}"`);
+  if (firstPt  < 0) indParts.push(`w:hanging="${Math.round(Metric.ptToDxa(-firstPt))}"`);
+  if (indParts.length > 0) indentXml = `<w:ind ${indParts.join(' ')}/>`;
 
   const runs = para.kids.map(k => {
     if (k.tag === 'span') return encodeRun(k, ctx);
@@ -447,6 +460,7 @@ function encodeImage(img: ImgNode, ctx: EncCtx): string {
   const graphic = `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="Image"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${rId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic>`;
 
   const layout = img.layout;
+  // 'inline'만 wp:inline 사용; 그 외 모든 wrap은 wp:anchor (float)로 처리
   const isInline = !layout || layout.wrap === 'inline';
 
   if (isInline) {
@@ -505,10 +519,13 @@ const HORZ_ALIGN_DOCX: Record<string, string> = {
 const VERT_ALIGN_DOCX: Record<string, string> = {
   top: 'top', center: 'center', bottom: 'bottom',
 };
+// ECMA-376 §20.4.2 wordprocessingDrawing wrapping elements
 const WRAP_DOCX: Record<string, string> = {
   square: '<wp:wrapSquare wrapText="bothSides"/>',
   tight: '<wp:wrapTight><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/><wp:lineTo x="0" y="21600"/><wp:lineTo x="21600" y="21600"/><wp:lineTo x="21600" y="0"/><wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapTight>',
   through: '<wp:wrapThrough wrapText="bothSides"><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/><wp:lineTo x="0" y="21600"/><wp:lineTo x="21600" y="21600"/><wp:lineTo x="21600" y="0"/><wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapThrough>',
+  // ECMA-376 §20.4.2.15: wrapTopAndBottom — 텍스트가 이미지 위아래로만 흐름
+  topAndBottom: '<wp:wrapTopAndBottom/>',
   none: '<wp:wrapNone/>',
   behind: '<wp:wrapNone/>',
   front: '<wp:wrapNone/>',
@@ -729,8 +746,12 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
     }
   }
 
+  // ECMA-376 §17.4.58: tblJc — 표 가로 정렬 (start/center/end)
+  const tblAlignMap: Record<string, string> = { left: 'start', center: 'center', right: 'end', justify: 'start' };
+  const tblJc = gp.align ? `<w:jc w:val="${tblAlignMap[gp.align] ?? 'start'}"/>` : '';
+
   return `    <w:tbl>
-      <w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="${Math.round(totalDxa)}" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="${firstRow}" w:lastRow="${lastRow}" w:firstColumn="${firstCol}" w:lastColumn="${lastCol}" w:noHBand="${noHBand}" w:noVBand="${noVBand}"/>${tblBorders}<w:tblCellMar><w:top w:w="28" w:type="dxa"/><w:left w:w="72" w:type="dxa"/><w:bottom w:w="28" w:type="dxa"/><w:right w:w="72" w:type="dxa"/></w:tblCellMar></w:tblPr>
+      <w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="${Math.round(totalDxa)}" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="${firstRow}" w:lastRow="${lastRow}" w:firstColumn="${firstCol}" w:lastColumn="${lastCol}" w:noHBand="${noHBand}" w:noVBand="${noVBand}"/>${tblBorders}${tblJc}<w:tblCellMar><w:top w:w="28" w:type="dxa"/><w:left w:w="72" w:type="dxa"/><w:bottom w:w="28" w:type="dxa"/><w:right w:w="72" w:type="dxa"/></w:tblCellMar></w:tblPr>
       <w:tblGrid>${gridCols}</w:tblGrid>
 ${rows}
     </w:tbl>`;

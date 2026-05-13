@@ -620,9 +620,11 @@ function parseTableCtrl(
     }
   }
   // Pass 2: for columns still 0, try to derive from multi-span cells
+  // Sort by span size ascending so smaller, more precise spans fill widths before larger spans
   const zeroColumns = colWidthsPt.filter(w => w === 0).length;
   if (zeroColumns > 0) {
-    for (const c of parsed) {
+    const spanCells = parsed.filter(c => c.cs > 1 && c.widthHwp > 0).sort((a, b) => a.cs - b.cs);
+    for (const c of spanCells) {
       if (c.cs > 1 && c.widthHwp > 0) {
         // Subtract known column widths from the span
         let known = 0;
@@ -640,6 +642,11 @@ function parseTableCtrl(
         }
       }
     }
+  }
+
+  // Post-process: clamp near-zero column widths (< 1pt = floating-point artifact) to minimum 1pt
+  for (let i = 0; i < colWidthsPt.length; i++) {
+    if (colWidthsPt[i] > 0 && colWidthsPt[i] < 1) colWidthsPt[i] = 1;
   }
 
   const rows = [];

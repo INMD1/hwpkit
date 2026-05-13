@@ -29,10 +29,13 @@ interface CharPrInfo {
 
 interface ParaPrInfo {
   align?: string;
-  indentPt?: number;
+  indentPt?: number;           // hc:left → 문단 전체 왼쪽 여백
+  indentRightPt?: number;      // hc:right → 문단 전체 오른쪽 여백
+  firstLineIndentPt?: number;  // hc:indent → 첫 줄 들여쓰기 (양수=들여쓰기, 음수=내어쓰기)
   spaceBefore?: number;
   spaceAfter?: number;
   lineHeight?: number;
+  lineHeightFixed?: number;    // FIXED 행 높이 (pt)
 }
 
 interface DecCtx {
@@ -354,32 +357,50 @@ function extractParaPrs(headObj: any): Map<number, ParaPrInfo> {
       }
 
       let indentPt: number | undefined;
+      let indentRightPt: number | undefined;
+      let firstLineIndentPt: number | undefined;
       let spaceBefore: number | undefined;
       let spaceAfter: number | undefined;
       let lineHeight: number | undefined;
+      let lineHeightFixed: number | undefined;
 
       if (marginEl) {
-        // Handle both hc:intent (our encoder) and hc:indent (Hancom standard)
-        const intentEl = marginEl?.['hc:intent']?.[0] ?? marginEl?.['hc:indent']?.[0];
+        // OWPML §7.5.4.4: hc:left=전체왼쪽여백, hc:right=전체오른쪽여백,
+        // hc:indent=첫줄들여쓰기(양수)/내어쓰기(음수)
+        // hc:intent는 자사 인코더가 생성하는 오기 표기로, hc:indent와 동일하게 처리
+        const leftEl   = marginEl?.['hc:left']?.[0];
+        const rightEl  = marginEl?.['hc:right']?.[0];
+        const indentEl = marginEl?.['hc:intent']?.[0] ?? marginEl?.['hc:indent']?.[0];
         const prevEl   = marginEl?.['hc:prev']?.[0];
         const nextEl   = marginEl?.['hc:next']?.[0];
-        const intentVal = Number(intentEl?._attr?.value ?? 0);
+
+        const leftVal   = Number(leftEl?._attr?.value ?? 0);
+        const rightVal  = Number(rightEl?._attr?.value ?? 0);
+        const indentVal = Number(indentEl?._attr?.value ?? 0);
         const prevVal   = Number(prevEl?._attr?.value ?? 0);
         const nextVal   = Number(nextEl?._attr?.value ?? 0);
-        if (intentVal !== 0) indentPt    = Metric.hwpToPt(intentVal);
-        if (prevVal   >  0)  spaceBefore = Metric.hwpToPt(prevVal);
-        if (nextVal   >  0)  spaceAfter  = Metric.hwpToPt(nextVal);
+
+        if (leftVal   !== 0) indentPt          = Metric.hwpToPt(leftVal);
+        if (rightVal  !== 0) indentRightPt      = Metric.hwpToPt(rightVal);
+        if (indentVal !== 0) firstLineIndentPt  = Metric.hwpToPt(indentVal);
+        if (prevVal   >  0)  spaceBefore        = Metric.hwpToPt(prevVal);
+        if (nextVal   >  0)  spaceAfter         = Metric.hwpToPt(nextVal);
       }
 
       if (lineSpEl) {
         const lsAttr = lineSpEl._attr ?? {};
         const lsType = lsAttr.type ?? 'PERCENT';
         const lsVal  = Number(lsAttr.value ?? 160);
-        // 160% = HWP/HWPX 기본값 → DOCX 기본(1.0x)에 맡김. 비기본값만 명시 인코딩.
-        if (lsType === 'PERCENT' && lsVal > 0 && lsVal !== 160) lineHeight = lsVal / 100;
+        // OWPML §7.5.4.6: PERCENT(비율), FIXED(고정), BETWEEN_LINE(줄간격), AT_LEAST(최소)
+        if (lsType === 'PERCENT' && lsVal > 0 && lsVal !== 160) {
+          lineHeight = lsVal / 100;
+        } else if (lsType === 'FIXED' && lsVal > 0) {
+          // FIXED: 값이 HWPUNIT 단위의 고정 줄 높이
+          lineHeightFixed = Metric.hwpToPt(lsVal);
+        }
       }
 
-      map.set(id, { align, indentPt, spaceBefore, spaceAfter, lineHeight });
+      map.set(id, { align, indentPt, indentRightPt, firstLineIndentPt, spaceBefore, spaceAfter, lineHeight, lineHeightFixed });
     }
   } catch { /* non-fatal */ }
   return map;
@@ -578,10 +599,13 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
 
   // Apply spacing/indent/lineHeight from paraPr definition
   if (paraPrDef) {
-    if (paraPrDef.indentPt    !== undefined) props.indentPt    = paraPrDef.indentPt;
-    if (paraPrDef.spaceBefore !== undefined) props.spaceBefore = paraPrDef.spaceBefore;
-    if (paraPrDef.spaceAfter  !== undefined) props.spaceAfter  = paraPrDef.spaceAfter;
-    if (paraPrDef.lineHeight  !== undefined) props.lineHeight  = paraPrDef.lineHeight;
+    if (paraPrDef.indentPt          !== undefined) props.indentPt          = paraPrDef.indentPt;
+    if (paraPrDef.indentRightPt     !== undefined) props.indentRightPt     = paraPrDef.indentRightPt;
+    if (paraPrDef.firstLineIndentPt !== undefined) props.firstLineIndentPt = paraPrDef.firstLineIndentPt;
+    if (paraPrDef.spaceBefore       !== undefined) props.spaceBefore       = paraPrDef.spaceBefore;
+    if (paraPrDef.spaceAfter        !== undefined) props.spaceAfter        = paraPrDef.spaceAfter;
+    if (paraPrDef.lineHeight        !== undefined) props.lineHeight        = paraPrDef.lineHeight;
+    if (paraPrDef.lineHeightFixed   !== undefined) props.lineHeightFixed   = paraPrDef.lineHeightFixed;
   }
 
   // List support (from inline attr)
@@ -726,17 +750,19 @@ function extractHwpxLayout(posAttr: any, pic: any): ImgLayout {
 
   // textWrap → wrap (direct attribute of hp:pic element)
   const textWrap: string = (pic?._attr?.textWrap ?? pic?.pic?.[0]?._attr?.textWrap ?? 'TOP_AND_BOTTOM');
+  // OWPML §7.5.8.1 textWrap → ImgWrap 매핑
+  // TOP_AND_BOTTOM: 텍스트가 이미지 위아래로만 흐름 → DOCX wrapTopAndBottom (float anchor)
   const wrapMap: Record<string, ImgWrap> = {
-    TOP_AND_BOTTOM: 'inline',  // inline wrapping (text flows above and below)
+    TOP_AND_BOTTOM: 'topAndBottom',
     SQUARE: 'square',
     BOTH_SIDES: 'tight',
-    LEFT: 'tight',     // text flows only on left side
-    RIGHT: 'tight',   // text flows only on right side
+    LEFT: 'tight',
+    RIGHT: 'tight',
     LARGER_ONLY: 'tight',
     SMALLER_ONLY: 'tight',
     LARGEST_ONLY: 'tight',
     BEHIND_TEXT: 'behind',
-    FRONT_TEXT: 'none',
+    FRONT_TEXT: 'front',
   };
   const wrap: ImgWrap = wrapMap[textWrap] ?? 'square';
 

@@ -1,7 +1,7 @@
 export type Align = 'left' | 'center' | 'right' | 'justify';
 
 // ─── 이미지 배치 ────────────────────────────────────────────
-export type ImgWrap = 'inline' | 'square' | 'tight' | 'through' | 'none' | 'behind' | 'front';
+export type ImgWrap = 'inline' | 'square' | 'tight' | 'through' | 'none' | 'behind' | 'front' | 'topAndBottom';
 export type ImgHorzAlign = 'left' | 'center' | 'right';
 export type ImgVertAlign = 'top' | 'center' | 'bottom';
 export type ImgHorzRelTo = 'margin' | 'column' | 'page' | 'para';
@@ -42,14 +42,15 @@ export interface TextProps {
 export interface ParaProps {
   align?: Align;
   heading?: Heading;
-  styleId?: string;           // DOCX pStyle styleId (e.g. "Heading1", "TOC1")
-  indentPt?: number;          // 문단 왼쪽 전체 들여쓰기 (pt)
-  indentRightPt?: number;     // 문단 오른쪽 전체 들여쓰기 (pt)
-  firstLineIndentPt?: number; // 첫 줄만 추가 들여쓰기 (pt, 음수=내어쓰기)
-  leftMargin?: number;        // 문단 왼쪽 여백 (HWP leftMargin, pt)
+  styleId?: string;              // DOCX pStyle styleId (e.g. "Heading1", "TOC1")
+  indentPt?: number;             // 문단 왼쪽 전체 들여쓰기 (pt) — OWPML hc:left
+  indentRightPt?: number;        // 문단 오른쪽 전체 들여쓰기 (pt) — OWPML hc:right
+  firstLineIndentPt?: number;    // 첫 줄 들여쓰기 (pt, 음수=내어쓰기) — OWPML hc:indent
+  leftMargin?: number;           // 문단 왼쪽 여백 (HWP leftMargin, pt)
   spaceBefore?: number;
   spaceAfter?: number;
-  lineHeight?: number;
+  lineHeight?: number;           // 줄 간격 배율 (예: 1.5 = 150%)
+  lineHeightFixed?: number;      // 고정 줄 높이 (pt) — OWPML lineSpacing type="FIXED"
   listLv?: number;
   listOrd?: boolean;
   listMark?: string;
