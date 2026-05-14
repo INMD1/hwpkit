@@ -111,7 +111,9 @@ function collectImages(kids: ContentNode[], ctx: EncCtx): void {
     else if (kid.tag === 'grid') {
       for (const row of kid.kids)
         for (const cell of row.kids)
-          for (const p of cell.kids) collectImagesFromPara(p, ctx);
+          for (const p of cell.kids)
+            if (p.tag === 'para') collectImagesFromPara(p, ctx);
+            else collectImages([p], ctx);
     }
   }
 }
@@ -696,7 +698,21 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
             const l = cPadL ?? 72; const r = cPadR ?? 72;
             tcPrParts.push(`<w:tcMar><w:top w:w="${t}" w:type="dxa"/><w:left w:w="${l}" w:type="dxa"/><w:bottom w:w="${b}" w:type="dxa"/><w:right w:w="${r}" w:type="dxa"/></w:tcMar>`);
           }
-          cellContent = cell.kids.map((p: any) => encodeParaInner(p, ctx)).join('');
+          // Encode cell content: paragraphs and nested grids (중첩 표)
+          // DOCX cells must end with <w:p>; nested <w:tbl> goes between paras
+          const parts: string[] = [];
+          for (const kid of cell.kids) {
+            if (kid.tag === 'grid') {
+              parts.push(encodeGrid(kid, ctx));
+            } else {
+              parts.push(encodeParaInner(kid as ParaNode, ctx));
+            }
+          }
+          // Ensure trailing paragraph (DOCX requirement)
+          if (cell.kids.length === 0 || cell.kids[cell.kids.length - 1].tag === 'grid') {
+            parts.push('<w:p><w:pPr/></w:p>');
+          }
+          cellContent = parts.join('');
         } else {
           // continue 거나 void 인 경우 빈 단락 추가
           cellContent = `<w:p><w:pPr/></w:p>`;

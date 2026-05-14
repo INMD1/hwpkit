@@ -182,7 +182,7 @@ function encodeGrid(grid: GridNode, warns: string[], includeImages: boolean): st
       else if (cell.props.va === 'bot') styles[1] = 'vertical-align:bottom';
 
       const tag = (grid.props.headerRow && ri === 0) || cell.props.isHeader ? 'th' : 'td';
-      const content = cell.kids.map(p => encodePara(p, warns, includeImages)).join('\n');
+      const content = cell.kids.map(p => p.tag === 'para' ? encodePara(p, warns, includeImages) : encodeGrid(p, warns, includeImages)).join('\n');
       cells += `<${tag}${cs}${rs} style="${styles.join(';')}">${content}</${tag}>`;
       colIdx += cell.cs;
     }

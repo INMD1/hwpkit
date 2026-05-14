@@ -190,7 +190,7 @@ function encodeGrid(grid: GridNode, warns: string[]): string {
       else if (va === 'bot') styleAttrs.push('vertical-align:bottom');
       const styleAttr = styleAttrs.length > 0 ? ` style="${styleAttrs.join(';')}"` : '';
 
-      const content = cell.kids.map(p => encodePara(p, warns)).join('');
+      const content = cell.kids.map(p => p.tag === 'para' ? encodePara(p, warns) : encodeGrid(p, warns)).join('');
       cells += `<${tag}${cs}${rs}${styleAttr}>${content}</${tag}>`;
       ci += cell.cs;
     }

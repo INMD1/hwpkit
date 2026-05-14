@@ -544,7 +544,10 @@ function scanGrid(grid: GridNode, ctx: HwpxCtx): void {
   for (const row of grid.kids) {
     for (const cell of row.kids) {
       ctx.borderFillBank.addFromCellProps(cell.props, defStroke);
-      for (const p of cell.kids) scanPara(p, ctx);
+      for (const p of cell.kids) {
+        if (p.tag === 'grid') scanGrid(p, ctx);
+        else scanPara(p, ctx);
+      }
     }
   }
 }
@@ -1698,12 +1701,22 @@ function buildGridXml(
       const padB = cp.padB !== undefined ? Metric.ptToHwp(cp.padB) : 141;
 
       const innerW = Math.max(cellW - padL - padR, 100);
-      const parasXml =
-        cell.kids.length > 0
-          ? cell.kids
-              .map((p) => encodeParaPositioned(p, ctx, 0, "", innerW).xml)
-              .join("")
-          : `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" paraTcId="0"><hp:run charPrIDRef="0" charTcId="0"><hp:t xml:space="preserve"> </hp:t></hp:run></hp:p>`;
+      let parasXml = '';
+      if (cell.kids.length > 0) {
+        for (const kid of cell.kids) {
+          if (kid.tag === 'grid') {
+            // 중첩 표: <hp:p><hp:run><hp:tbl>...</hp:tbl></hp:run></hp:p> 형식으로 감싸기
+            const { xml: tblXml } = buildGridXml(kid, ctx);
+            const pid = ctx.nextElementId++;
+            const rid = ctx.nextElementId++;
+            parasXml += `<hp:p id="${pid}" paraPrIDRef="0" styleIDRef="0" paraTcId="0"><hp:run id="${rid}" charPrIDRef="0" charTcId="0">${tblXml}</hp:run></hp:p>`;
+          } else {
+            parasXml += encodeParaPositioned(kid, ctx, 0, '', innerW).xml;
+          }
+        }
+      } else {
+        parasXml = `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" paraTcId="0"><hp:run charPrIDRef="0" charTcId="0"><hp:t xml:space="preserve"> </hp:t></hp:run></hp:p>`;
+      }
 
       const vAlign =
         cp.va === "mid" ? "CENTER" : cp.va === "bot" ? "BOTTOM" : "TOP";
@@ -1746,7 +1759,13 @@ function estimateCellHeight(cell: CellNode, ctx: HwpxCtx): number {
   const topPad = 141;
   const botPad = 141;
   let h = 0;
-  for (const para of cell.kids) {
+  for (const kid of cell.kids) {
+    if (kid.tag === 'grid') {
+      // 중첩 표 높이는 최소값으로 처리
+      h += 1600;
+      continue;
+    }
+    const para = kid;
     const fs = fontSizeForPara(para, ctx);
     const ppId = ctx.paraPrMap.get(paraPrKey(para.props));
     const pp = ppId !== undefined ? ctx.paraPrs[ppId] : null;
@@ -1779,11 +1798,13 @@ function extractPreviewText(sheet?: SheetNode): string {
         const cells = row.kids.map((cell) =>
           cell.kids
             .flatMap((p) =>
-              p.kids.flatMap((k) =>
-                k.tag === "span"
-                  ? k.kids.flatMap((c) => (c.tag === "txt" ? [c.content] : []))
-                  : [],
-              ),
+              p.tag === 'para'
+                ? p.kids.flatMap((k) =>
+                    k.tag === "span"
+                      ? k.kids.flatMap((c) => (c.tag === "txt" ? [c.content] : []))
+                      : [],
+                  )
+                : [],
             )
             .join(""),
         );

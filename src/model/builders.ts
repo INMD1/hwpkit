@@ -61,7 +61,7 @@ export function buildRow(kids: CellNode[], heightPt?: number): RowNode {
 }
 
 export function buildCell(
-  kids: ParaNode[],
+  kids: (ParaNode | GridNode)[],
   opts: { cs?: number; rs?: number; props?: CellProps } = {},
 ): CellNode {
   return { tag: 'cell', cs: opts.cs ?? 1, rs: opts.rs ?? 1, props: opts.props ?? {}, kids };

@@ -53,7 +53,7 @@ export interface CellNode {
   cs: number;
   rs: number;
   props: CellProps;
-  kids: ParaNode[];
+  kids: (ParaNode | GridNode)[];
 }
 
 export interface RowNode  { tag: 'row'; kids: CellNode[]; heightPt?: number }

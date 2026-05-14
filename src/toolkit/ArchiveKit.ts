@@ -18,6 +18,62 @@ export const ArchiveKit = {
     const files = new Map<string, Uint8Array>();
     const view = new DataView(zipData.buffer, zipData.byteOffset, zipData.byteLength);
 
+    // Find EOCD by scanning backward from end (supports ZIP comment up to 64KB)
+    let eocdOffset = -1;
+    const searchStart = Math.max(0, zipData.length - 65558);
+    for (let i = zipData.length - 22; i >= searchStart; i--) {
+      if (view.getUint32(i, true) === 0x06054b50) {
+        eocdOffset = i;
+        break;
+      }
+    }
+
+    if (eocdOffset !== -1) {
+      // Parse central directory — always has correct sizes even with data descriptors
+      const entryCount      = view.getUint16(eocdOffset + 10, true);
+      const centralDirOffset = view.getUint32(eocdOffset + 16, true);
+
+      let cdOffset = centralDirOffset;
+      for (let i = 0; i < entryCount; i++) {
+        if (cdOffset + 46 > zipData.length) break;
+        if (view.getUint32(cdOffset, true) !== 0x02014b50) break;
+
+        const compressionMethod  = view.getUint16(cdOffset + 10, true);
+        const compressedSize     = view.getUint32(cdOffset + 20, true);
+        const uncompressedSize   = view.getUint32(cdOffset + 24, true);
+        const fileNameLength     = view.getUint16(cdOffset + 28, true);
+        const extraLength        = view.getUint16(cdOffset + 30, true);
+        const commentLength      = view.getUint16(cdOffset + 32, true);
+        const localHeaderOffset  = view.getUint32(cdOffset + 42, true);
+
+        const nameBytes = zipData.subarray(cdOffset + 46, cdOffset + 46 + fileNameLength);
+        const name = new TextDecoder('utf-8').decode(nameBytes);
+        cdOffset += 46 + fileNameLength + extraLength + commentLength;
+
+        if (name.endsWith('/')) continue; // directory entry
+
+        // Read actual data using the local header offset from central directory
+        const localFnLen    = view.getUint16(localHeaderOffset + 26, true);
+        const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
+        const dataOffset    = localHeaderOffset + 30 + localFnLen + localExtraLen;
+
+        let fileData: Uint8Array;
+        if (compressionMethod === 0) {
+          fileData = zipData.subarray(dataOffset, dataOffset + uncompressedSize);
+        } else if (compressionMethod === 8) {
+          const compressed = zipData.subarray(dataOffset, dataOffset + compressedSize);
+          fileData = pako.inflateRaw(compressed);
+        } else {
+          throw new Error(`Unsupported ZIP compression method: ${compressionMethod}`);
+        }
+
+        files.set(name, new Uint8Array(fileData));
+      }
+
+      return files;
+    }
+
+    // Fallback: scan local headers sequentially (no EOCD found — truncated ZIP)
     let offset = 0;
     while (offset < zipData.length - 4) {
       const sig = view.getUint32(offset, true);

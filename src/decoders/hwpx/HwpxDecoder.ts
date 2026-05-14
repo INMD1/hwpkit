@@ -408,29 +408,6 @@ function extractParaPrs(headObj: any): Map<number, ParaPrInfo> {
 
 // ─── Section decoding ──────────────────────────────────────
 
-// Recursively extract tables nested inside cells (e.g. approval signature blocks).
-function extractNestedTables(tbl: any, items: { type: string; node: any }[]): void {
-  const rows = getTag(tbl, 'hp:tr', 'hp:ROW');
-  for (const row of rows) {
-    const cells = getTag(row, 'hp:tc', 'hp:CELL');
-    for (const cell of cells) {
-      const subList = cell?.['hp:subList']?.[0] ?? cell?.subList?.[0];
-      const source = subList ?? cell;
-      const paras = getTag(source, 'hp:p', 'hp:P');
-      for (const p of paras) {
-        const runs = getTag(p, 'hp:run', 'hp:RUN');
-        for (const run of runs) {
-          const nestedTbls = getTag(run, 'hp:tbl', 'hp:TABLE');
-          for (const nestedTbl of nestedTbls) {
-            items.push({ type: 'table', node: nestedTbl });
-            extractNestedTables(nestedTbl, items);
-          }
-        }
-      }
-    }
-  }
-}
-
 function addParaItems(p: any, items: { type: string; node: any }[]): void {
   // Check if this paragraph contains a table in its runs
   const runs = getTag(p, 'hp:run', 'hp:RUN');
@@ -440,7 +417,6 @@ function addParaItems(p: any, items: { type: string; node: any }[]): void {
     if (tbls.length > 0) {
       for (const tbl of tbls) {
         items.push({ type: 'table', node: tbl });
-        extractNestedTables(tbl, items);
       }
       hasTable = true;
     }
@@ -909,26 +885,32 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
       const cs = Number(cellSpan.colSpan ?? ca.ColSpan ?? 1);
       const rs = Number(cellSpan.rowSpan ?? ca.RowSpan ?? 1);
 
-      // Parse paragraphs
-      let paras: ParaNode[] = [];
-      if (subList) {
-        const subParas = getTag(subList, 'hp:p', 'hp:P');
-        for (const sp of subParas) {
-          try {
-            paras.push(decodePara(sp, ctx));
-          } catch { /* skip corrupted para in cell */ }
-        }
-      } else {
-        const directParas = getTag(cell, 'hp:p', 'hp:P');
-        for (const dp of directParas) {
-          try {
-            paras.push(decodePara(dp, ctx));
-          } catch { /* skip */ }
-        }
+      // Parse cell content — paragraphs and nested tables (중첩 표)
+      const cellKids: (ParaNode | GridNode)[] = [];
+      const source = subList ?? cell;
+      const sourcePSource = getTag(source, 'hp:p', 'hp:P');
+      for (const sp of sourcePSource) {
+        try {
+          // Check if this paragraph contains a nested table in its runs
+          const runs = getTag(sp, 'hp:run', 'hp:RUN');
+          let hasNestedTable = false;
+          for (const run of runs) {
+            const nestedTbls = getTag(run, 'hp:tbl', 'hp:TABLE');
+            for (const nestedTbl of nestedTbls) {
+              try {
+                cellKids.push(decodeGrid(nestedTbl, ctx));
+              } catch { /* skip malformed nested table */ }
+              hasNestedTable = true;
+            }
+          }
+          if (!hasNestedTable) {
+            cellKids.push(decodePara(sp, ctx));
+          }
+        } catch { /* skip corrupted para in cell */ }
       }
 
       return buildCell(
-        paras.length > 0 ? paras : [buildPara([buildSpan('')])],
+        cellKids.length > 0 ? cellKids : [buildPara([buildSpan('')])],
         { cs, rs, props: cellProps },
       );
     });
