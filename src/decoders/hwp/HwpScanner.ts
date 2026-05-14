@@ -1,5 +1,5 @@
 import type { Decoder } from '../../contract/decoder';
-import type { DocRoot, ContentNode, ParaNode, SpanNode, ImgNode } from '../../model/doc-tree';
+import type { DocRoot, ContentNode, ParaNode, SpanNode, ImgNode, GridNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
 import type { Align, Stroke, StrokeKind, PageDims, TextProps, ParaProps, CellProps, GridProps } from '../../model/doc-props';
 import { succeed, fail } from '../../contract/result';
@@ -39,10 +39,11 @@ function isTableTag(t: number) { return t === TAG_TABLE_A || t === TAG_TABLE_B; 
 function isCellTag(t: number)  { return t === TAG_CELL_A || t === TAG_CELL_B || t === TAG_LIST_HEADER; }
 
 // CTRL_HEADER ctrlId values (UINT32-LE as ASCII)
-const CTRL_TABLE = 0x74626C20;  // ' lbt'
+const CTRL_TABLE = 0x74626C20;  // ' lbt' = 표(table)
 const CTRL_IMAGE = 0x696D6720;  // 'img '
 const CTRL_OBJ   = 0x6F626A20;  // 'obj '
 const CTRL_FIG   = 0x66696720;  // 'fig '
+const CTRL_GSO   = 0x67736F20;  // 'gso ' = 그리기 객체 (drawing object, contains embedded images)
 
 /* ═══════════════════════════════════════════════════════════════
    Types
@@ -278,8 +279,13 @@ function parseBorderFill(d: Uint8Array): HwpBorderFill {
    Body section parsing
    ═══════════════════════════════════════════════════════════════ */
 
+// gsoCtx: shared mutable counter for 'gso ' drawing objects.
+// Each 'gso ' CTRL_HEADER encountered increments this counter.
+// objectMap is keyed by 0-based gso order = sequential BinData insertion order.
+interface GsoCtx { count: number }
+
 function parseBody(
-  raw: Uint8Array, compressed: boolean, di: DocInfo, shield: ShieldedParser,
+  raw: Uint8Array, compressed: boolean, di: DocInfo, shield: ShieldedParser, gsoCtx: GsoCtx,
 ): { content: ContentNode[]; pageDims?: PageDims } {
   const recs = parseRecords(compressed ? tryInflate(raw) : raw);
   const content: ContentNode[] = [];
@@ -299,7 +305,7 @@ function parseBody(
       i++; // already handled above; skip at top level
     } else if (recs[i].tag === TAG_PARA_HEADER) {
       const r = shield.guard(
-        () => parseParagraphGroup(recs, i, di, shield),
+        () => parseParagraphGroup(recs, i, di, shield, gsoCtx),
         { nodes: [] as ContentNode[], next: i + 1 },
         `hwp:para@${i}`,
       );
@@ -315,7 +321,7 @@ function parseBody(
 /* ── Paragraph group ────────────────────────────────────────── */
 
 function parseParagraphGroup(
-  recs: HwpRecord[], start: number, di: DocInfo, shield: ShieldedParser,
+  recs: HwpRecord[], start: number, di: DocInfo, shield: ShieldedParser, gsoCtx: GsoCtx,
 ): { nodes: ContentNode[]; next: number } {
   const hdr = recs[start];
   const lv  = hdr.level;
@@ -327,7 +333,8 @@ function parseParagraphGroup(
   let text: ParaTextResult | null = null;
   let csPairs: [number, number][] = [];
   const grids: ContentNode[] = [];
-  const ctrlHeaders: { ctrlId: number; objId: number; wPt: number; hPt: number }[] = [];
+  // imgId: for 'gso' uses sequential gsoCtx.count; for others uses flags-based objId
+  const ctrlHeaders: { ctrlId: number; imgId: number; wPt: number; hPt: number }[] = [];
   let i = start + 1;
 
   while (i < recs.length && recs[i].level > lv) {
@@ -342,22 +349,23 @@ function parseParagraphGroup(
     } else if (r.tag === TAG_CTRL_HEADER && r.level === lv + 1) {
       if (r.data.length >= 4) {
         const ctrlId = BinaryKit.readU32LE(r.data, 0);
-        const objId = r.data.length >= 6 ? BinaryKit.readU16LE(r.data, 4) : 0;
 
-        // HWP 5.0 general-object layout (picture/figure ctrl):
+        // HWP 5.0 general-object layout:
         //   [0:4] ctrlId  [4:4] flags  [8:4] xOff  [12:4] yOff
         //   [16:4] width(HWPUNIT)  [20:4] height(HWPUNIT)
-        const MAX_HWP = 1_000_000; // sanity: < 10,000 pt
+        const MAX_HWP = 1_000_000;
         const rawW = r.data.length >= 24 ? BinaryKit.readU32LE(r.data, 16) : 0;
         const rawH = r.data.length >= 28 ? BinaryKit.readU32LE(r.data, 20) : 0;
         const wPt = rawW > 0 && rawW < MAX_HWP ? Metric.hwpToPt(rawW) : 0;
         const hPt = rawH > 0 && rawH < MAX_HWP ? Metric.hwpToPt(rawH) : 0;
 
-        ctrlHeaders.push({ ctrlId, objId, wPt, hPt });
+        // 'gso ' (그리기 객체) uses sequential counter; others use flags-based id
+        const imgId = ctrlId === CTRL_GSO ? gsoCtx.count++ : (r.data.length >= 6 ? BinaryKit.readU16LE(r.data, 4) : 0);
+        ctrlHeaders.push({ ctrlId, imgId, wPt, hPt });
 
         if (ctrlId === CTRL_TABLE) {
           const tr = shield.guard(
-            () => parseTableCtrl(recs, i, di, shield),
+            () => parseTableCtrl(recs, i, di, shield, gsoCtx),
             { grid: null, next: skipKids(recs, i) },
             `hwp:tbl@${i}`,
           );
@@ -374,40 +382,29 @@ function parseParagraphGroup(
     }
   }
 
-  // Match extended controls with CTRL_HEADER entries
-  if (text && ctrlHeaders.length > 0) {
-    for (let ci = 0; ci < text.controls.length; ci++) {
-      if (ci < ctrlHeaders.length) {
-        text.controls[ci].ctrlId = ctrlHeaders[ci].ctrlId;
-        text.controls[ci].matched = true;
-      }
-    }
-  }
-
   const nodes: ContentNode[] = [];
 
   // Build paragraph from text and inline controls (images)
   if (text && (text.chars.length > 0 || text.controls.length > 0)) {
     const paraContent: (SpanNode | ContentNode)[] = [];
 
-    // Process text chars and controls together
     if (text.chars.length > 0) {
       const spans = resolveCharShapes(text.chars, csPairs, di);
       paraContent.push(...spans);
     }
 
-    // Add placeholder spans for extended controls (images).
-    // Encode objId and display size from CTRL_HEADER so injection can use it: __EXT_N_W144_H108__
+    // Image placeholder spans: only for actual image controls.
+    // Non-image controls (footnotes, TOC entries, etc.) are silently skipped.
     if (text.controls.length > 0) {
       for (let ci = 0; ci < text.controls.length; ci++) {
         const ch = ctrlHeaders[ci];
-        const isImg = ch && (ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ);
-        const dimStr = (isImg && ch.wPt > 0 && ch.hPt > 0)
+        if (!ch) continue; // anchor-only ctrl (gso is sibling, not inline)
+        const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
+        if (!isImg) continue; // skip footnotes, TOC, page num, etc.
+        const dimStr = (ch.wPt > 0 && ch.hPt > 0)
           ? `_W${Math.round(ch.wPt)}_H${Math.round(ch.hPt)}`
           : '';
-        // Use objId from CTRL_HEADER for correct image lookup, not control index
-        const objId = ch?.objId ?? ci;
-        paraContent.push(buildSpan(`__EXT_${objId}${dimStr}__`));
+        paraContent.push(buildSpan(`__EXT_${ch.imgId}${dimStr}__`));
       }
     }
 
@@ -529,7 +526,7 @@ function styledSpan(text: string, shapeId: number, di: DocInfo): SpanNode {
 /* ── Table control parsing ──────────────────────────────────── */
 
 function parseTableCtrl(
-  recs: HwpRecord[], ctrlIdx: number, di: DocInfo, shield: ShieldedParser,
+  recs: HwpRecord[], ctrlIdx: number, di: DocInfo, shield: ShieldedParser, gsoCtx: GsoCtx,
 ): { grid: ContentNode | null; next: number } {
   const ctrlLv = recs[ctrlIdx].level;
   let i = ctrlIdx + 1;
@@ -585,15 +582,15 @@ function parseTableCtrl(
   const rowCnt = tblData.length >= 6 ? BinaryKit.readU16LE(tblData, 4) : 1;
   const colCnt = tblData.length >= 8 ? BinaryKit.readU16LE(tblData, 6) : 1;
 
-  interface PC { row: number; col: number; cs: number; rs: number; widthHwp: number; heightHwp?: number; props: CellProps; paras: ParaNode[] }
+  interface PC { row: number; col: number; cs: number; rs: number; widthHwp: number; heightHwp?: number; props: CellProps; paras: ParaNode[]; nestedGrids: GridNode[] }
   const parsed: PC[] = [];
 
   for (let ci = 0; ci < cells.length; ci++) {
     const c = cells[ci];
     const seqIdx = ci;
     const pc = shield.guard(
-      () => parseCellRec(c.data, c.tag, recs, c.cStart, c.cEnd, di, shield, seqIdx, colCnt),
-      { row: Math.floor(ci / (colCnt || 1)), col: ci % (colCnt || 1), cs: 1, rs: 1, widthHwp: 0, heightHwp: undefined, props: {}, paras: [buildPara([buildSpan('')])] },
+      () => parseCellRec(c.data, c.tag, recs, c.cStart, c.cEnd, di, shield, seqIdx, colCnt, gsoCtx),
+      { row: Math.floor(ci / (colCnt || 1)), col: ci % (colCnt || 1), cs: 1, rs: 1, widthHwp: 0, heightHwp: undefined, props: {}, paras: [buildPara([buildSpan('')])], nestedGrids: [] },
       `hwp:cell@${c.cStart}`,
     );
     parsed.push(pc);
@@ -663,9 +660,13 @@ function parseTableCtrl(
       }
     }
 
-    rows.push(buildRow(rc.map(c =>
-      buildCell(c.paras.length ? c.paras : [buildPara([buildSpan('')])], { cs: c.cs, rs: c.rs, props: c.props }),
-    ), rowHeightPt));
+    rows.push(buildRow(rc.map(c => {
+      const cellKids: (ParaNode | GridNode)[] = [
+        ...(c.paras.length ? c.paras : [buildPara([buildSpan('')])]),
+        ...(c.nestedGrids ?? []),
+      ];
+      return buildCell(cellKids, { cs: c.cs, rs: c.rs, props: c.props });
+    }), rowHeightPt));
   }
   if (rows.length === 0) return { grid: null, next: i };
 
@@ -694,7 +695,7 @@ function parseTableCtrl(
 
 function parseCellRec(
   d: Uint8Array, tag: number, recs: HwpRecord[], cStart: number, cEnd: number,
-  di: DocInfo, shield: ShieldedParser, seqIdx: number, colCnt: number,
+  di: DocInfo, shield: ShieldedParser, seqIdx: number, colCnt: number, gsoCtx: GsoCtx,
 ) {
   let col: number, row: number, cs = 1, rs = 1;
   let widthHwp = 0;
@@ -706,21 +707,16 @@ function parseCellRec(
   if (va === 1) props.va = 'mid';
   else if (va === 2) props.va = 'bot';
 
-  // Default cell inner margin in HWPUNIT (matches DOCX tblCellMar defaults set in encoder)
-  const HWP_PAD_LR_DEFAULT = 360;  // 3.6pt → 72 dxa
-  const HWP_PAD_TB_DEFAULT = 141;  // 1.41pt → 28 dxa
+  const HWP_PAD_LR_DEFAULT = 360;
+  const HWP_PAD_TB_DEFAULT = 141;
 
   if (tag === TAG_LIST_HEADER && d.length >= 22) {
-    // LIST_HEADER layout: [0:2]paraCount [2:4]attr [6:2]? [8:2]col [10:2]row
-    //   [12:2]cs [14:2]rs [16:4]widthHwp [20:4]heightHwp [24:8]pad[4] [32:2]bfId
     col = BinaryKit.readU16LE(d, 8);
     row = BinaryKit.readU16LE(d, 10);
     cs  = Math.max(1, BinaryKit.readU16LE(d, 12));
     rs  = Math.max(1, BinaryKit.readU16LE(d, 14));
     widthHwp = BinaryKit.readU32LE(d, 16);
     heightHwp = d.length >= 24 ? BinaryKit.readU32LE(d, 20) : 0;
-
-    // Cell padding (non-default only — default already set by tblCellMar in DocxEncoder)
     if (d.length >= 32) {
       const pL = BinaryKit.readU16LE(d, 24); const pR = BinaryKit.readU16LE(d, 26);
       const pT = BinaryKit.readU16LE(d, 28); const pB = BinaryKit.readU16LE(d, 30);
@@ -729,23 +725,15 @@ function parseCellRec(
       if (pT !== HWP_PAD_TB_DEFAULT) props.padT = Metric.hwpToPt(pT);
       if (pB !== HWP_PAD_TB_DEFAULT) props.padB = Metric.hwpToPt(pB);
     }
-
     const bfId = d.length >= 34 ? BinaryKit.readU16LE(d, 32) : 0;
-    if (bfId > 0 && bfId <= di.borderFills.length) {
-      const bf = di.borderFills[bfId - 1];
-      applyCellBorderFill(bf, props);
-    }
+    if (bfId > 0 && bfId <= di.borderFills.length) applyCellBorderFill(di.borderFills[bfId - 1], props);
   } else if (tag !== TAG_LIST_HEADER) {
-    // Full CELL record: [0:6]? [6:2]col [8:2]row [10:2]cs [12:2]rs
-    //   [14:4]widthHwp [18:4]heightHwp [22:8]pad[4] [30:2]bfId
     col = d.length >= 8  ? BinaryKit.readU16LE(d, 6) : seqIdx % (colCnt || 1);
     row = d.length >= 10 ? BinaryKit.readU16LE(d, 8) : Math.floor(seqIdx / (colCnt || 1));
     cs  = d.length >= 12 ? Math.max(1, BinaryKit.readU16LE(d, 10)) : 1;
     rs  = d.length >= 14 ? Math.max(1, BinaryKit.readU16LE(d, 12)) : 1;
     widthHwp = d.length >= 18 ? BinaryKit.readU32LE(d, 14) : 0;
     heightHwp = d.length >= 22 ? BinaryKit.readU32LE(d, 18) : 0;
-
-    // Cell padding (non-default only)
     if (d.length >= 30) {
       const pL = BinaryKit.readU16LE(d, 22); const pR = BinaryKit.readU16LE(d, 24);
       const pT = BinaryKit.readU16LE(d, 26); const pB = BinaryKit.readU16LE(d, 28);
@@ -754,24 +742,21 @@ function parseCellRec(
       if (pT !== HWP_PAD_TB_DEFAULT) props.padT = Metric.hwpToPt(pT);
       if (pB !== HWP_PAD_TB_DEFAULT) props.padB = Metric.hwpToPt(pB);
     }
-
     const bfId = d.length >= 32 ? BinaryKit.readU16LE(d, 30) : 0;
-    if (bfId > 0 && bfId <= di.borderFills.length) {
-      const bf = di.borderFills[bfId - 1];
-      applyCellBorderFill(bf, props);
-    }
+    if (bfId > 0 && bfId <= di.borderFills.length) applyCellBorderFill(di.borderFills[bfId - 1], props);
   } else {
-    // Fallback: LIST_HEADER too short, compute sequentially
     row = Math.floor(seqIdx / (colCnt || 1));
     col = seqIdx % (colCnt || 1);
   }
 
-  // Parse cell content paragraphs
   const paras: ParaNode[] = [];
+  const nestedGrids: GridNode[] = [];
+  const MAX_HWP = 1_000_000;
   let k = cStart;
+
   while (k < cEnd) {
     if (recs[k].tag === TAG_PARA_HEADER) {
-      // For cell paragraphs, they might be at various nesting levels
+      // Parse paragraph inside cell
       const r = shield.guard(
         () => {
           const hdr = recs[k];
@@ -780,66 +765,77 @@ function parseCellRec(
           const ps = di.paraShapes[psId];
           let txt: ParaTextResult | null = null;
           let csp: [number, number][] = [];
-          const ctrlHeaders: { ctrlId: number; objId: number; wPt: number; hPt: number }[] = [];
+          const ctrlHdrs: { ctrlId: number; imgId: number; wPt: number; hPt: number }[] = [];
           let j = k + 1;
           while (j < cEnd && recs[j].level > lv) {
             if (recs[j].tag === TAG_PARA_TEXT) { txt = decodeParaText(recs[j].data); j++; }
             else if (recs[j].tag === TAG_PARA_CHAR_SHAPE) { csp = parseCharShapePairs(recs[j].data); j++; }
             else if (recs[j].tag === TAG_CTRL_HEADER && recs[j].level === lv + 1) {
-              // Parse CTRL_HEADER for images inside table cells
               if (recs[j].data.length >= 4) {
                 const ctrlId = BinaryKit.readU32LE(recs[j].data, 0);
-                const objId = recs[j].data.length >= 6 ? BinaryKit.readU16LE(recs[j].data, 4) : 0;
-                const MAX_HWP = 1_000_000;
                 const rawW = recs[j].data.length >= 24 ? BinaryKit.readU32LE(recs[j].data, 16) : 0;
                 const rawH = recs[j].data.length >= 28 ? BinaryKit.readU32LE(recs[j].data, 20) : 0;
                 const wPt = rawW > 0 && rawW < MAX_HWP ? Metric.hwpToPt(rawW) : 0;
                 const hPt = rawH > 0 && rawH < MAX_HWP ? Metric.hwpToPt(rawH) : 0;
-                ctrlHeaders.push({ ctrlId, objId, wPt, hPt });
+                const imgId = ctrlId === CTRL_GSO ? gsoCtx.count++ : (recs[j].data.length >= 6 ? BinaryKit.readU16LE(recs[j].data, 4) : 0);
+                ctrlHdrs.push({ ctrlId, imgId, wPt, hPt });
               }
-              j++;
+              j = skipKids(recs, j);
             }
             else j++;
           }
-          // Match extended controls with CTRL_HEADER entries
-          if (txt && ctrlHeaders.length > 0) {
-            for (let ci = 0; ci < txt.controls.length; ci++) {
-              if (ci < ctrlHeaders.length) {
-                txt.controls[ci].ctrlId = ctrlHeaders[ci].ctrlId;
-                txt.controls[ci].matched = true;
-              }
-            }
-          }
-          // Build paragraph content with text and image placeholders
           const paraContent: (SpanNode | ContentNode)[] = [];
-          if (txt && txt.chars.length > 0) {
-            const spans = resolveCharShapes(txt.chars, csp, di);
-            paraContent.push(...spans);
-          }
-          // Add placeholder spans for extended controls (images)
+          if (txt && txt.chars.length > 0) paraContent.push(...resolveCharShapes(txt.chars, csp, di));
           if (txt && txt.controls.length > 0) {
             for (let ci = 0; ci < txt.controls.length; ci++) {
-              const ch = ctrlHeaders[ci];
-              const isImg = ch && (ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ);
-              const dimStr = (isImg && ch.wPt > 0 && ch.hPt > 0)
-                ? `_W${Math.round(ch.wPt)}_H${Math.round(ch.hPt)}`
-                : '';
-              const objId = ch?.objId ?? ci;
-              paraContent.push(buildSpan(`__EXT_${objId}${dimStr}__`));
+              const ch = ctrlHdrs[ci];
+              if (!ch) continue; // anchor-only ctrl char (gso is sibling, not child of this para)
+              const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
+              if (!isImg) continue;
+              const dimStr = (ch.wPt > 0 && ch.hPt > 0) ? `_W${Math.round(ch.wPt)}_H${Math.round(ch.hPt)}` : '';
+              paraContent.push(buildSpan(`__EXT_${ch.imgId}${dimStr}__`));
             }
           }
-          const spans = paraContent.length > 0 ? paraContent as any : [buildSpan('')];
-          return { para: buildPara(spans, buildParaProps(ps)), next: j };
+          const kids = paraContent.length > 0 ? paraContent as any : [buildSpan('')];
+          return { para: buildPara(kids, buildParaProps(ps)), next: j };
         },
         { para: buildPara([buildSpan('')]), next: k + 1 },
         `hwp:cellP@${k}`,
       );
       paras.push(r.para);
       k = r.next;
+    } else if (recs[k].tag === TAG_CTRL_HEADER && recs[k].data.length >= 4) {
+      // CTRL_HEADER at cell level (sibling of PARA_HEADER) — handles anchored 'gso' images and nested tables
+      const cellCtrlId = BinaryKit.readU32LE(recs[k].data, 0);
+      if (cellCtrlId === CTRL_GSO) {
+        const gsoId = gsoCtx.count++;
+        const rawW = recs[k].data.length >= 24 ? BinaryKit.readU32LE(recs[k].data, 16) : 0;
+        const rawH = recs[k].data.length >= 28 ? BinaryKit.readU32LE(recs[k].data, 20) : 0;
+        const wPt = rawW > 0 && rawW < MAX_HWP ? Metric.hwpToPt(rawW) : 0;
+        const hPt = rawH > 0 && rawH < MAX_HWP ? Metric.hwpToPt(rawH) : 0;
+        const dimStr = (wPt > 0 && hPt > 0) ? `_W${Math.round(wPt)}_H${Math.round(hPt)}` : '';
+        paras.push(buildPara([buildSpan(`__EXT_${gsoId}${dimStr}__`)]));
+        k = skipKids(recs, k);
+      } else if (cellCtrlId === CTRL_TABLE) {
+        const tr = shield.guard(
+          () => parseTableCtrl(recs, k, di, shield, gsoCtx),
+          { grid: null, next: skipKids(recs, k) },
+          `hwp:nestedTbl@${k}`,
+        );
+        if (tr.grid) nestedGrids.push(tr.grid as GridNode);
+        k = tr.next;
+      } else {
+        k = skipKids(recs, k);
+      }
     } else { k++; }
   }
 
-  return { row, col, cs, rs, props, widthHwp, heightHwp: heightHwp || undefined, paras: paras.length ? paras : [buildPara([buildSpan('')])] };
+  return {
+    row, col, cs, rs, props, widthHwp,
+    heightHwp: heightHwp || undefined,
+    paras: paras.length ? paras : [buildPara([buildSpan('')])],
+    nestedGrids,
+  };
 }
 
 /* ── PAGE_DEF ───────────────────────────────────────────────── */
@@ -944,51 +940,36 @@ export class HwpScanner implements Decoder {
         di = shield.guard(() => parseDocInfo(diRaw, compressed), di, 'hwp:docInfo');
       }
 
-      // Extract images from BinData streams
-      // HWP format: BinData streams are indexed sequentially (0, 1, 2, ...) matching objId
-      const imageStreams: { path: string; data: Uint8Array }[] = [];
-      for (const [path, data] of streams) {
-        if ((path.includes('BinData') || path.includes('.jpg') || path.includes('.jpeg') || path.includes('.png') || path.includes('.gif') || path.includes('.bmp'))
-            && !path.includes('FileHeader') && !path.includes('DocInfo') && !path.includes('BodyText') && !path.includes('Section')) {
-          imageStreams.push({ path, data });
-          console.log(`[HwpScanner] Image stream found: ${path} (${data.length} bytes)`);
-        }
+      // Extract images from BinData streams.
+      // HWP duplicates each BinData entry: once as "BinData/BIN0001.jpg" and once as "BIN0001.jpg".
+      // We keep only the "BinData/" prefixed versions, sort by BIN number, then assign 0-based keys
+      // matching the order 'gso' CTRL_HEADER records are encountered during body parsing.
+      const binEntries: { binNum: number; data: Uint8Array }[] = [];
+      for (const [path, streamData] of streams) {
+        // Match "BinData/BIN0001.jpg" style — the canonical form
+        const m = path.match(/^BinData[/\\]BIN(\d+)\.\w+$/i);
+        if (m) binEntries.push({ binNum: parseInt(m[1], 10), data: streamData });
       }
+      // Sort by BIN number (ascending) so BIN0001→idx0, BIN0002→idx1, …
+      binEntries.sort((a, b) => a.binNum - b.binNum);
 
-      // Create image nodes for each image stream
-      // Map objId -> ImgNode for correct lookup during injection
-      // Note: objId from CTRL_HEADER matches the BinData stream index in HWP format
       const objectMap = new Map<number, ImgNode>();
-      for (let objId = 0; objId < imageStreams.length; objId++) {
-        const { path, data } = imageStreams[objId];
+      for (let idx = 0; idx < binEntries.length; idx++) {
+        const { data: imgData } = binEntries[idx];
 
-        // Determine MIME type from extension or signature
-        let mimeType = 'image/jpeg';
-        const lowerPath = path.toLowerCase();
-        if (lowerPath.includes('.png')) mimeType = 'image/png';
-        else if (lowerPath.includes('.gif')) mimeType = 'image/gif';
-        else if (lowerPath.includes('.bmp')) mimeType = 'image/bmp';
+        // Determine MIME type from binary signature first, then fall back to extension
+        let mimeType: ImgNode['mime'] = 'image/jpeg';
+        if (imgData[0] === 0x89 && imgData[1] === 0x50) mimeType = 'image/png';
+        else if (imgData[0] === 0x47 && imgData[1] === 0x49) mimeType = 'image/gif';
+        else if (imgData[0] === 0x42 && imgData[1] === 0x4D) mimeType = 'image/bmp';
 
-        // Also check signature
-        if (data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4E && data[3] === 0x47) mimeType = 'image/png';
-        else if (data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x3538) mimeType = 'image/gif';
-        else if (data[0] === 0x42 && data[1] === 0x4D) mimeType = 'image/bmp';
-
-        const base64 = TextKit.base64Encode(data);
-        const { wPt, hPt } = getImageDimsPt(data, mimeType);
-
-        // Store with objId as key - this matches the objId in CTRL_HEADER records
-        objectMap.set(objId, buildImg(
-          base64,
-          mimeType as any,
-          wPt,
-          hPt,
-          `Image from ${path}`,
-        ));
-        console.log(`[HwpScanner] Added image with objId ${objId}: ${base64.slice(0, 20)}... (${data.length} bytes)`);
+        const base64 = TextKit.base64Encode(imgData);
+        const { wPt, hPt } = getImageDimsPt(imgData, mimeType);
+        objectMap.set(idx, buildImg(base64, mimeType, wPt, hPt));
       }
 
-      console.log(`[HwpScanner] Found ${imageStreams.length} image streams, ${objectMap.size} images`);
+      // gsoCtx tracks sequential 'gso' encounter order — must be shared across all sections
+      const gsoCtx: GsoCtx = { count: 0 };
 
       // Body sections
       const allContent: ContentNode[] = [];
@@ -1000,7 +981,7 @@ export class HwpScanner implements Decoder {
           if (s === 0) {
             const fb = findBodySection(streams);
             if (fb) {
-              const r = parseBody(fb, compressed, di, shield);
+              const r = parseBody(fb, compressed, di, shield, gsoCtx);
               allContent.push(...r.content);
               if (r.pageDims) pageDims = r.pageDims;
             }
@@ -1008,7 +989,7 @@ export class HwpScanner implements Decoder {
           break;
         }
         const r = shield.guard(
-          () => parseBody(sec, compressed, di, shield),
+          () => parseBody(sec, compressed, di, shield, gsoCtx),
           { content: [], pageDims: undefined },
           `hwp:sec${s}`,
         );
@@ -1016,29 +997,9 @@ export class HwpScanner implements Decoder {
         if (r.pageDims) pageDims = r.pageDims;
       }
 
-      // Inject images into paragraphs (only if images are available)
-      console.log(`[HwpScanner] Before injection: ${allContent.length} nodes, ${objectMap.size} images available`);
       if (objectMap.size > 0) {
         injectImagesIntoContent(allContent, objectMap);
-        console.log(`[HwpScanner] After injection: ${allContent.length} nodes`);
       }
-
-      // Count images (recursively)
-      const countImages = (nodes: ContentNode[]): number => {
-        let count = 0;
-        for (const node of nodes) {
-          if ((node as any).tag === 'img') count++;
-          if ((node as any).tag === 'para' && (node as any).kids) count += countImages((node as any).kids);
-          if ((node as any).tag === 'grid' && (node as any).kids) {
-            for (const row of (node as any).kids) {
-              if (row.kids) count += countImages(row.kids);
-            }
-          }
-        }
-        return count;
-      };
-      const imgCount = countImages(allContent);
-      console.log(`[HwpScanner] Images in content: ${imgCount}`);
 
       warns.push(...shield.flush());
       const content = allContent.length > 0 ? allContent : [buildPara([buildSpan('')])];
@@ -1175,7 +1136,8 @@ function injectImagesIntoContent(
     }
   };
 
-  // Helper function to process grid (table) kids recursively
+  // Recursively process a grid (table): resolves image placeholders in all cells,
+  // including nested grids inside cells.
   const processGridKids = (grid: any) => {
     if (!grid.kids || !Array.isArray(grid.kids)) return;
 
@@ -1185,23 +1147,12 @@ function injectImagesIntoContent(
       for (const cell of row.kids) {
         if (!cell.kids || !Array.isArray(cell.kids)) continue;
 
-        // Cell kids are ParaNodes, process their kids (spans, images, etc.)
-        for (const para of cell.kids) {
-          if (para.kids && Array.isArray(para.kids)) {
-            processKids(para.kids);
-            // For images in table cells, set layout to position relative to cell left edge (0cm)
-            for (let i = 0; i < para.kids.length; i++) {
-              if (para.kids[i].tag === 'img') {
-                const img = para.kids[i] as ImgNode;
-                img.layout = {
-                  wrap: 'square',
-                  horzRelTo: 'column',
-                  horzAlign: 'left',
-                  vertRelTo: 'para',
-                  vertAlign: 'top',
-                };
-              }
-            }
+        for (const cellKid of cell.kids) {
+          if (cellKid.tag === 'grid') {
+            // Nested table inside cell — recurse
+            processGridKids(cellKid);
+          } else if (cellKid.tag === 'para' && cellKid.kids) {
+            processKids(cellKid.kids);
           }
         }
       }
