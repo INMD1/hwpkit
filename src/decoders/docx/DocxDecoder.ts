@@ -54,7 +54,9 @@ import { TextKit } from "../../toolkit/TextKit";
 import { registry } from "../../pipeline/registry";
 
 export class DocxDecoder extends BaseDecoder {
-  protected getFormat(): string { return "docx"; }
+  protected getFormat(): string {
+    return "docx";
+  }
 
   async decode(data: Uint8Array): Promise<Outcome<DocRoot>> {
     const shield = new ShieldedParser();
@@ -116,17 +118,30 @@ export class DocxDecoder extends BaseDecoder {
 
       let docStr = TextKit.decode(docXml).trim();
       if (!docStr) {
-        warns.push("DOCX: word/document.xml is empty, using fallback empty document");
-        docStr = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>';
+        warns.push(
+          "DOCX: word/document.xml is empty, using fallback empty document",
+        );
+        docStr =
+          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>';
       }
       const docObj: any = await XmlKit.parseStrict(docStr);
 
       const body = getBody(docObj);
       const dims = extractDims(body) ?? { ...A4 };
       const elements = getBodyElements(body);
-      console.log(`[DocxDecoder] 파싱된 전체 본문 요소 개수: ${elements.length}`);
+      console.log(
+        `[DocxDecoder] 파싱된 전체 본문 요소 개수: ${elements.length}`,
+      );
 
-      const decCtx: DecCtx = { relsMap, files, shield, numMap, warns, stylesMap, paraStyleMap };
+      const decCtx: DecCtx = {
+        relsMap,
+        files,
+        shield,
+        numMap,
+        warns,
+        stylesMap,
+        paraStyleMap,
+      };
 
       const kids: ContentNode[] = [];
       for (const el of elements) {
@@ -142,22 +157,36 @@ export class DocxDecoder extends BaseDecoder {
         }
 
         // Inline sectPr in pPr = section break → insert page-break paragraph after
-        if (el.type === 'para') {
+        if (el.type === "para") {
           const pPr = el.node?.["w:pPr"]?.[0] ?? el.node?.pPr?.[0] ?? {};
           const inlineSectPr = pPr?.["w:sectPr"]?.[0] ?? pPr?.sectPr?.[0];
           if (inlineSectPr) {
             const typeAttr = inlineSectPr?.["w:type"]?.[0]?._attr;
-            const sectType = typeAttr?.["w:val"] ?? typeAttr?.val ?? 'nextPage';
-            if (sectType !== 'continuous') {
-              kids.push(buildPara([{ tag: 'span', props: {}, kids: [buildPb()] }]));
+            const sectType = typeAttr?.["w:val"] ?? typeAttr?.val ?? "nextPage";
+            if (sectType !== "continuous") {
+              kids.push(
+                buildPara([{ tag: "span", props: {}, kids: [buildPb()] }]),
+              );
             }
           }
         }
       }
 
       // Decode header/footer
-      const headersMap = await decodeHeaderFooter("header", body, relsMap, files, decCtx);
-      const footersMap = await decodeHeaderFooter("footer", body, relsMap, files, decCtx);
+      const headersMap = await decodeHeaderFooter(
+        "header",
+        body,
+        relsMap,
+        files,
+        decCtx,
+      );
+      const footersMap = await decodeHeaderFooter(
+        "footer",
+        body,
+        relsMap,
+        files,
+        decCtx,
+      );
 
       warns.push(...shield.flush());
       const sheet = buildSheet(kids.filter(Boolean) as ContentNode[], dims, {
@@ -335,7 +364,7 @@ function getBody(obj: any): any {
   // XML 파서에 따라 w:document 또는 document 형태일 수 있음
   const doc = obj?.["w:document"]?.[0] ?? obj?.document?.[0] ?? obj;
   const body = doc?.["w:body"]?.[0] ?? doc?.body?.[0] ?? doc;
-  
+
   if (!body) {
     console.error("[DocxDecoder] 본문(body)을 찾을 수 없습니다.");
   }
@@ -378,7 +407,9 @@ function getBodyElements(body: any): { type: string; node: any }[] {
   const childOrder = body?.["_childOrder"] as string[] | undefined;
   if (Array.isArray(childOrder)) {
     const items: { type: string; node: any }[] = [];
-    let pi = 0, ti = 0, si = 0;
+    let pi = 0,
+      ti = 0,
+      si = 0;
     for (const tag of childOrder) {
       if ((tag === "w:p" || tag === "p") && pi < paras.length) {
         items.push({ type: "para", node: paras[pi++] });
@@ -390,7 +421,8 @@ function getBodyElements(body: any): { type: string; node: any }[] {
     }
     // Append any remainders
     while (pi < paras.length) items.push({ type: "para", node: paras[pi++] });
-    while (ti < tables.length) items.push({ type: "table", node: tables[ti++] });
+    while (ti < tables.length)
+      items.push({ type: "table", node: tables[ti++] });
     while (si < sdts.length) items.push({ type: "sdt", node: sdts[si++] });
     return items;
   }
@@ -408,7 +440,7 @@ function getBodyElements(body: any): { type: string; node: any }[] {
 async function decodeHeaderFooter(
   kind: "header" | "footer",
   body: any,
-  relsMap: Map<string, string>,
+  relsMap: Map<string, string>, // document.xml.rels (기존)
   files: Map<string, Uint8Array>,
   ctx: DecCtx,
 ): Promise<Record<string, ParaNode[]> | undefined> {
@@ -416,7 +448,8 @@ async function decodeHeaderFooter(
     const sp = body?.["w:sectPr"]?.[0] ?? body?.sectPr?.[0];
     if (!sp) return undefined;
 
-    const refTag = kind === "header" ? "w:headerReference" : "w:footerReference";
+    const refTag =
+      kind === "header" ? "w:headerReference" : "w:footerReference";
     const refs = toArr(sp?.[refTag] ?? sp?.[refTag.replace("w:", "")]);
     if (refs.length === 0) return undefined;
 
@@ -434,23 +467,46 @@ async function decodeHeaderFooter(
       const fileData = files.get(filePath);
       if (!fileData) continue;
 
+      // ★ 핵심 수정: 헤더/풋터 전용 rels 파일 로드
+      const hfFileName = filePath.split("/").pop() ?? "";
+      const hfRelsPath = `word/_rels/${hfFileName}.rels`;
+      const hfRelsData = files.get(hfRelsPath);
+      // 헤더/풋터 rels를 document rels와 병합
+      let hfRelsMap = relsMap;
+      if (hfRelsData) {
+        const hfRelsStr = TextKit.decode(hfRelsData).trim();
+        const parsed = hfRelsStr
+          ? await parseRels(hfRelsStr)
+          : new Map<string, string>();
+        // 병합 (헤더/풋터 rels 우선)
+        hfRelsMap = new Map([...relsMap, ...parsed]);
+      }
+
       const xmlStr = TextKit.decode(fileData).trim();
       if (!xmlStr) continue;
-      
-      // 워터마크 감지 (설명서 방법 3: 간단하게 헤더 텍스트로 처리)
+
       const watermark = extractWatermark(xmlStr);
       if (watermark) {
-        result[type] = [buildPara([buildSpan(watermark, { pt: 80, color: "CCCCCC", b: true })])];
+        result[type] = [
+          buildPara([
+            buildSpan(watermark, { pt: 80, color: "CCCCCC", b: true }),
+          ]),
+        ];
         continue;
       }
 
       try {
         const obj: any = await XmlKit.parseStrict(xmlStr);
         const rootTag = kind === "header" ? "w:hdr" : "w:ftr";
-        const root = obj?.[rootTag]?.[0] ?? obj?.[rootTag.replace("w:", "")]?.[0] ?? obj;
+        const root =
+          obj?.[rootTag]?.[0] ?? obj?.[rootTag.replace("w:", "")]?.[0] ?? obj;
 
+        // ctx에 hfRelsMap 임시 적용
+        const origRelsMap = ctx.relsMap;
+        (ctx as any).relsMap = hfRelsMap;
         const paras = toArr(root?.["w:p"] ?? root?.p);
         result[type] = paras.map((p: any) => decodePara(p, ctx));
+        (ctx as any).relsMap = origRelsMap;
       } catch (err) {
         console.warn(`[DocxDecoder] ${kind} (${type}) XML 파싱 실패:`, err);
         continue;
@@ -527,7 +583,10 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
     "";
 
   // Resolve paragraph style inheritance chain
-  const styleInherited = resolveParaStyle(headStyle || undefined, ctx.paraStyleMap);
+  const styleInherited = resolveParaStyle(
+    headStyle || undefined,
+    ctx.paraStyleMap,
+  );
 
   const props: ParaProps = {
     align: safeAlign(alignVal),
@@ -538,34 +597,46 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   // Spacing (before/after/line height) — inline pPr wins over style
   const spacingAttr =
     pPr?.["w:spacing"]?.[0]?._attr ?? pPr?.spacing?.[0]?._attr ?? {};
-  const beforeVal = Number(spacingAttr?.["w:before"] ?? spacingAttr?.before ?? 0);
+  const beforeVal = Number(
+    spacingAttr?.["w:before"] ?? spacingAttr?.before ?? 0,
+  );
   const afterVal = Number(spacingAttr?.["w:after"] ?? spacingAttr?.after ?? 0);
   const lineVal = Number(spacingAttr?.["w:line"] ?? spacingAttr?.line ?? 0);
   const lineRule =
     spacingAttr?.["w:lineRule"] ?? spacingAttr?.lineRule ?? "auto";
   if (beforeVal > 0) props.spaceBefore = Metric.dxaToPt(beforeVal);
-  else if (styleInherited.pPr?.spaceBefore) props.spaceBefore = styleInherited.pPr.spaceBefore;
+  else if (styleInherited.pPr?.spaceBefore)
+    props.spaceBefore = styleInherited.pPr.spaceBefore;
   if (afterVal > 0) props.spaceAfter = Metric.dxaToPt(afterVal);
-  else if (styleInherited.pPr?.spaceAfter) props.spaceAfter = styleInherited.pPr.spaceAfter;
+  else if (styleInherited.pPr?.spaceAfter)
+    props.spaceAfter = styleInherited.pPr.spaceAfter;
   if (lineVal > 0 && lineRule === "auto") props.lineHeight = lineVal / 240;
-  else if (styleInherited.pPr?.lineHeight) props.lineHeight = styleInherited.pPr.lineHeight;
+  else if (styleInherited.pPr?.lineHeight)
+    props.lineHeight = styleInherited.pPr.lineHeight;
 
   // Indentation
   const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
   const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
   const rightVal = Number(indAttr?.["w:right"] ?? indAttr?.right ?? 0);
-  const firstLineVal = Number(indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0);
+  const firstLineVal = Number(
+    indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0,
+  );
   const hangingVal = Number(indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0);
   if (leftVal > 0) props.indentPt = Metric.dxaToPt(leftVal);
-  else if (styleInherited.pPr?.indentPt) props.indentPt = styleInherited.pPr.indentPt;
+  else if (styleInherited.pPr?.indentPt)
+    props.indentPt = styleInherited.pPr.indentPt;
   if (rightVal > 0) props.indentRightPt = Metric.dxaToPt(rightVal);
-  else if (styleInherited.pPr?.indentRightPt) props.indentRightPt = styleInherited.pPr.indentRightPt;
+  else if (styleInherited.pPr?.indentRightPt)
+    props.indentRightPt = styleInherited.pPr.indentRightPt;
   if (firstLineVal > 0) props.firstLineIndentPt = Metric.dxaToPt(firstLineVal);
-  else if (hangingVal > 0) props.firstLineIndentPt = -Metric.dxaToPt(hangingVal);
-  else if (styleInherited.pPr?.firstLineIndentPt) props.firstLineIndentPt = styleInherited.pPr.firstLineIndentPt;
+  else if (hangingVal > 0)
+    props.firstLineIndentPt = -Metric.dxaToPt(hangingVal);
+  else if (styleInherited.pPr?.firstLineIndentPt)
+    props.firstLineIndentPt = styleInherited.pPr.firstLineIndentPt;
 
   // Alignment from style if not set inline
-  if (!alignVal && styleInherited.pPr?.align) props.align = safeAlign(styleInherited.pPr.align);
+  if (!alignVal && styleInherited.pPr?.align)
+    props.align = safeAlign(styleInherited.pPr.align);
 
   // List/numbering
   const numPr = pPr?.["w:numPr"]?.[0] ?? pPr?.numPr?.[0];
@@ -589,8 +660,10 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   }
 
   // pageBreakBefore: paragraph always starts on a new page
-  const pbBeforeNode = pPr?.["w:pageBreakBefore"]?.[0] ?? pPr?.pageBreakBefore?.[0];
-  const hasPageBreakBefore = pbBeforeNode != null &&
+  const pbBeforeNode =
+    pPr?.["w:pageBreakBefore"]?.[0] ?? pPr?.pageBreakBefore?.[0];
+  const hasPageBreakBefore =
+    pbBeforeNode != null &&
     (pbBeforeNode?._attr?.["w:val"] ?? pbBeforeNode?._attr?.val ?? "1") !== "0";
 
   // Resolve all children (runs AND hyperlinks) in document order
@@ -611,10 +684,13 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
         if (run) {
           kids.push(
             ctx.shield.guard(
-              () => hasDrawingDeep(run) ? decodeRunOrImage(run, ctx) : decodeRun(run, ctx, styleInherited.rPr),
+              () =>
+                hasDrawingDeep(run)
+                  ? decodeRunOrImage(run, ctx)
+                  : decodeRun(run, ctx, styleInherited.rPr),
               buildSpan(""),
-              "docx:run"
-            )
+              "docx:run",
+            ),
           );
         }
       } else if (tag === "w:hyperlink" || tag === "hyperlink") {
@@ -623,12 +699,12 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
           const rId = hl?._attr?.["r:id"] ?? hl?._attr?.id;
           const url = rId ? ctx.relsMap.get(rId) : "";
           const hlRuns = toArr(hl?.["w:r"] ?? hl?.r);
-          const hlKids = hlRuns.map((r: any) => 
-            decodeRun(r, ctx, { 
-              ...styleInherited.rPr, 
-              u: true, 
-              color: "0000FF" 
-            })
+          const hlKids = hlRuns.map((r: any) =>
+            decodeRun(r, ctx, {
+              ...styleInherited.rPr,
+              u: true,
+              color: "0000FF",
+            }),
           );
           kids.push({
             tag: "link",
@@ -645,10 +721,13 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
             for (const ir of innerRuns) {
               kids.push(
                 ctx.shield.guard(
-                  () => hasDrawingDeep(ir) ? decodeRunOrImage(ir, ctx) : decodeRun(ir, ctx, styleInherited.rPr),
+                  () =>
+                    hasDrawingDeep(ir)
+                      ? decodeRunOrImage(ir, ctx)
+                      : decodeRun(ir, ctx, styleInherited.rPr),
                   buildSpan(""),
-                  "docx:run"
-                )
+                  "docx:run",
+                ),
               );
             }
           }
@@ -661,7 +740,9 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
     const legacyKids: (SpanNode | ImgNode)[] = ctx.shield.guardAll(
       runs,
       (run: any) =>
-        hasDrawingDeep(run) ? decodeRunOrImage(run, ctx) : decodeRun(run, ctx, styleInherited.rPr),
+        hasDrawingDeep(run)
+          ? decodeRunOrImage(run, ctx)
+          : decodeRun(run, ctx, styleInherited.rPr),
       () => buildSpan(""),
       "docx:run",
     );
@@ -672,7 +753,7 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
 
   // Prepend pb span when pageBreakBefore is set
   if (hasPageBreakBefore) {
-    filteredKids.unshift({ tag: 'span', props: {}, kids: [buildPb()] });
+    filteredKids.unshift({ tag: "span", props: {}, kids: [buildPb()] });
   }
 
   return buildPara(filteredKids, props);
@@ -713,25 +794,26 @@ function decodeRunOrImage(run: any, ctx: DecCtx): SpanNode | ImgNode {
 /** Decode image layout from anchor element */
 function decodeImageLayout(anchor: any): ImgLayout {
   const wrap = anchor?.["wp:wrapTop"]?.[0] ?? anchor?.wrapTop?.[0];
-  const anchorPos = anchor?.["wp:anchorPos"]?.[0]?._attr ?? anchor?.anchorPos?.[0]?._attr ?? {};
+  const anchorPos =
+    anchor?.["wp:anchorPos"]?.[0]?._attr ?? anchor?.anchorPos?.[0]?._attr ?? {};
 
   const layout: ImgLayout = {
-    wrap: 'square',
-    horzAlign: 'left',
-    vertAlign: 'top',
-    horzRelTo: 'page',
-    vertRelTo: 'page',
+    wrap: "square",
+    horzAlign: "left",
+    vertAlign: "top",
+    horzRelTo: "page",
+    vertRelTo: "page",
     xPt: Number(anchorPos?.x ?? 0) / 12700, // emu to pt
     yPt: Number(anchorPos?.y ?? 0) / 12700, // emu to pt
   };
 
   // Parse wrap type
-  if (wrap?.["wp:none"]) layout.wrap = 'none';
-  else if (wrap?.["wp:square"]) layout.wrap = 'square';
-  else if (wrap?.["wp:tight"]) layout.wrap = 'tight';
-  else if (wrap?.["wp:through"]) layout.wrap = 'through';
-  else if (wrap?.["wp:behind"]) layout.wrap = 'behind';
-  else if (wrap?.["wp:inFront"]) layout.wrap = 'front';
+  if (wrap?.["wp:none"]) layout.wrap = "none";
+  else if (wrap?.["wp:square"]) layout.wrap = "square";
+  else if (wrap?.["wp:tight"]) layout.wrap = "tight";
+  else if (wrap?.["wp:through"]) layout.wrap = "through";
+  else if (wrap?.["wp:behind"]) layout.wrap = "behind";
+  else if (wrap?.["wp:inFront"]) layout.wrap = "front";
 
   return layout;
 }
@@ -796,9 +878,9 @@ function decodeDrawing(drawing: any, ctx: DecCtx): ImgNode | null {
     }
 
     if (!fileData) {
-      const fileName = target.split('/').pop() ?? '';
+      const fileName = target.split("/").pop() ?? "";
       for (const [k, v] of ctx.files) {
-        if (fileName && (k.endsWith('/' + fileName) || k === fileName)) {
+        if (fileName && (k.endsWith("/" + fileName) || k === fileName)) {
           fileData = v;
           filePath = k;
           break;
@@ -826,10 +908,17 @@ function decodeDrawing(drawing: any, ctx: DecCtx): ImgNode | null {
 
     // ── layout 추출 ──────────────────────────────────────────
     const layout: ImgLayout = inline
-      ? { wrap: 'inline' }
+      ? { wrap: "inline" }
       : extractAnchorLayout(anchor);
 
-    return buildImg(TextKit.base64Encode(fileData), mime, wPt, hPt, alt || undefined, layout);
+    return buildImg(
+      TextKit.base64Encode(fileData),
+      mime,
+      wPt,
+      hPt,
+      alt || undefined,
+      layout,
+    );
   } catch {
     return null;
   }
@@ -837,31 +926,36 @@ function decodeDrawing(drawing: any, ctx: DecCtx): ImgNode | null {
 
 /** w:highlight val → hex 색상 매핑 (OOXML 명세) */
 const HIGHLIGHT_COLOR_MAP: Record<string, string> = {
-  yellow:      "FFFF00",
-  green:       "00FF00",
-  cyan:        "00FFFF",
-  magenta:     "FF00FF",
-  blue:        "0000FF",
-  red:         "FF0000",
-  darkBlue:    "00008B",
-  darkCyan:    "008B8B",
-  darkGreen:   "006400",
+  yellow: "FFFF00",
+  green: "00FF00",
+  cyan: "00FFFF",
+  magenta: "FF00FF",
+  blue: "0000FF",
+  red: "FF0000",
+  darkBlue: "00008B",
+  darkCyan: "008B8B",
+  darkGreen: "006400",
   darkMagenta: "8B008B",
-  darkRed:     "8B0000",
-  darkYellow:  "808000",
-  darkGray:    "A9A9A9",
-  lightGray:   "D3D3D3",
-  black:       "000000",
-  white:       "FFFFFF",
+  darkRed: "8B0000",
+  darkYellow: "808000",
+  darkGray: "A9A9A9",
+  lightGray: "D3D3D3",
+  black: "000000",
+  white: "FFFFFF",
 };
 
-function decodeRun(run: any, ctx: DecCtx, styleRpr?: ParaStyleDef['rPr']): SpanNode {
+function decodeRun(
+  run: any,
+  ctx: DecCtx,
+  styleRpr?: ParaStyleDef["rPr"],
+): SpanNode {
   const rPr = run?.["w:rPr"]?.[0] ?? run?.rPr?.[0] ?? {};
 
   // w:vanish — 숨긴 텍스트: run 전체 건너뜀 (빈 span 반환)
   const vanishNode = rPr?.["w:vanish"]?.[0] ?? rPr?.vanish?.[0];
   if (vanishNode != null) {
-    const vanishVal = vanishNode?._attr?.["w:val"] ?? vanishNode?._attr?.val ?? "1";
+    const vanishVal =
+      vanishNode?._attr?.["w:val"] ?? vanishNode?._attr?.val ?? "1";
     if (vanishVal !== "0") return buildSpan("");
   }
 
@@ -894,7 +988,8 @@ function decodeRun(run: any, ctx: DecCtx, styleRpr?: ParaStyleDef['rPr']): SpanN
   const shdBg = safeHex(shdAttr?.["w:fill"] ?? shdAttr?.fill);
 
   // w:highlight — 형광펜 색상 (w:shd보다 우선)
-  const hlAttr = rPr?.["w:highlight"]?.[0]?._attr ?? rPr?.highlight?.[0]?._attr ?? {};
+  const hlAttr =
+    rPr?.["w:highlight"]?.[0]?._attr ?? rPr?.highlight?.[0]?._attr ?? {};
   const hlVal = hlAttr?.["w:val"] ?? hlAttr?.val;
   const bgVal = (hlVal ? HIGHLIGHT_COLOR_MAP[hlVal] : undefined) ?? shdBg;
 
@@ -905,7 +1000,8 @@ function decodeRun(run: any, ctx: DecCtx, styleRpr?: ParaStyleDef['rPr']): SpanN
 
   // w:position — 글자 상하 이동 (half-point, 양수=위, 음수=아래)
   // vertAlign이 없을 때 보조 판단: ±4 half-pt(≈2pt) 이상이면 sup/sub
-  const posAttr = rPr?.["w:position"]?.[0]?._attr ?? rPr?.position?.[0]?._attr ?? {};
+  const posAttr =
+    rPr?.["w:position"]?.[0]?._attr ?? rPr?.position?.[0]?._attr ?? {};
   const posVal = Number(posAttr?.["w:val"] ?? posAttr?.val ?? 0);
   let isSup = vertAlignVal === "superscript";
   let isSub = vertAlignVal === "subscript";
@@ -936,7 +1032,9 @@ function decodeRun(run: any, ctx: DecCtx, styleRpr?: ParaStyleDef['rPr']): SpanN
     s: (sNode != null ? isStrike : styleRpr?.s) || undefined,
     sup: isSup || undefined,
     sub: isSub || undefined,
-    pt: effectiveSzVal ? Metric.halfPtToPt(Number(effectiveSzVal)) : styleRpr?.pt,
+    pt: effectiveSzVal
+      ? Metric.halfPtToPt(Number(effectiveSzVal))
+      : styleRpr?.pt,
     color: safeHex(colorVal) ?? styleRpr?.color,
     font: fontName ? safeFont(fontName) : styleRpr?.font,
     bg: bgVal,
@@ -976,8 +1074,12 @@ function decodeRun(run: any, ctx: DecCtx, styleRpr?: ParaStyleDef['rPr']): SpanN
 /** Parse all 6 border sides from a w:tblBorders or w:tcBorders node */
 function parseBorderDef(bdrNode: any): TblBorderDef {
   const sides: [string, keyof TblBorderDef][] = [
-    ["top", "top"], ["bottom", "bottom"], ["left", "left"], ["right", "right"],
-    ["insideH", "insideH"], ["insideV", "insideV"],
+    ["top", "top"],
+    ["bottom", "bottom"],
+    ["left", "left"],
+    ["right", "right"],
+    ["insideH", "insideH"],
+    ["insideV", "insideV"],
   ];
   const result: TblBorderDef = {};
   for (const [xml, prop] of sides) {
@@ -1048,7 +1150,8 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
       if (type !== "paragraph" && type !== "character") continue;
       const id = attr?.["w:styleId"] ?? attr?.styleId;
       if (!id) continue;
-      const basedOn = (style?.["w:basedOn"]?.[0]?._attr ?? style?.basedOn?.[0]?._attr)?.["w:val"];
+      const basedOn = (style?.["w:basedOn"]?.[0]?._attr ??
+        style?.basedOn?.[0]?._attr)?.["w:val"];
 
       const def: ParaStyleDef = { basedOn };
 
@@ -1057,17 +1160,30 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
       if (rPr) {
         const szAttr = rPr?.["w:sz"]?.[0]?._attr ?? rPr?.sz?.[0]?._attr ?? {};
         const szVal = szAttr?.["w:val"] ?? szAttr?.val;
-        const colorAttr = rPr?.["w:color"]?.[0]?._attr ?? rPr?.color?.[0]?._attr ?? {};
+        const colorAttr =
+          rPr?.["w:color"]?.[0]?._attr ?? rPr?.color?.[0]?._attr ?? {};
         const colorVal = colorAttr?.["w:val"] ?? colorAttr?.val;
-        const fontAttr = rPr?.["w:rFonts"]?.[0]?._attr ?? rPr?.rFonts?.[0]?._attr ?? {};
-        const fontName = fontAttr?.["w:ascii"] ?? fontAttr?.ascii ?? fontAttr?.["w:eastAsia"] ?? fontAttr?.eastAsia;
+        const fontAttr =
+          rPr?.["w:rFonts"]?.[0]?._attr ?? rPr?.rFonts?.[0]?._attr ?? {};
+        const fontName =
+          fontAttr?.["w:ascii"] ??
+          fontAttr?.ascii ??
+          fontAttr?.["w:eastAsia"] ??
+          fontAttr?.eastAsia;
         const bNode = rPr?.["w:b"]?.[0] ?? rPr?.b?.[0];
-        const isBold = bNode != null && (bNode?._attr?.["w:val"] ?? bNode?._attr?.val ?? "1") !== "0";
+        const isBold =
+          bNode != null &&
+          (bNode?._attr?.["w:val"] ?? bNode?._attr?.val ?? "1") !== "0";
         const iNode = rPr?.["w:i"]?.[0] ?? rPr?.i?.[0];
-        const isItalic = iNode != null && (iNode?._attr?.["w:val"] ?? iNode?._attr?.val ?? "1") !== "0";
-        const underVal = rPr?.["w:u"]?.[0]?._attr?.["w:val"] ?? rPr?.["w:u"]?.[0]?._attr?.val;
+        const isItalic =
+          iNode != null &&
+          (iNode?._attr?.["w:val"] ?? iNode?._attr?.val ?? "1") !== "0";
+        const underVal =
+          rPr?.["w:u"]?.[0]?._attr?.["w:val"] ?? rPr?.["w:u"]?.[0]?._attr?.val;
         const sNode = rPr?.["w:strike"]?.[0] ?? rPr?.strike?.[0];
-        const isStrike = sNode != null && (sNode?._attr?.["w:val"] ?? sNode?._attr?.val ?? "1") !== "0";
+        const isStrike =
+          sNode != null &&
+          (sNode?._attr?.["w:val"] ?? sNode?._attr?.val ?? "1") !== "0";
         def.rPr = {
           b: isBold || undefined,
           i: isItalic || undefined,
@@ -1082,26 +1198,46 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
       // pPr from paragraph properties
       const pPr = style?.["w:pPr"]?.[0] ?? style?.pPr?.[0];
       if (pPr) {
-        const spacingAttr = pPr?.["w:spacing"]?.[0]?._attr ?? pPr?.spacing?.[0]?._attr ?? {};
-        const beforeVal = Number(spacingAttr?.["w:before"] ?? spacingAttr?.before ?? 0);
-        const afterVal = Number(spacingAttr?.["w:after"] ?? spacingAttr?.after ?? 0);
-        const lineVal = Number(spacingAttr?.["w:line"] ?? spacingAttr?.line ?? 0);
-        const lineRule = spacingAttr?.["w:lineRule"] ?? spacingAttr?.lineRule ?? "auto";
-        const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
+        const spacingAttr =
+          pPr?.["w:spacing"]?.[0]?._attr ?? pPr?.spacing?.[0]?._attr ?? {};
+        const beforeVal = Number(
+          spacingAttr?.["w:before"] ?? spacingAttr?.before ?? 0,
+        );
+        const afterVal = Number(
+          spacingAttr?.["w:after"] ?? spacingAttr?.after ?? 0,
+        );
+        const lineVal = Number(
+          spacingAttr?.["w:line"] ?? spacingAttr?.line ?? 0,
+        );
+        const lineRule =
+          spacingAttr?.["w:lineRule"] ?? spacingAttr?.lineRule ?? "auto";
+        const indAttr =
+          pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
         const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
         const rightVal = Number(indAttr?.["w:right"] ?? indAttr?.right ?? 0);
-        const firstLineVal = Number(indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0);
-        const hangingVal = Number(indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0);
-        const alignVal = pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ?? pPr?.["w:jc"]?.[0]?._attr?.val;
+        const firstLineVal = Number(
+          indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0,
+        );
+        const hangingVal = Number(
+          indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0,
+        );
+        const alignVal =
+          pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ??
+          pPr?.["w:jc"]?.[0]?._attr?.val;
         def.pPr = {
           align: alignVal,
           spaceBefore: beforeVal > 0 ? Metric.dxaToPt(beforeVal) : undefined,
           spaceAfter: afterVal > 0 ? Metric.dxaToPt(afterVal) : undefined,
-          lineHeight: lineVal > 0 && lineRule === "auto" ? lineVal / 240 : undefined,
+          lineHeight:
+            lineVal > 0 && lineRule === "auto" ? lineVal / 240 : undefined,
           indentPt: leftVal > 0 ? Metric.dxaToPt(leftVal) : undefined,
           indentRightPt: rightVal > 0 ? Metric.dxaToPt(rightVal) : undefined,
-          firstLineIndentPt: firstLineVal > 0 ? Metric.dxaToPt(firstLineVal)
-            : hangingVal > 0 ? -Metric.dxaToPt(hangingVal) : undefined,
+          firstLineIndentPt:
+            firstLineVal > 0
+              ? Metric.dxaToPt(firstLineVal)
+              : hangingVal > 0
+                ? -Metric.dxaToPt(hangingVal)
+                : undefined,
         };
       }
 
@@ -1114,7 +1250,10 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
 }
 
 /** Resolve paragraph style inheritance chain (max depth 8) */
-function resolveParaStyle(styleId: string | undefined, map: ParaStyleMap): ParaStyleDef {
+function resolveParaStyle(
+  styleId: string | undefined,
+  map: ParaStyleMap,
+): ParaStyleDef {
   let merged: ParaStyleDef = {};
   const visited = new Set<string>();
   let cur = styleId;
@@ -1137,21 +1276,27 @@ function resolveParaStyle(styleId: string | undefined, map: ParaStyleMap): ParaS
 /** Resolve final CellProps borders using 3-level priority chain */
 function resolveCellBorders(
   cp: CellProps,
-  ri: number, ci: number, rs: number, cs: number,
-  rowCount: number, colCount: number,
+  ri: number,
+  ci: number,
+  rs: number,
+  cs: number,
+  rowCount: number,
+  colCount: number,
   tblBdr: TblBorderDef,
 ): CellProps {
-  const isTopEdge    = ri === 0;
+  const isTopEdge = ri === 0;
   const isBottomEdge = ri + rs >= rowCount;
-  const isLeftEdge   = ci === 0;
-  const isRightEdge  = ci + cs >= colCount;
+  const isLeftEdge = ci === 0;
+  const isRightEdge = ci + cs >= colCount;
 
   // Apply tblBorders only where no explicit tcBorder was set
   const resolved: CellProps = { ...cp };
-  if (!resolved.top)   resolved.top   = isTopEdge    ? tblBdr.top    : tblBdr.insideH;
-  if (!resolved.bot)   resolved.bot   = isBottomEdge ? tblBdr.bottom : tblBdr.insideH;
-  if (!resolved.left)  resolved.left  = isLeftEdge   ? tblBdr.left   : tblBdr.insideV;
-  if (!resolved.right) resolved.right = isRightEdge  ? tblBdr.right  : tblBdr.insideV;
+  if (!resolved.top) resolved.top = isTopEdge ? tblBdr.top : tblBdr.insideH;
+  if (!resolved.bot)
+    resolved.bot = isBottomEdge ? tblBdr.bottom : tblBdr.insideH;
+  if (!resolved.left) resolved.left = isLeftEdge ? tblBdr.left : tblBdr.insideV;
+  if (!resolved.right)
+    resolved.right = isRightEdge ? tblBdr.right : tblBdr.insideV;
   return resolved;
 }
 
@@ -1177,7 +1322,8 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
   };
 
   // ① tblStyle 기본값 로드
-  const tblStyleId = (tblPr?.["w:tblStyle"]?.[0]?._attr ?? tblPr?.tblStyle?.[0]?._attr)?.["w:val"];
+  const tblStyleId = (tblPr?.["w:tblStyle"]?.[0]?._attr ??
+    tblPr?.tblStyle?.[0]?._attr)?.["w:val"];
   const styleDef = tblStyleId ? ctx.stylesMap.get(tblStyleId) : undefined;
   let tblBdr: TblBorderDef = styleDef?.tblBorders ?? {};
 
@@ -1267,7 +1413,8 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
 
     // Row height from w:trHeight
     let rowHeightPt: number | undefined;
-    const trHAttr = trPr?.["w:trHeight"]?.[0]?._attr ?? trPr?.trHeight?.[0]?._attr;
+    const trHAttr =
+      trPr?.["w:trHeight"]?.[0]?._attr ?? trPr?.trHeight?.[0]?._attr;
     if (trHAttr) {
       const hDxa = Number(trHAttr?.["w:val"] ?? trHAttr?.val ?? 0);
       if (hDxa > 0) rowHeightPt = Metric.dxaToPt(hDxa);
@@ -1292,7 +1439,10 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
 
       if (tcBordersNode) {
         const dirs: Array<[string, "top" | "bot" | "left" | "right"]> = [
-          ["top", "top"], ["bottom", "bot"], ["left", "left"], ["right", "right"],
+          ["top", "top"],
+          ["bottom", "bot"],
+          ["left", "left"],
+          ["right", "right"],
         ];
         for (const [xmlTag, propKey] of dirs) {
           const bdr =
@@ -1318,7 +1468,9 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
       const vaVal = vaAttr?.["w:val"] ?? vaAttr?.val;
       if (vaVal) {
         const vaMap: Record<string, "top" | "mid" | "bot"> = {
-          top: "top", center: "mid", bottom: "bot",
+          top: "top",
+          center: "mid",
+          bottom: "bot",
         };
         cp.va = vaMap[vaVal];
       }
@@ -1327,14 +1479,18 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
       const tcMar = tcPr?.["w:tcMar"]?.[0] ?? tcPr?.tcMar?.[0];
       if (tcMar) {
         const top = tcMar?.["w:top"]?.[0]?._attr ?? tcMar?.top?.[0]?._attr;
-        const bot = tcMar?.["w:bottom"]?.[0]?._attr ?? tcMar?.bottom?.[0]?._attr;
+        const bot =
+          tcMar?.["w:bottom"]?.[0]?._attr ?? tcMar?.bottom?.[0]?._attr;
         const left = tcMar?.["w:left"]?.[0]?._attr ?? tcMar?.left?.[0]?._attr;
-        const right = tcMar?.["w:right"]?.[0]?._attr ?? tcMar?.right?.[0]?._attr;
+        const right =
+          tcMar?.["w:right"]?.[0]?._attr ?? tcMar?.right?.[0]?._attr;
 
         if (top) cp.padT = Metric.dxaToPt(Number(top?.["w:w"] ?? top?.w ?? 0));
         if (bot) cp.padB = Metric.dxaToPt(Number(bot?.["w:w"] ?? bot?.w ?? 0));
-        if (left) cp.padL = Metric.dxaToPt(Number(left?.["w:w"] ?? left?.w ?? 0));
-        if (right) cp.padR = Metric.dxaToPt(Number(right?.["w:w"] ?? right?.w ?? 0));
+        if (left)
+          cp.padL = Metric.dxaToPt(Number(left?.["w:w"] ?? left?.w ?? 0));
+        if (right)
+          cp.padR = Metric.dxaToPt(Number(right?.["w:w"] ?? right?.w ?? 0));
       }
 
       const rs = rsMap.get(`${ri},${ci}`) ?? 1;
@@ -1342,12 +1498,25 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
       // Compute logical column index for this cell
       let gridColIdx = 0;
       for (let prevCi = 0; prevCi < ci; prevCi++) {
-        if (!rawRow[prevCi].vMergeContinue) gridColIdx += rawRow[prevCi].gridSpan;
+        if (!rawRow[prevCi].vMergeContinue)
+          gridColIdx += rawRow[prevCi].gridSpan;
       }
 
       // Apply 3-level border resolution (tblStyle → tblBorders → tcBorders already in cp)
-      const colCount = gridProps.colWidths?.length ?? rawGrid[0]?.reduce((s, c) => s + c.gridSpan, 0) ?? 1;
-      const resolvedCp = resolveCellBorders(cp, ri, gridColIdx, rs, rc.gridSpan, rawGrid.length, colCount, tblBdr);
+      const colCount =
+        gridProps.colWidths?.length ??
+        rawGrid[0]?.reduce((s, c) => s + c.gridSpan, 0) ??
+        1;
+      const resolvedCp = resolveCellBorders(
+        cp,
+        ri,
+        gridColIdx,
+        rs,
+        rc.gridSpan,
+        rawGrid.length,
+        colCount,
+        tblBdr,
+      );
 
       const paras = toArr(cell?.["w:p"] ?? cell?.p).map((p: any) =>
         decodePara(p, ctx),
@@ -1426,36 +1595,39 @@ registry.registerDecoder(new DocxDecoder());
 
 function extractAnchorLayout(anchor: any): ImgLayout {
   const attr = anchor?._attr ?? {};
-  const behindDoc = attr.behindDoc === '1';
+  const behindDoc = attr.behindDoc === "1";
 
   // 텍스트 감싸기 타입
-  let wrap: ImgWrap = 'square';
-  if (anchor?.['wp:wrapNone']?.[0] != null)         wrap = behindDoc ? 'behind' : 'none';
-  else if (anchor?.['wp:wrapTight']?.[0] != null)   wrap = 'tight';
-  else if (anchor?.['wp:wrapThrough']?.[0] != null) wrap = 'through';
-  else if (anchor?.['wp:wrapSquare']?.[0] != null)  wrap = 'square';
-  else if (anchor?.['wp:wrapTopAndBottom']?.[0] != null) wrap = 'square';
-  else if (anchor?.['wp:wrapBehind']?.[0] != null || behindDoc) wrap = 'behind';
+  let wrap: ImgWrap = "square";
+  if (anchor?.["wp:wrapNone"]?.[0] != null)
+    wrap = behindDoc ? "behind" : "none";
+  else if (anchor?.["wp:wrapTight"]?.[0] != null) wrap = "tight";
+  else if (anchor?.["wp:wrapThrough"]?.[0] != null) wrap = "through";
+  else if (anchor?.["wp:wrapSquare"]?.[0] != null) wrap = "square";
+  else if (anchor?.["wp:wrapTopAndBottom"]?.[0] != null) wrap = "square";
+  else if (anchor?.["wp:wrapBehind"]?.[0] != null || behindDoc) wrap = "behind";
 
   // 가로 위치
-  const posH = anchor?.['wp:positionH']?.[0];
+  const posH = anchor?.["wp:positionH"]?.[0];
   const horzRelTo = parseHorzRelTo(posH?._attr?.relativeFrom);
-  const horzAlignTxt = posH?.['wp:align']?.[0]?._text;
-  const horzOffsetTxt = posH?.['wp:posOffset']?.[0]?._text;
+  const horzAlignTxt = posH?.["wp:align"]?.[0]?._text;
+  const horzOffsetTxt = posH?.["wp:posOffset"]?.[0]?._text;
   const horzAlign = horzAlignTxt ? parseHorzAlign(horzAlignTxt) : undefined;
-  const xPt = horzOffsetTxt && !horzAlignTxt
-    ? Metric.emuToPt(Number(horzOffsetTxt))
-    : undefined;
+  const xPt =
+    horzOffsetTxt && !horzAlignTxt
+      ? Metric.emuToPt(Number(horzOffsetTxt))
+      : undefined;
 
   // 세로 위치
-  const posV = anchor?.['wp:positionV']?.[0];
+  const posV = anchor?.["wp:positionV"]?.[0];
   const vertRelTo = parseVertRelTo(posV?._attr?.relativeFrom);
-  const vertAlignTxt = posV?.['wp:align']?.[0]?._text;
-  const vertOffsetTxt = posV?.['wp:posOffset']?.[0]?._text;
+  const vertAlignTxt = posV?.["wp:align"]?.[0]?._text;
+  const vertOffsetTxt = posV?.["wp:posOffset"]?.[0]?._text;
   const vertAlign = vertAlignTxt ? parseVertAlign(vertAlignTxt) : undefined;
-  const yPt = vertOffsetTxt && !vertAlignTxt
-    ? Metric.emuToPt(Number(vertOffsetTxt))
-    : undefined;
+  const yPt =
+    vertOffsetTxt && !vertAlignTxt
+      ? Metric.emuToPt(Number(vertOffsetTxt))
+      : undefined;
 
   // 텍스트와의 거리
   const distT = attr.distT ? Metric.emuToPt(Number(attr.distT)) : undefined;
@@ -1464,29 +1636,68 @@ function extractAnchorLayout(anchor: any): ImgLayout {
   const distR = attr.distR ? Metric.emuToPt(Number(attr.distR)) : undefined;
   const zOrder = attr.relativeHeight ? Number(attr.relativeHeight) : undefined;
 
-  return { wrap, horzAlign, vertAlign, horzRelTo, vertRelTo, xPt, yPt, distT, distB, distL, distR, behindDoc, zOrder };
+  return {
+    wrap,
+    horzAlign,
+    vertAlign,
+    horzRelTo,
+    vertRelTo,
+    xPt,
+    yPt,
+    distT,
+    distB,
+    distL,
+    distR,
+    behindDoc,
+    zOrder,
+  };
 }
 
 const HORZ_RELTO_MAP: Record<string, ImgHorzRelTo> = {
-  margin: 'margin', leftMargin: 'margin', rightMargin: 'margin',
-  insideMargin: 'margin', outsideMargin: 'margin',
-  column: 'column', page: 'page', character: 'para', paragraph: 'para',
+  margin: "margin",
+  leftMargin: "margin",
+  rightMargin: "margin",
+  insideMargin: "margin",
+  outsideMargin: "margin",
+  column: "column",
+  page: "page",
+  character: "para",
+  paragraph: "para",
 };
 const VERT_RELTO_MAP: Record<string, ImgVertRelTo> = {
-  margin: 'margin', topMargin: 'margin', bottomMargin: 'margin',
-  insideMargin: 'margin', outsideMargin: 'margin',
-  line: 'line', page: 'page', paragraph: 'para',
+  margin: "margin",
+  topMargin: "margin",
+  bottomMargin: "margin",
+  insideMargin: "margin",
+  outsideMargin: "margin",
+  line: "line",
+  page: "page",
+  paragraph: "para",
 };
 const HORZ_ALIGN_MAP: Record<string, ImgHorzAlign> = {
-  left: 'left', center: 'center', right: 'right',
-  inside: 'left', outside: 'right',
+  left: "left",
+  center: "center",
+  right: "right",
+  inside: "left",
+  outside: "right",
 };
 const VERT_ALIGN_MAP: Record<string, ImgVertAlign> = {
-  top: 'top', center: 'center', bottom: 'bottom',
-  inside: 'top', outside: 'bottom',
+  top: "top",
+  center: "center",
+  bottom: "bottom",
+  inside: "top",
+  outside: "bottom",
 };
 
-function parseHorzRelTo(v?: string): ImgHorzRelTo { return HORZ_RELTO_MAP[v ?? ''] ?? 'column'; }
-function parseVertRelTo(v?: string): ImgVertRelTo { return VERT_RELTO_MAP[v ?? ''] ?? 'para'; }
-function parseHorzAlign(v?: string): ImgHorzAlign | undefined { return HORZ_ALIGN_MAP[v ?? '']; }
-function parseVertAlign(v?: string): ImgVertAlign | undefined { return VERT_ALIGN_MAP[v ?? '']; }
+function parseHorzRelTo(v?: string): ImgHorzRelTo {
+  return HORZ_RELTO_MAP[v ?? ""] ?? "column";
+}
+function parseVertRelTo(v?: string): ImgVertRelTo {
+  return VERT_RELTO_MAP[v ?? ""] ?? "para";
+}
+function parseHorzAlign(v?: string): ImgHorzAlign | undefined {
+  return HORZ_ALIGN_MAP[v ?? ""];
+}
+function parseVertAlign(v?: string): ImgVertAlign | undefined {
+  return VERT_ALIGN_MAP[v ?? ""];
+}

@@ -1,18 +1,33 @@
-import type { DocRoot, ParaNode, SpanNode, GridNode, ContentNode, ImgNode, SheetNode } from '../../model/doc-tree';
-import type { Outcome } from '../../contract/result';
-import type { PageDims, GridProps, CellProps } from '../../model/doc-props';
-import { A4, normalizeDims } from '../../model/doc-props';
-import { succeed, fail } from '../../contract/result';
-import { Metric } from '../../safety/StyleBridge';
-import { ArchiveKit } from '../../toolkit/ArchiveKit';
-import { TextKit } from '../../toolkit/TextKit';
-import { registry } from '../../pipeline/registry';
-import { BaseEncoder } from '../../core/BaseEncoder';
+import type {
+  DocRoot,
+  ParaNode,
+  SpanNode,
+  GridNode,
+  ContentNode,
+  ImgNode,
+  SheetNode,
+} from "../../model/doc-tree";
+import type { Outcome } from "../../contract/result";
+import type { PageDims, GridProps, CellProps } from "../../model/doc-props";
+import { A4, normalizeDims } from "../../model/doc-props";
+import { succeed, fail } from "../../contract/result";
+import { Metric } from "../../safety/StyleBridge";
+import { ArchiveKit } from "../../toolkit/ArchiveKit";
+import { TextKit } from "../../toolkit/TextKit";
+import { registry } from "../../pipeline/registry";
+import { BaseEncoder } from "../../core/BaseEncoder";
 
-interface ImageEntry { rId: string; name: string; data: Uint8Array; ext: string }
+interface ImageEntry {
+  rId: string;
+  name: string;
+  data: Uint8Array;
+  ext: string;
+}
 
 export class DocxEncoder extends BaseEncoder {
-  protected getFormat(): string { return 'docx'; }
+  protected getFormat(): string {
+    return "docx";
+  }
 
   async encode(doc: DocRoot): Promise<Outcome<Uint8Array>> {
     try {
@@ -23,10 +38,16 @@ export class DocxEncoder extends BaseEncoder {
       const dims = normalizeDims(firstSheet?.dims ?? A4);
 
       // 모든 섹션의 콘텐츠를 합산
-      const allKids: ContentNode[] = sheets.flatMap(s => s?.kids ?? []);
+      const allKids: ContentNode[] = sheets.flatMap((s) => s?.kids ?? []);
 
       const images: ImageEntry[] = [];
-      const ctx: EncCtx = { images, nextId: 10, nextImgNum: 1, warns: [], imgMap: new WeakMap() };
+      const ctx: EncCtx = {
+        images,
+        nextId: 10,
+        nextImgNum: 1,
+        warns: [],
+        imgMap: new WeakMap(),
+      };
 
       // Collect images from all content
       collectImages(allKids, ctx);
@@ -41,8 +62,8 @@ export class DocxEncoder extends BaseEncoder {
       if (hasHeader) collectImagesFromParas(headerParas!, ctx);
       if (hasFooter) collectImagesFromParas(footerParas!, ctx);
 
-      const headerRId = hasHeader ? `rId${ctx.nextId++}` : '';
-      const footerRId = hasFooter ? `rId${ctx.nextId++}` : '';
+      const headerRId = hasHeader ? `rId${ctx.nextId++}` : "";
+      const footerRId = hasFooter ? `rId${ctx.nextId++}` : "";
 
       // Numbering: collect list info from all sections
       const numInfo = collectNumbering(allKids);
@@ -51,27 +72,52 @@ export class DocxEncoder extends BaseEncoder {
       const kids = allKids;
 
       const entries: { name: string; data: Uint8Array }[] = [
-        { name: '[Content_Types].xml', data: this.stringToBytes(contentTypes(images, hasHeader, hasFooter)) },
-        { name: '_rels/.rels', data: this.stringToBytes(pkgRels()) },
-        { name: 'word/document.xml', data: this.stringToBytes(documentXml(kids, dims, ctx, headerRId, footerRId)) },
-        { name: 'word/styles.xml', data: this.stringToBytes(stylesXml()) },
-        { name: 'word/settings.xml', data: this.stringToBytes(settingsXml()) },
-        { name: 'word/_rels/document.xml.rels', data: this.stringToBytes(docRels(images, headerRId, footerRId, numInfo.hasLists)) },
-        { name: 'docProps/app.xml', data: this.stringToBytes(appXml()) },
-        { name: 'docProps/core.xml', data: this.stringToBytes(coreXml(doc.meta)) },
+        {
+          name: "[Content_Types].xml",
+          data: this.stringToBytes(contentTypes(images, hasHeader, hasFooter)),
+        },
+        { name: "_rels/.rels", data: this.stringToBytes(pkgRels()) },
+        {
+          name: "word/document.xml",
+          data: this.stringToBytes(
+            documentXml(kids, dims, ctx, headerRId, footerRId),
+          ),
+        },
+        { name: "word/styles.xml", data: this.stringToBytes(stylesXml()) },
+        { name: "word/settings.xml", data: this.stringToBytes(settingsXml()) },
+        {
+          name: "word/_rels/document.xml.rels",
+          data: this.stringToBytes(
+            docRels(images, headerRId, footerRId, numInfo.hasLists),
+          ),
+        },
+        { name: "docProps/app.xml", data: this.stringToBytes(appXml()) },
+        {
+          name: "docProps/core.xml",
+          data: this.stringToBytes(coreXml(doc.meta)),
+        },
       ];
 
       // Add numbering.xml if needed
       if (numInfo.hasLists) {
-        entries.push({ name: 'word/numbering.xml', data: this.stringToBytes(numberingXml(numInfo)) });
+        entries.push({
+          name: "word/numbering.xml",
+          data: this.stringToBytes(numberingXml(numInfo)),
+        });
       }
 
       // Add header/footer files
       if (hasHeader) {
-        entries.push({ name: 'word/header1.xml', data: this.stringToBytes(headerFooterXml('hdr', headerParas!, ctx)) });
+        entries.push({
+          name: "word/header1.xml",
+          data: this.stringToBytes(headerFooterXml("hdr", headerParas!, ctx)),
+        });
       }
       if (hasFooter) {
-        entries.push({ name: 'word/footer1.xml', data: this.stringToBytes(headerFooterXml('ftr', footerParas!, ctx)) });
+        entries.push({
+          name: "word/footer1.xml",
+          data: this.stringToBytes(headerFooterXml("ftr", footerParas!, ctx)),
+        });
       }
 
       // Add image media files
@@ -99,20 +145,20 @@ interface EncCtx {
 // ─── Image collection ───────────────────────────────────────
 
 function mimeToExt(mime: string): string {
-  if (mime.includes('jpeg')) return 'jpeg';
-  if (mime.includes('gif')) return 'gif';
-  if (mime.includes('bmp')) return 'bmp';
-  return 'png';
+  if (mime.includes("jpeg")) return "jpeg";
+  if (mime.includes("gif")) return "gif";
+  if (mime.includes("bmp")) return "bmp";
+  return "png";
 }
 
 function collectImages(kids: ContentNode[], ctx: EncCtx): void {
   for (const kid of kids) {
-    if (kid.tag === 'para') collectImagesFromPara(kid, ctx);
-    else if (kid.tag === 'grid') {
+    if (kid.tag === "para") collectImagesFromPara(kid, ctx);
+    else if (kid.tag === "grid") {
       for (const row of kid.kids)
         for (const cell of row.kids)
           for (const p of cell.kids)
-            if (p.tag === 'para') collectImagesFromPara(p, ctx);
+            if (p.tag === "para") collectImagesFromPara(p, ctx);
             else collectImages([p], ctx);
     }
   }
@@ -124,7 +170,7 @@ function collectImagesFromParas(paras: ParaNode[], ctx: EncCtx): void {
 
 function collectImagesFromPara(para: ParaNode, ctx: EncCtx): void {
   for (const kid of para.kids) {
-    if (kid.tag === 'img') registerImage(kid, ctx);
+    if (kid.tag === "img") registerImage(kid, ctx);
   }
 }
 
@@ -150,7 +196,7 @@ function collectNumbering(kids: ContentNode[]): NumInfo {
   let hasBullet = false;
   let hasNumbered = false;
   for (const kid of kids) {
-    if (kid.tag === 'para') {
+    if (kid.tag === "para") {
       if (kid.props.listOrd === true) hasNumbered = true;
       else if (kid.props.listOrd === false) hasBullet = true;
     }
@@ -160,7 +206,11 @@ function collectNumbering(kids: ContentNode[]): NumInfo {
 
 // ─── OOXML boilerplate ──────────────────────────────────────
 
-function contentTypes(images: ImageEntry[], hasHeader?: boolean, hasFooter?: boolean): string {
+function contentTypes(
+  images: ImageEntry[],
+  hasHeader?: boolean,
+  hasFooter?: boolean,
+): string {
   const imgDefaults = new Set<string>();
   for (const img of images) imgDefaults.add(img.ext);
 
@@ -168,7 +218,14 @@ function contentTypes(images: ImageEntry[], hasHeader?: boolean, hasFooter?: boo
   <Default Extension="xml" ContentType="application/xml"/>`;
 
   for (const ext of imgDefaults) {
-    const ct = ext === 'png' ? 'image/png' : ext === 'jpeg' ? 'image/jpeg' : ext === 'gif' ? 'image/gif' : 'image/bmp';
+    const ct =
+      ext === "png"
+        ? "image/png"
+        : ext === "jpeg"
+          ? "image/jpeg"
+          : ext === "gif"
+            ? "image/gif"
+            : "image/bmp";
     defaults += `\n  <Default Extension="${ext}" ContentType="${ct}"/>`;
   }
 
@@ -178,8 +235,10 @@ function contentTypes(images: ImageEntry[], hasHeader?: boolean, hasFooter?: boo
   <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
   <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>`;
 
-  if (hasHeader) overrides += `\n  <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>`;
-  if (hasFooter) overrides += `\n  <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>`;
+  if (hasHeader)
+    overrides += `\n  <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>`;
+  if (hasFooter)
+    overrides += `\n  <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>`;
 
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -197,7 +256,12 @@ function pkgRels(): string {
 </Relationships>`;
 }
 
-function docRels(images: ImageEntry[], headerRId?: string, footerRId?: string, hasLists?: boolean): string {
+function docRels(
+  images: ImageEntry[],
+  headerRId?: string,
+  footerRId?: string,
+  hasLists?: boolean,
+): string {
   let rels = `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
   <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>`;
 
@@ -234,8 +298,8 @@ function coreXml(meta: any): string {
   const now = new Date().toISOString();
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <dc:title>${esc(meta.title ?? '')}</dc:title>
-  <dc:creator>${esc(meta.author ?? '')}</dc:creator>
+  <dc:title>${esc(meta.title ?? "")}</dc:title>
+  <dc:creator>${esc(meta.author ?? "")}</dc:creator>
   <dcterms:created xsi:type="dcterms:W3CDTF">${meta.created ?? now}</dcterms:created>
   <dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified>
 </cp:coreProperties>`;
@@ -288,14 +352,14 @@ function settingsXml(): string {
 // ─── numbering.xml ──────────────────────────────────────────
 
 function numberingXml(info: NumInfo): string {
-  let abstractNums = '';
-  let nums = '';
+  let abstractNums = "";
+  let nums = "";
 
   // Bullet list: abstractNumId=0, numId=1
   if (info.hasBullet) {
     abstractNums += `<w:abstractNum w:abstractNumId="0">`;
     for (let lvl = 0; lvl < 9; lvl++) {
-      const marker = lvl === 0 ? '●' : lvl === 1 ? '○' : '■';
+      const marker = lvl === 0 ? "●" : lvl === 1 ? "○" : "■";
       const indent = (lvl + 1) * 720;
       abstractNums += `<w:lvl w:ilvl="${lvl}"><w:numFmt w:val="bullet"/><w:lvlText w:val="${marker}"/><w:pPr><w:ind w:left="${indent}" w:hanging="360"/></w:pPr></w:lvl>`;
     }
@@ -307,7 +371,12 @@ function numberingXml(info: NumInfo): string {
   if (info.hasNumbered) {
     abstractNums += `<w:abstractNum w:abstractNumId="1">`;
     for (let lvl = 0; lvl < 9; lvl++) {
-      const fmt = lvl % 3 === 0 ? 'decimal' : lvl % 3 === 1 ? 'lowerLetter' : 'lowerRoman';
+      const fmt =
+        lvl % 3 === 0
+          ? "decimal"
+          : lvl % 3 === 1
+            ? "lowerLetter"
+            : "lowerRoman";
       const indent = (lvl + 1) * 720;
       abstractNums += `<w:lvl w:ilvl="${lvl}"><w:start w:val="1"/><w:numFmt w:val="${fmt}"/><w:lvlText w:val="%${lvl + 1}."/><w:pPr><w:ind w:left="${indent}" w:hanging="360"/></w:pPr></w:lvl>`;
     }
@@ -324,9 +393,13 @@ function numberingXml(info: NumInfo): string {
 
 // ─── header / footer xml ────────────────────────────────────
 
-function headerFooterXml(type: 'hdr' | 'ftr', paras: ParaNode[], ctx: EncCtx): string {
-  const tag = type === 'hdr' ? 'w:hdr' : 'w:ftr';
-  const body = paras.map(p => encodeParaInner(p, ctx)).join('\n');
+function headerFooterXml(
+  type: "hdr" | "ftr",
+  paras: ParaNode[],
+  ctx: EncCtx,
+): string {
+  const tag = type === "hdr" ? "w:hdr" : "w:ftr";
+  const body = paras.map((p) => encodeParaInner(p, ctx)).join("\n");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <${tag} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
 ${body}
@@ -335,35 +408,51 @@ ${body}
 
 // ─── document.xml ───────────────────────────────────────────
 
-function documentXml(kids: ContentNode[], dims: PageDims, ctx: EncCtx, headerRId?: string, footerRId?: string): string {
-  const body = kids.map(k => encodeContent(k, ctx, dims)).join('\n');
+function documentXml(
+  kids: ContentNode[],
+  dims: PageDims,
+  ctx: EncCtx,
+  headerRId?: string,
+  footerRId?: string,
+): string {
+  const body = kids.map((k) => encodeContent(k, ctx, dims)).join("\n");
 
-  let sectRefs = '';
-  if (headerRId) sectRefs += `\n      <w:headerReference w:type="default" r:id="${headerRId}"/>`;
-  if (footerRId) sectRefs += `\n      <w:footerReference w:type="default" r:id="${footerRId}"/>`;
+  let sectRefs = "";
+  if (headerRId)
+    sectRefs += `\n      <w:headerReference w:type="default" r:id="${headerRId}"/>`;
+  if (footerRId)
+    sectRefs += `\n      <w:footerReference w:type="default" r:id="${footerRId}"/>`;
 
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
   <w:body>
 ${body}
     <w:sectPr>${sectRefs}
-      <w:pgSz w:w="${Metric.ptToDxa(dims.wPt)}" w:h="${Metric.ptToDxa(dims.hPt)}" w:orient="${dims.orient ?? 'portrait'}"/>
+      <w:pgSz w:w="${Metric.ptToDxa(dims.wPt)}" w:h="${Metric.ptToDxa(dims.hPt)}" w:orient="${dims.orient ?? "portrait"}"/>
       <w:pgMar w:top="${Metric.ptToDxa(dims.mt)}" w:right="${Metric.ptToDxa(dims.mr)}" w:bottom="${Metric.ptToDxa(dims.mb)}" w:left="${Metric.ptToDxa(dims.ml)}" w:header="709" w:footer="709" w:gutter="0"/>
     </w:sectPr>
   </w:body>
 </w:document>`;
 }
 
-function encodeContent(node: ContentNode, ctx: EncCtx, dims?: PageDims): string {
-  return node.tag === 'grid' ? encodeGrid(node, ctx, dims) : encodeParaInner(node, ctx);
+function encodeContent(
+  node: ContentNode,
+  ctx: EncCtx,
+  dims?: PageDims,
+): string {
+  return node.tag === "grid"
+    ? encodeGrid(node, ctx, dims)
+    : encodeParaInner(node, ctx);
 }
 
 function encodeParaInner(para: ParaNode, ctx: EncCtx): string {
-  const align = para.props.align ?? 'left';
-  const headStyle = para.props.heading ? `<w:pStyle w:val="Heading${para.props.heading}"/>` : '';
+  const align = para.props.align ?? "left";
+  const headStyle = para.props.heading
+    ? `<w:pStyle w:val="Heading${para.props.heading}"/>`
+    : "";
 
   // List numbering
-  let numPr = '';
+  let numPr = "";
   if (para.props.listOrd !== undefined) {
     const numId = para.props.listOrd ? 2 : 1;
     const ilvl = para.props.listLv ?? 0;
@@ -372,44 +461,57 @@ function encodeParaInner(para: ParaNode, ctx: EncCtx): string {
 
   // Spacing (before / after / line height) - ensure all values are non-negative
   // ECMA-376 §17.3.1.33 spacing: line은 1/240th of a line(auto) 또는 dxa(exact/atLeast)
-  let spacingXml = '';
+  let spacingXml = "";
   const { spaceBefore, spaceAfter, lineHeight, lineHeightFixed } = para.props;
-  if (spaceBefore !== undefined || spaceAfter !== undefined || lineHeight !== undefined || lineHeightFixed !== undefined) {
+  if (
+    spaceBefore !== undefined ||
+    spaceAfter !== undefined ||
+    lineHeight !== undefined ||
+    lineHeightFixed !== undefined
+  ) {
     const parts: string[] = [];
-    if (spaceBefore !== undefined) parts.push(`w:before="${Math.max(0, Metric.ptToDxa(spaceBefore))}"`);
-    if (spaceAfter  !== undefined) parts.push(`w:after="${Math.max(0, Metric.ptToDxa(spaceAfter))}"`);
+    if (spaceBefore !== undefined)
+      parts.push(`w:before="${Math.max(0, Metric.ptToDxa(spaceBefore))}"`);
+    if (spaceAfter !== undefined)
+      parts.push(`w:after="${Math.max(0, Metric.ptToDxa(spaceAfter))}"`);
     if (lineHeightFixed !== undefined) {
       // FIXED: lineRule="exact", line값은 dxa (1pt = 20dxa)
-      parts.push(`w:line="${Math.max(1, Metric.ptToDxa(lineHeightFixed))}" w:lineRule="exact"`);
+      parts.push(
+        `w:line="${Math.max(1, Metric.ptToDxa(lineHeightFixed))}" w:lineRule="exact"`,
+      );
     } else if (lineHeight !== undefined) {
       parts.push(`w:line="${Math.round(lineHeight * 240)}" w:lineRule="auto"`);
     }
-    spacingXml = `<w:spacing ${parts.join(' ')}/>`;
+    spacingXml = `<w:spacing ${parts.join(" ")}/>`;
   }
 
   // Indentation — ECMA-376 §17.3.1.12 ind
   // w:left = 전체 왼쪽 여백(dxa), w:right = 전체 오른쪽 여백(dxa)
   // w:firstLine = 첫 줄 추가 들여쓰기(dxa, 양수), w:hanging = 내어쓰기(dxa, 양수값으로 표현)
-  let indentXml = '';
-  const leftDxa  = Math.round(Metric.ptToDxa(para.props.indentPt ?? 0));
+  let indentXml = "";
+  const leftDxa = Math.round(Metric.ptToDxa(para.props.indentPt ?? 0));
   const rightDxa = Math.round(Metric.ptToDxa(para.props.indentRightPt ?? 0));
-  const firstPt  = para.props.firstLineIndentPt ?? 0;
+  const firstPt = para.props.firstLineIndentPt ?? 0;
 
   const indParts: string[] = [];
-  if (leftDxa  > 0) indParts.push(`w:left="${leftDxa}"`);
+  if (leftDxa > 0) indParts.push(`w:left="${leftDxa}"`);
   if (rightDxa > 0) indParts.push(`w:right="${rightDxa}"`);
-  if (firstPt  > 0) indParts.push(`w:firstLine="${Math.round(Metric.ptToDxa(firstPt))}"`);
-  if (firstPt  < 0) indParts.push(`w:hanging="${Math.round(Metric.ptToDxa(-firstPt))}"`);
-  if (indParts.length > 0) indentXml = `<w:ind ${indParts.join(' ')}/>`;
+  if (firstPt > 0)
+    indParts.push(`w:firstLine="${Math.round(Metric.ptToDxa(firstPt))}"`);
+  if (firstPt < 0)
+    indParts.push(`w:hanging="${Math.round(Metric.ptToDxa(-firstPt))}"`);
+  if (indParts.length > 0) indentXml = `<w:ind ${indParts.join(" ")}/>`;
 
-  const runs = para.kids.map(k => {
-    if (k.tag === 'span') return encodeRun(k, ctx);
-    if (k.tag === 'img') return encodeImage(k, ctx);
-    return '';
-  }).join('');
+  const runs = para.kids
+    .map((k) => {
+      if (k.tag === "span") return encodeRun(k, ctx);
+      if (k.tag === "img") return encodeImage(k, ctx);
+      return "";
+    })
+    .join("");
 
   return `    <w:p>
-      <w:pPr>${headStyle}${numPr}${spacingXml}${indentXml}<w:jc w:val="${align === 'justify' ? 'both' : align}"/></w:pPr>
+      <w:pPr>${headStyle}${numPr}${spacingXml}${indentXml}<w:jc w:val="${align === "justify" ? "both" : align}"/></w:pPr>
       ${runs}
     </w:p>`;
 }
@@ -417,133 +519,167 @@ function encodeParaInner(para: ParaNode, ctx: EncCtx): string {
 function encodeRun(span: SpanNode, _ctx: EncCtx): string {
   const p = span.props;
   const rPr: string[] = [];
-  if (p.b) rPr.push('<w:b/>');
-  if (p.i) rPr.push('<w:i/>');
+  if (p.b) rPr.push("<w:b/>");
+  if (p.i) rPr.push("<w:i/>");
   if (p.u) rPr.push('<w:u w:val="single"/>');
-  if (p.s) rPr.push('<w:strike/>');
+  if (p.s) rPr.push("<w:strike/>");
   if (p.sup) rPr.push('<w:vertAlign w:val="superscript"/>');
   if (p.sub) rPr.push('<w:vertAlign w:val="subscript"/>');
-  if (p.pt) rPr.push(`<w:sz w:val="${Metric.ptToHalfPt(p.pt)}"/><w:szCs w:val="${Metric.ptToHalfPt(p.pt)}"/>`);
+  if (p.pt)
+    rPr.push(
+      `<w:sz w:val="${Metric.ptToHalfPt(p.pt)}"/><w:szCs w:val="${Metric.ptToHalfPt(p.pt)}"/>`,
+    );
   if (p.color) rPr.push(`<w:color w:val="${p.color}"/>`);
-  if (p.font) rPr.push(`<w:rFonts w:ascii="${esc(p.font)}" w:hAnsi="${esc(p.font)}" w:eastAsia="${esc(p.font)}"/>`);
+  if (p.font)
+    rPr.push(
+      `<w:rFonts w:ascii="${esc(p.font)}" w:hAnsi="${esc(p.font)}" w:eastAsia="${esc(p.font)}"/>`,
+    );
   if (p.bg) rPr.push(`<w:shd w:val="clear" w:color="auto" w:fill="${p.bg}"/>`);
 
   // Process kids — text and pagenum
   const parts: string[] = [];
   for (const kid of span.kids) {
-    if (kid.tag === 'txt') {
+    if (kid.tag === "txt") {
       // __EXT_N__ or __EXT_N_W<w>_H<h>__ 자리표시자 제거
-      const content = kid.content.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, '');
+      const content = kid.content.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "");
       if (content) {
-        parts.push(`<w:r><w:rPr>${rPr.join('')}</w:rPr><w:t xml:space="preserve">${esc(content)}</w:t></w:r>`);
+        parts.push(
+          `<w:r><w:rPr>${rPr.join("")}</w:rPr><w:t xml:space="preserve">${esc(content)}</w:t></w:r>`,
+        );
       }
-    } else if (kid.tag === 'pagenum') {
-      parts.push(`<w:r><w:rPr>${rPr.join('')}</w:rPr><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:rPr>${rPr.join('')}</w:rPr><w:instrText> PAGE </w:instrText></w:r><w:r><w:rPr>${rPr.join('')}</w:rPr><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr>${rPr.join('')}</w:rPr><w:t>1</w:t></w:r><w:r><w:rPr>${rPr.join('')}</w:rPr><w:fldChar w:fldCharType="end"/></w:r>`);
-    } else if (kid.tag === 'br') {
+    } else if (kid.tag === "pagenum") {
+      parts.push(
+        `<w:r><w:rPr>${rPr.join("")}</w:rPr><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:instrText> PAGE </w:instrText></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:t>1</w:t></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:fldChar w:fldCharType="end"/></w:r>`,
+      );
+    } else if (kid.tag === "br") {
       parts.push(`<w:r><w:br/></w:r>`);
-    } else if (kid.tag === 'pb') {
+    } else if (kid.tag === "pb") {
       parts.push(`<w:r><w:br w:type="page"/></w:r>`);
     }
   }
 
-  return parts.join('');
+  return parts.join("");
 }
 
 function encodeImage(img: ImgNode, ctx: EncCtx): string {
   const rId = ctx.imgMap.get(img);
-  if (!rId) return '';
+  if (!rId) return "";
 
   // Fallback to 72pt (1 inch) when w/h are 0 to prevent invisible images
   const cx = Metric.ptToEmu(img.w > 0 ? img.w : 72);
   const cy = Metric.ptToEmu(img.h > 0 ? img.h : 72);
-  const alt = esc(img.alt ?? '');
+  const alt = esc(img.alt ?? "");
   const docPrId = ctx.nextId++;
 
   const graphic = `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="Image"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${rId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic>`;
 
   const layout = img.layout;
-  // 'inline'만 wp:inline 사용; 그 외 모든 wrap은 wp:anchor (float)로 처리
-  const isInline = !layout || layout.wrap === 'inline';
 
-  if (isInline) {
+  const isInline = !layout || layout.wrap === "inline";
+  // topAndBottom은 반드시 anchor (float)로 처리
+  const forceAnchor =
+    layout?.wrap === "topAndBottom" ||
+    layout?.wrap === "square" ||
+    layout?.wrap === "tight" ||
+    layout?.wrap === "behind" ||
+    layout?.wrap === "front";
+  if (isInline && !forceAnchor) {
     return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:docPr id="${docPrId}" name="Image" descr="${alt}"/>${graphic}</wp:inline></w:drawing></w:r>`;
   }
-
-  return `<w:r><w:drawing>${encodeAnchor(img, cx, cy, alt, docPrId, graphic, layout)}</w:drawing></w:r>`;
+  return `<w:r><w:drawing>${encodeAnchor(img, cx, cy, alt, docPrId, graphic, layout!)}</w:drawing></w:r>`;
 }
 
 function encodeAnchor(
-  _img: ImgNode, cx: number, cy: number, alt: string, docPrId: number,
-  graphic: string, layout: NonNullable<ImgNode['layout']>,
+  _img: ImgNode,
+  cx: number,
+  cy: number,
+  alt: string,
+  docPrId: number,
+  graphic: string,
+  layout: NonNullable<ImgNode["layout"]>,
 ): string {
   const distT = Metric.ptToEmu(layout.distT ?? 0);
   const distB = Metric.ptToEmu(layout.distB ?? 0);
-  const distL = Metric.ptToEmu(layout.distL ?? 9144);   // DOCX 기본 0.18pt
+  const distL = Metric.ptToEmu(layout.distL ?? 9144); // DOCX 기본 0.18pt
   const distR = Metric.ptToEmu(layout.distR ?? 9144);
-  const behindDoc = (layout.behindDoc || layout.wrap === 'behind') ? '1' : '0';
+  const behindDoc = layout.behindDoc || layout.wrap === "behind" ? "1" : "0";
   const relH = layout.zOrder ?? 251658240;
 
   // 가로 위치
-  const horzRelFrom = HORZ_RELTO_DOCX[layout.horzRelTo ?? 'column'] ?? 'column';
+  const horzRelFrom = HORZ_RELTO_DOCX[layout.horzRelTo ?? "column"] ?? "column";
   let posH: string;
   if (layout.xPt != null) {
     posH = `<wp:positionH relativeFrom="${horzRelFrom}"><wp:posOffset>${Metric.ptToEmu(layout.xPt)}</wp:posOffset></wp:positionH>`;
   } else {
-    const ha = HORZ_ALIGN_DOCX[layout.horzAlign ?? 'left'] ?? 'left';
+    const ha = HORZ_ALIGN_DOCX[layout.horzAlign ?? "left"] ?? "left";
     posH = `<wp:positionH relativeFrom="${horzRelFrom}"><wp:align>${ha}</wp:align></wp:positionH>`;
   }
 
   // 세로 위치
-  const vertRelFrom = VERT_RELTO_DOCX[layout.vertRelTo ?? 'para'] ?? 'paragraph';
+  const vertRelFrom =
+    VERT_RELTO_DOCX[layout.vertRelTo ?? "para"] ?? "paragraph";
   let posV: string;
   if (layout.yPt != null) {
     posV = `<wp:positionV relativeFrom="${vertRelFrom}"><wp:posOffset>${Metric.ptToEmu(layout.yPt)}</wp:posOffset></wp:positionV>`;
   } else {
-    const va = VERT_ALIGN_DOCX[layout.vertAlign ?? 'top'] ?? 'top';
+    const va = VERT_ALIGN_DOCX[layout.vertAlign ?? "top"] ?? "top";
     posV = `<wp:positionV relativeFrom="${vertRelFrom}"><wp:align>${va}</wp:align></wp:positionV>`;
   }
 
   // 텍스트 감싸기
-  const wrapXml = WRAP_DOCX[layout.wrap] ?? '<wp:wrapSquare wrapText="bothSides"/>';
+  const wrapXml =
+    WRAP_DOCX[layout.wrap] ?? '<wp:wrapSquare wrapText="bothSides"/>';
 
   return `<wp:anchor distT="${distT}" distB="${distB}" distL="${distL}" distR="${distR}" simplePos="0" relativeHeight="${relH}" behindDoc="${behindDoc}" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/>${posH}${posV}<wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>${wrapXml}<wp:docPr id="${docPrId}" name="Image" descr="${alt}"/>${graphic}</wp:anchor>`;
 }
 
 const HORZ_RELTO_DOCX: Record<string, string> = {
-  margin: 'margin', column: 'column', page: 'page', para: 'paragraph',
+  margin: "margin",
+  column: "column",
+  page: "page",
+  para: "paragraph",
 };
 const VERT_RELTO_DOCX: Record<string, string> = {
-  margin: 'margin', line: 'line', page: 'page', para: 'paragraph',
+  margin: "margin",
+  line: "line",
+  page: "page",
+  para: "paragraph",
 };
 const HORZ_ALIGN_DOCX: Record<string, string> = {
-  left: 'left', center: 'center', right: 'right',
+  left: "left",
+  center: "center",
+  right: "right",
 };
 const VERT_ALIGN_DOCX: Record<string, string> = {
-  top: 'top', center: 'center', bottom: 'bottom',
+  top: "top",
+  center: "center",
+  bottom: "bottom",
 };
 // ECMA-376 §20.4.2 wordprocessingDrawing wrapping elements
 const WRAP_DOCX: Record<string, string> = {
   square: '<wp:wrapSquare wrapText="bothSides"/>',
-  tight: '<wp:wrapTight><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/><wp:lineTo x="0" y="21600"/><wp:lineTo x="21600" y="21600"/><wp:lineTo x="21600" y="0"/><wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapTight>',
-  through: '<wp:wrapThrough wrapText="bothSides"><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/><wp:lineTo x="0" y="21600"/><wp:lineTo x="21600" y="21600"/><wp:lineTo x="21600" y="0"/><wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapThrough>',
+  tight:
+    '<wp:wrapTight><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/><wp:lineTo x="0" y="21600"/><wp:lineTo x="21600" y="21600"/><wp:lineTo x="21600" y="0"/><wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapTight>',
+  through:
+    '<wp:wrapThrough wrapText="bothSides"><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/><wp:lineTo x="0" y="21600"/><wp:lineTo x="21600" y="21600"/><wp:lineTo x="21600" y="0"/><wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapThrough>',
   // ECMA-376 §20.4.2.15: wrapTopAndBottom — 텍스트가 이미지 위아래로만 흐름
-  topAndBottom: '<wp:wrapTopAndBottom/>',
-  none: '<wp:wrapNone/>',
-  behind: '<wp:wrapNone/>',
-  front: '<wp:wrapNone/>',
+  topAndBottom: "<wp:wrapTopAndBottom/>",
+  none: "<wp:wrapNone/>",
+  behind: "<wp:wrapNone/>",
+  front: "<wp:wrapNone/>",
 };
 
-function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
+function encodeGrid(grid: GridNode, ctx: EncCtx, dims: PageDims = A4): string {
   const gp = grid.props;
   const look = gp.look;
 
   // tblLook attributes
-  const firstRow = look?.firstRow ? '1' : '0';
-  const lastRow = look?.lastRow ? '1' : '0';
-  const firstCol = look?.firstCol ? '1' : '0';
-  const lastCol = look?.lastCol ? '1' : '0';
-  const noHBand = look?.bandedRows ? '0' : '1';
-  const noVBand = look?.bandedCols ? '0' : '1';
+  const firstRow = look?.firstRow ? "1" : "0";
+  const lastRow = look?.lastRow ? "1" : "0";
+  const firstCol = look?.firstCol ? "1" : "0";
+  const lastCol = look?.lastCol ? "1" : "0";
+  const noHBand = look?.bandedRows ? "0" : "1";
+  const noVBand = look?.bandedCols ? "0" : "1";
 
   const d = dims ?? A4;
   const availDxa = Metric.ptToDxa(d.wPt - d.ml - d.mr);
@@ -551,11 +687,14 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
   // 1단계: 표의 가상 2D 맵핑 (Virtual Table Map) 생성
   // 'real': 데이터 셀, 'continue': 세로 병합 지속 셀, 'absorbed': 가로/세로 병합으로 흡수된 자리, 'void': 빈 공간
   interface CellMap {
-    type: 'real' | 'continue' | 'absorbed' | 'void';
+    type: "real" | "continue" | "absorbed" | "void";
     cell?: any;
     width?: number;
   }
-  const tableMap: CellMap[][] = Array.from({ length: grid.kids.length }, () => []);
+  const tableMap: CellMap[][] = Array.from(
+    { length: grid.kids.length },
+    () => [],
+  );
 
   for (let ri = 0; ri < grid.kids.length; ri++) {
     let c = 0;
@@ -564,7 +703,7 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
       while (tableMap[ri][c]) c++;
 
       // 실제 데이터 셀 배치
-      tableMap[ri][c] = { type: 'real', cell, width: cell.cs };
+      tableMap[ri][c] = { type: "real", cell, width: cell.cs };
 
       // 병합 영역(colspan, rowspan) 예약 처리
       for (let rr = 0; rr < cell.rs; rr++) {
@@ -577,10 +716,10 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
 
           if (rr > 0 && cc === 0) {
             // 세로 병합이 시작된 이후 행의 첫 번째 칸
-            tableMap[targetRi][c + cc] = { type: 'continue', width: cell.cs };
+            tableMap[targetRi][c + cc] = { type: "continue", width: cell.cs };
           } else {
             // 가로 병합으로 흡수된 칸 또는 세로 병합 중 가로 병합된 칸
-            tableMap[targetRi][c + cc] = { type: 'absorbed' };
+            tableMap[targetRi][c + cc] = { type: "absorbed" };
           }
         }
       }
@@ -598,7 +737,7 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
   // 빈 공간(void) 채우기 및 colCount에 맞춰 배열 길이 정규화
   for (let ri = 0; ri < grid.kids.length; ri++) {
     for (let c = 0; c < colCount; c++) {
-      if (!tableMap[ri][c]) tableMap[ri][c] = { type: 'void' };
+      if (!tableMap[ri][c]) tableMap[ri][c] = { type: "void" };
     }
   }
 
@@ -611,8 +750,8 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
     while (srcPt.length < colCount) srcPt.push(0);
     srcPt.length = colCount;
 
-    const knownTotalPt = srcPt.filter(w => w > 0).reduce((s, w) => s + w, 0);
-    const zeroCount = srcPt.filter(w => w <= 0).length;
+    const knownTotalPt = srcPt.filter((w) => w > 0).reduce((s, w) => s + w, 0);
+    const zeroCount = srcPt.filter((w) => w <= 0).length;
     const availPt = Metric.dxaToPt(availDxa);
 
     const remainingPt = Math.max(0, availPt - knownTotalPt);
@@ -620,151 +759,201 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims?: PageDims): string {
 
     for (let i = 0; i < srcPt.length; i++) {
       if (srcPt[i] <= 0) {
-        srcPt[i] = zeroFillPt > 0 ? zeroFillPt : (availPt / colCount);
+        srcPt[i] = zeroFillPt > 0 ? zeroFillPt : availPt / colCount;
       }
     }
 
-    colWidthsDxa = srcPt.map(w => Math.round(Metric.ptToDxa(w)));
+    colWidthsDxa = srcPt.map((w) => Math.round(Metric.ptToDxa(w)));
     const computedTotalDxa = colWidthsDxa.reduce((s, w) => s + w, 0);
     if (computedTotalDxa > availDxa) {
       const scale = availDxa / computedTotalDxa;
-      colWidthsDxa = colWidthsDxa.map(w => Math.round(w * scale));
+      colWidthsDxa = colWidthsDxa.map((w) => Math.round(w * scale));
     }
   } else {
     for (let c = 0; c < colCount; c++) colWidthsDxa.push(defaultColDxa);
   }
 
   const totalDxa = colWidthsDxa.reduce((s, w) => s + w, 0);
-  const gridCols = colWidthsDxa.map(w => `<w:gridCol w:w="${w}"/>`).join('');
+  const gridCols = colWidthsDxa.map((w) => `<w:gridCol w:w="${w}"/>`).join("");
 
   // 3단계: XML 렌더링
-  const rows = tableMap.map((rowMap, ri) => {
-    const cellXmls: string[] = [];
+  const rows = tableMap
+    .map((rowMap, ri) => {
+      const cellXmls: string[] = [];
 
-    for (let c = 0; c < colCount; c++) {
-      const mapEntry = rowMap[c];
+      for (let c = 0; c < colCount; c++) {
+        const mapEntry = rowMap[c];
 
-      // 가로 병합으로 흡수된 칸은 렌더링하지 않음 (앞선 칸의 gridSpan이 차지)
-      if (mapEntry.type === 'absorbed') continue;
+        // 가로 병합으로 흡수된 칸은 렌더링하지 않음 (앞선 칸의 gridSpan이 차지)
+        if (mapEntry.type === "absorbed") continue;
 
-      // 세로 병합 지속(continue), 실제 셀(real), 또는 빈 공간(void) 처리
-      const isContinue = mapEntry.type === 'continue';
-      const isReal = mapEntry.type === 'real';
-      const isVoid = mapEntry.type === 'void';
+        // 세로 병합 지속(continue), 실제 셀(real), 또는 빈 공간(void) 처리
+        const isContinue = mapEntry.type === "continue";
+        const isReal = mapEntry.type === "real";
+        const isVoid = mapEntry.type === "void";
 
-      if (isContinue || isReal || isVoid) {
-        let cw = 0;
-        const cellWidth = mapEntry.width || 1;
+        if (isContinue || isReal || isVoid) {
+          let cw = 0;
+          const cellWidth = mapEntry.width || 1;
 
-        // 너비 계산: 현재 칸부터 colspan(width) 만큼의 컬럼 너비 합산
-        // colWidthsDxa 가 colCount 보다 작은 경우를 대비하여 safe 하게 처리
-        const safeColWidths = colWidthsDxa.length >= colCount ? colWidthsDxa : [...colWidthsDxa, ...Array(colCount - colWidthsDxa.length).fill(defaultColDxa)];
-        for (let sc = c; sc < c + cellWidth && sc < safeColWidths.length; sc++) {
-          cw += safeColWidths[sc];
-        }
-        if (cw <= 0) cw = defaultColDxa * cellWidth;
-
-        const tcPrParts: string[] = [];
-        tcPrParts.push(`<w:tcW w:w="${Math.round(cw)}" w:type="dxa"/>`);
-
-        if (cellWidth > 1) {
-          tcPrParts.push(`<w:gridSpan w:val="${cellWidth}"/>`);
-        }
-
-        if (isContinue) {
-          tcPrParts.push(`<w:vMerge/>`);
-        }
-
-        let cellContent = '';
-        if (isReal) {
-          const cell = mapEntry.cell!;
-          const cp = cell.props;
-          if (cell.rs > 1) tcPrParts.push(`<w:vMerge w:val="restart"/>`);
-
-          const borders = encodeCellBorders(cp);
-          if (borders) tcPrParts.push(borders);
-          if (cp.bg) tcPrParts.push(`<w:shd w:val="clear" w:color="auto" w:fill="${cp.bg}"/>`);
-          if (cp.va) {
-            const vaMap: Record<string, string> = { top: 'top', mid: 'center', bot: 'bottom' };
-            tcPrParts.push(`<w:vAlign w:val="${vaMap[cp.va] ?? 'top'}"/>`);
+          // 너비 계산: 현재 칸부터 colspan(width) 만큼의 컬럼 너비 합산
+          // colWidthsDxa 가 colCount 보다 작은 경우를 대비하여 safe 하게 처리
+          const safeColWidths =
+            colWidthsDxa.length >= colCount
+              ? colWidthsDxa
+              : [
+                  ...colWidthsDxa,
+                  ...Array(colCount - colWidthsDxa.length).fill(defaultColDxa),
+                ];
+          for (
+            let sc = c;
+            sc < c + cellWidth && sc < safeColWidths.length;
+            sc++
+          ) {
+            cw += safeColWidths[sc];
           }
-          // Per-cell margin override (only when explicitly set)
-          const cPadT = cp.padT != null ? Math.round(Metric.ptToDxa(cp.padT)) : null;
-          const cPadB = cp.padB != null ? Math.round(Metric.ptToDxa(cp.padB)) : null;
-          const cPadL = cp.padL != null ? Math.round(Metric.ptToDxa(cp.padL)) : null;
-          const cPadR = cp.padR != null ? Math.round(Metric.ptToDxa(cp.padR)) : null;
-          if (cPadT != null || cPadB != null || cPadL != null || cPadR != null) {
-            const t = cPadT ?? 28; const b = cPadB ?? 28;
-            const l = cPadL ?? 72; const r = cPadR ?? 72;
-            tcPrParts.push(`<w:tcMar><w:top w:w="${t}" w:type="dxa"/><w:left w:w="${l}" w:type="dxa"/><w:bottom w:w="${b}" w:type="dxa"/><w:right w:w="${r}" w:type="dxa"/></w:tcMar>`);
+          if (cw <= 0) cw = defaultColDxa * cellWidth;
+
+          const tcPrParts: string[] = [];
+          tcPrParts.push(`<w:tcW w:w="${Math.round(cw)}" w:type="dxa"/>`);
+
+          if (cellWidth > 1) {
+            tcPrParts.push(`<w:gridSpan w:val="${cellWidth}"/>`);
           }
-          // Encode cell content: paragraphs and nested grids (중첩 표)
-          // DOCX cells must end with <w:p>; nested <w:tbl> goes between paras
-          const parts: string[] = [];
-          for (const kid of cell.kids) {
-            if (kid.tag === 'grid') {
-              parts.push(encodeGrid(kid, ctx));
-            } else {
-              parts.push(encodeParaInner(kid as ParaNode, ctx));
+
+          if (isContinue) {
+            tcPrParts.push(`<w:vMerge/>`);
+          }
+
+          let cellContent = "";
+          if (isReal) {
+            const cell = mapEntry.cell!;
+            const cp = cell.props;
+            if (cell.rs > 1) tcPrParts.push(`<w:vMerge w:val="restart"/>`);
+
+            const borders = encodeCellBorders(cp);
+            if (borders) tcPrParts.push(borders);
+            if (cp.bg)
+              tcPrParts.push(
+                `<w:shd w:val="clear" w:color="auto" w:fill="${cp.bg}"/>`,
+              );
+            if (cp.va) {
+              const vaMap: Record<string, string> = {
+                top: "top",
+                mid: "center",
+                bot: "bottom",
+              };
+              tcPrParts.push(`<w:vAlign w:val="${vaMap[cp.va] ?? "top"}"/>`);
             }
+            // Per-cell margin override (only when explicitly set)
+            const cPadT =
+              cp.padT != null ? Math.round(Metric.ptToDxa(cp.padT)) : null;
+            const cPadB =
+              cp.padB != null ? Math.round(Metric.ptToDxa(cp.padB)) : null;
+            const cPadL =
+              cp.padL != null ? Math.round(Metric.ptToDxa(cp.padL)) : null;
+            const cPadR =
+              cp.padR != null ? Math.round(Metric.ptToDxa(cp.padR)) : null;
+            if (
+              cPadT != null ||
+              cPadB != null ||
+              cPadL != null ||
+              cPadR != null
+            ) {
+              const t = cPadT ?? 28;
+              const b = cPadB ?? 28;
+              const l = cPadL ?? 72;
+              const r = cPadR ?? 72;
+              tcPrParts.push(
+                `<w:tcMar><w:top w:w="${t}" w:type="dxa"/><w:left w:w="${l}" w:type="dxa"/><w:bottom w:w="${b}" w:type="dxa"/><w:right w:w="${r}" w:type="dxa"/></w:tcMar>`,
+              );
+            }
+            // Encode cell content: paragraphs and nested grids (중첩 표)
+            // DOCX cells must end with <w:p>; nested <w:tbl> goes between paras
+            const parts: string[] = [];
+            for (const kid of cell.kids) {
+              if (kid.tag === "grid") {
+                parts.push(encodeGrid(kid, ctx)); // dims 제거 — 중첩 표는 부모 dims 불필요
+              } else if (kid.tag === "para") {
+                parts.push(encodeParaInner(kid, ctx));
+              }
+            }
+            // DOCX 셀은 반드시 <w:p>로 끝나야 함
+            const lastKid = cell.kids[cell.kids.length - 1];
+            if (cell.kids.length === 0 || lastKid?.tag === "grid") {
+              parts.push('<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>');
+            }
+            cellContent = parts.join("");
+          } else {
+            // continue 거나 void 인 경우 빈 단락 추가
+            cellContent = `<w:p><w:pPr/></w:p>`;
           }
-          // Ensure trailing paragraph (DOCX requirement)
-          if (cell.kids.length === 0 || cell.kids[cell.kids.length - 1].tag === 'grid') {
-            parts.push('<w:p><w:pPr/></w:p>');
-          }
-          cellContent = parts.join('');
-        } else {
-          // continue 거나 void 인 경우 빈 단락 추가
-          cellContent = `<w:p><w:pPr/></w:p>`;
+
+          const tcPr = `<w:tcPr>${tcPrParts.join("")}</w:tcPr>`;
+          cellXmls.push(`      <w:tc>${tcPr}${cellContent}</w:tc>`);
         }
-
-        const tcPr = `<w:tcPr>${tcPrParts.join('')}</w:tcPr>`;
-        cellXmls.push(`      <w:tc>${tcPr}${cellContent}</w:tc>`);
       }
-    }
 
-    const trPrParts: string[] = [];
-    if (ri === 0 && (gp.headerRow || look?.firstRow)) {
-      trPrParts.push('<w:tblHeader/>');
-    }
-    // 원본 행 정보에서 높이 가져오기 (tableMap 과 grid.kids 는 같은 인덱스)
-    const originalRow = grid.kids[ri];
-    if (originalRow?.heightPt != null && originalRow.heightPt > 0) {
-      const hDxa = Math.round(Metric.ptToDxa(originalRow.heightPt));
-      trPrParts.push(`<w:trHeight w:val="${hDxa}" w:hRule="atLeast"/>`);
-    }
-    const trPr = trPrParts.length > 0 ? `<w:trPr>${trPrParts.join('')}</w:trPr>` : '';
+      const trPrParts: string[] = [];
+      if (ri === 0 && (gp.headerRow || look?.firstRow)) {
+        trPrParts.push("<w:tblHeader/>");
+      }
+      // 원본 행 정보에서 높이 가져오기 (tableMap 과 grid.kids 는 같은 인덱스)
+      const originalRow = grid.kids[ri];
+      if (originalRow?.heightPt != null && originalRow.heightPt > 0) {
+        const hDxa = Math.round(Metric.ptToDxa(originalRow.heightPt));
+        trPrParts.push(`<w:trHeight w:val="${hDxa}" w:hRule="atLeast"/>`);
+      }
+      const trPr =
+        trPrParts.length > 0 ? `<w:trPr>${trPrParts.join("")}</w:trPr>` : "";
 
-    return `    <w:tr>${trPr}\n${cellXmls.join('\n')}\n    </w:tr>`;
-  }).join('\n');
+      return `    <w:tr>${trPr}\n${cellXmls.join("\n")}\n    </w:tr>`;
+    })
+    .join("\n");
 
   // 4단계: 테두리 및 최종 테이블 XML 조립
-  let tblBorders = '';
+  let tblBorders = "";
   const strokeKindMap: Record<string, string> = {
-    solid: 'single', dash: 'dash', dot: 'dot', double: 'double', none: 'none',
-    dotDash: 'dotDash', dotDotDash: 'dotDotDash', triple: 'triple', thinThickSmallGap: 'thinThickSmallGap',
-    thickThinSmallGap: 'thickThinSmallGap', thinThickThinSmallGap: 'thinThickThinSmallGap',
+    solid: "single",
+    dash: "dash",
+    dot: "dot",
+    double: "double",
+    none: "none",
+    dotDash: "dotDash",
+    dotDotDash: "dotDotDash",
+    triple: "triple",
+    thinThickSmallGap: "thinThickSmallGap",
+    thickThinSmallGap: "thickThinSmallGap",
+    thinThickThinSmallGap: "thinThickThinSmallGap",
   };
 
   if (gp.defaultStroke) {
     const s = gp.defaultStroke;
-    const val = strokeKindMap[s.kind] ?? 'single';
+    const val = strokeKindMap[s.kind] ?? "single";
 
-    if (val === 'none' || s.pt <= 0) {
-      tblBorders = '<w:tblBorders><w:top w:val="none"/><w:left w:val="none"/><w:bottom w:val="none"/><w:right w:val="none"/><w:insideH w:val="none"/><w:insideV w:val="none"/></w:tblBorders>';
+    if (val === "none" || s.pt <= 0) {
+      tblBorders =
+        '<w:tblBorders><w:top w:val="none"/><w:left w:val="none"/><w:bottom w:val="none"/><w:right w:val="none"/><w:insideH w:val="none"/><w:insideV w:val="none"/></w:tblBorders>';
     } else {
       // DOCX sz는 1/8pt 단위. 최소 굵기 2(0.25pt) 보장
       const sz = Math.max(2, Math.round(s.pt * 8));
       // 색상 '#' 제거 및 빈 값일 경우 auto 처리
-      const clr = s.color ? s.color.replace('#', '') : 'auto';
+      const clr = s.color ? s.color.replace("#", "") : "auto";
       const bdr = `w:val="${val}" w:sz="${sz}" w:space="0" w:color="${clr}"`;
       tblBorders = `<w:tblBorders><w:top ${bdr}/><w:left ${bdr}/><w:bottom ${bdr}/><w:right ${bdr}/><w:insideH ${bdr}/><w:insideV ${bdr}/></w:tblBorders>`;
     }
   }
 
   // ECMA-376 §17.4.58: tblJc — 표 가로 정렬 (start/center/end)
-  const tblAlignMap: Record<string, string> = { left: 'start', center: 'center', right: 'end', justify: 'start' };
-  const tblJc = gp.align ? `<w:jc w:val="${tblAlignMap[gp.align] ?? 'start'}"/>` : '';
+  const tblAlignMap: Record<string, string> = {
+    left: "start",
+    center: "center",
+    right: "end",
+    justify: "start",
+  };
+  const tblJc = gp.align
+    ? `<w:jc w:val="${tblAlignMap[gp.align] ?? "start"}"/>`
+    : "";
 
   return `    <w:tbl>
       <w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="${Math.round(totalDxa)}" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="${firstRow}" w:lastRow="${lastRow}" w:firstColumn="${firstCol}" w:lastColumn="${lastCol}" w:noHBand="${noHBand}" w:noVBand="${noVBand}"/>${tblBorders}${tblJc}<w:tblCellMar><w:top w:w="28" w:type="dxa"/><w:left w:w="72" w:type="dxa"/><w:bottom w:w="28" w:type="dxa"/><w:right w:w="72" w:type="dxa"/></w:tblCellMar></w:tblPr>
@@ -773,43 +962,52 @@ ${rows}
     </w:tbl>`;
 }
 function encodeCellBorders(cp: CellProps): string {
-  if (!cp.top && !cp.bot && !cp.left && !cp.right) return '';
+  if (!cp.top && !cp.bot && !cp.left && !cp.right) return "";
   const strokeKindMap: Record<string, string> = {
-    solid: 'single', dash: 'dash', dot: 'dot', double: 'double', none: 'none',
-    dotDash: 'dotDash', dotDotDash: 'dotDotDash', triple: 'triple',
+    solid: "single",
+    dash: "dash",
+    dot: "dot",
+    double: "double",
+    none: "none",
+    dotDash: "dotDash",
+    dotDotDash: "dotDotDash",
+    triple: "triple",
   };
 
-  const encode = (s?: { kind: string; pt: number; color: string }, tag?: string) => {
-    if (!s || !tag) return '';
-    const val = strokeKindMap[s.kind] ?? 'single';
+  const encode = (
+    s?: { kind: string; pt: number; color: string },
+    tag?: string,
+  ) => {
+    if (!s || !tag) return "";
+    const val = strokeKindMap[s.kind] ?? "single";
 
     // 선이 없거나 굵기가 0 이하인 경우 확실하게 제거 처리
-    if (val === 'none' || s.pt <= 0) {
+    if (val === "none" || s.pt <= 0) {
       return `<w:${tag} w:val="none" w:sz="0" w:space="0" w:color="auto"/>`;
     }
 
     // 최소 굵기 sz=2 (0.25pt) 보장
     const sz = Math.max(2, Math.round(s.pt * 8));
     // 색상 '#' 제거 및 빈 값일 경우 auto 처리
-    const clr = s.color ? s.color.replace('#', '') : 'auto';
+    const clr = s.color ? s.color.replace("#", "") : "auto";
 
     return `<w:${tag} w:val="${val}" w:sz="${sz}" w:space="0" w:color="${clr}"/>`;
   };
 
-  return `<w:tcBorders>${encode(cp.top, 'top')}${encode(cp.bot, 'bottom')}${encode(cp.left, 'left')}${encode(cp.right, 'right')}</w:tcBorders>`;
+  return `<w:tcBorders>${encode(cp.top, "top")}${encode(cp.bot, "bottom")}${encode(cp.left, "left")}${encode(cp.right, "right")}</w:tcBorders>`;
 }
 
 function esc(s: string): string {
-  if (!s) return '';
+  if (!s) return "";
   // 1. 내부 처리용 플레이스홀더(__EXT_0__ 또는 __EXT_0_W144_H108__ 등) 제거
-  s = s.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, '');
+  s = s.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "");
 
   // 2. 글자 깨짐을 유발하는 쓰레기값 및 BOM 기호 명시적 제거 (이 부분 추가!)
-  s = s.replace(/湰灧/g, '');
-  s = s.replace(/\uFEFF/g, '');
+  s = s.replace(/湰灧/g, "");
+  s = s.replace(/\uFEFF/g, "");
 
   // 3. DOCX(XML 1.0)에서 허용하지 않는 보이지 않는 제어문자 모두 제거
-  s = s.replace(/[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD]/g, '');
+  s = s.replace(/[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD]/g, "");
 
   return TextKit.escapeXml(s);
 }

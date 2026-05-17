@@ -1572,10 +1572,16 @@ function encodeGridPositioned(
 ): { xml: string; nextVertPos: number } {
   const { xml: gridXml, height: tblHeight } = buildGridXml(grid, ctx);
   const totalHeight = Math.max(1600, tblHeight);
-  
-  // 표가 단독으로(단락 밖에서) 호출되는 경우를 위해 hp:p로 감쌈
   const fontSize = 1000;
-  const { xml: linesegXml } = buildLinesegarray(" ", vertPos, fontSize, totalHeight / (fontSize / 100), ctx.availableWidth);
+  const baseline = Math.round(fontSize * 0.83);
+  const spacing = Math.max(0, totalHeight - fontSize);
+
+  const linesegXml =
+    `<hp:linesegarray>` +
+    `<hp:lineseg textpos="0" vertpos="${vertPos}" vertsize="${totalHeight}" ` +
+    `textheight="${fontSize}" baseline="${baseline}" spacing="${spacing}" ` +
+    `horzpos="0" horzsize="${ctx.availableWidth}" flags="${LINESEG_FLAGS_FIRST}"/>` +
+    `</hp:linesegarray>`;
 
   const xml =
     `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0" paraTcId="0">` +
@@ -1587,7 +1593,6 @@ function encodeGridPositioned(
 
   return { xml, nextVertPos: vertPos + totalHeight };
 }
-
 function buildGridXml(
   grid: GridNode,
   ctx: HwpxCtx,
