@@ -582,7 +582,7 @@ function parseTableCtrl(
   const rowCnt = tblData.length >= 6 ? BinaryKit.readU16LE(tblData, 4) : 1;
   const colCnt = tblData.length >= 8 ? BinaryKit.readU16LE(tblData, 6) : 1;
 
-  interface PC { row: number; col: number; cs: number; rs: number; widthHwp: number; heightHwp?: number; props: CellProps; paras: ParaNode[]; nestedGrids: GridNode[] }
+  interface PC { row: number; col: number; cs: number; rs: number; widthHwp: number; heightHwp?: number; props: CellProps; cellChildren: (ParaNode | GridNode)[] }
   const parsed: PC[] = [];
 
   for (let ci = 0; ci < cells.length; ci++) {
@@ -590,7 +590,7 @@ function parseTableCtrl(
     const seqIdx = ci;
     const pc = shield.guard(
       () => parseCellRec(c.data, c.tag, recs, c.cStart, c.cEnd, di, shield, seqIdx, colCnt, gsoCtx),
-      { row: Math.floor(ci / (colCnt || 1)), col: ci % (colCnt || 1), cs: 1, rs: 1, widthHwp: 0, heightHwp: undefined, props: {}, paras: [buildPara([buildSpan('')])], nestedGrids: [] },
+      { row: Math.floor(ci / (colCnt || 1)), col: ci % (colCnt || 1), cs: 1, rs: 1, widthHwp: 0, heightHwp: undefined, props: {}, cellChildren: [buildPara([buildSpan('')])] },
       `hwp:cell@${c.cStart}`,
     );
     parsed.push(pc);
@@ -651,21 +651,26 @@ function parseTableCtrl(
     const rc = parsed.filter(c => c.row === r).sort((a, b) => a.col - b.col);
     if (rc.length === 0) continue;
 
-    // Calculate row height from cells in this row (max height among cells)
+    // Calculate row height — prefer rs=1 cells (exact per-row height)
     let rowHeightPt: number | undefined = undefined;
     for (const c of rc) {
-      if (c.heightHwp && c.heightHwp > 0) {
+      if (c.heightHwp && c.heightHwp > 0 && c.rs === 1) {
         const hPt = Metric.hwpToPt(c.heightHwp);
-        rowHeightPt = rowHeightPt == null || hPt > rowHeightPt ? hPt : rowHeightPt;
+        if (rowHeightPt == null || hPt > rowHeightPt) rowHeightPt = hPt;
+      }
+    }
+    // Fallback: all cells span multiple rows → approximate height per row
+    if (rowHeightPt == null) {
+      for (const c of rc) {
+        if (c.heightHwp && c.heightHwp > 0) {
+          const hPt = Metric.hwpToPt(c.heightHwp) / c.rs;
+          if (rowHeightPt == null || hPt > rowHeightPt) rowHeightPt = hPt;
+        }
       }
     }
 
     rows.push(buildRow(rc.map(c => {
-      const cellKids: (ParaNode | GridNode)[] = [
-        ...(c.paras.length ? c.paras : [buildPara([buildSpan('')])]),
-        ...(c.nestedGrids ?? []),
-      ];
-      return buildCell(cellKids, { cs: c.cs, rs: c.rs, props: c.props });
+      return buildCell(c.cellChildren, { cs: c.cs, rs: c.rs, props: c.props });
     }), rowHeightPt));
   }
   if (rows.length === 0) return { grid: null, next: i };
@@ -749,14 +754,13 @@ function parseCellRec(
     col = seqIdx % (colCnt || 1);
   }
 
-  const paras: ParaNode[] = [];
-  const nestedGrids: GridNode[] = [];
+  const cellChildren: (ParaNode | GridNode)[] = [];
   const MAX_HWP = 1_000_000;
   let k = cStart;
 
   while (k < cEnd) {
     if (recs[k].tag === TAG_PARA_HEADER) {
-      // Parse paragraph inside cell
+      // Parse paragraph inside cell — also extracts nested tables within the paragraph
       const r = shield.guard(
         () => {
           const hdr = recs[k];
@@ -766,6 +770,7 @@ function parseCellRec(
           let txt: ParaTextResult | null = null;
           let csp: [number, number][] = [];
           const ctrlHdrs: { ctrlId: number; imgId: number; wPt: number; hPt: number }[] = [];
+          const innerGrids: GridNode[] = [];
           let j = k + 1;
           while (j < cEnd && recs[j].level > lv) {
             if (recs[j].tag === TAG_PARA_TEXT) { txt = decodeParaText(recs[j].data); j++; }
@@ -773,14 +778,27 @@ function parseCellRec(
             else if (recs[j].tag === TAG_CTRL_HEADER && recs[j].level === lv + 1) {
               if (recs[j].data.length >= 4) {
                 const ctrlId = BinaryKit.readU32LE(recs[j].data, 0);
-                const rawW = recs[j].data.length >= 24 ? BinaryKit.readU32LE(recs[j].data, 16) : 0;
-                const rawH = recs[j].data.length >= 28 ? BinaryKit.readU32LE(recs[j].data, 20) : 0;
-                const wPt = rawW > 0 && rawW < MAX_HWP ? Metric.hwpToPt(rawW) : 0;
-                const hPt = rawH > 0 && rawH < MAX_HWP ? Metric.hwpToPt(rawH) : 0;
-                const imgId = ctrlId === CTRL_GSO ? gsoCtx.count++ : (recs[j].data.length >= 6 ? BinaryKit.readU16LE(recs[j].data, 4) : 0);
-                ctrlHdrs.push({ ctrlId, imgId, wPt, hPt });
+                if (ctrlId === CTRL_TABLE) {
+                  // Nested table inside a cell paragraph — recurse into parseTableCtrl
+                  const nestedTr = shield.guard(
+                    () => parseTableCtrl(recs, j, di, shield, gsoCtx),
+                    { grid: null, next: skipKids(recs, j) },
+                    `hwp:innerNestedTbl@${j}`,
+                  );
+                  if (nestedTr.grid) innerGrids.push(nestedTr.grid as GridNode);
+                  j = nestedTr.next;
+                } else {
+                  const rawW = recs[j].data.length >= 24 ? BinaryKit.readU32LE(recs[j].data, 16) : 0;
+                  const rawH = recs[j].data.length >= 28 ? BinaryKit.readU32LE(recs[j].data, 20) : 0;
+                  const wPt = rawW > 0 && rawW < MAX_HWP ? Metric.hwpToPt(rawW) : 0;
+                  const hPt = rawH > 0 && rawH < MAX_HWP ? Metric.hwpToPt(rawH) : 0;
+                  const imgId = ctrlId === CTRL_GSO ? gsoCtx.count++ : (recs[j].data.length >= 6 ? BinaryKit.readU16LE(recs[j].data, 4) : 0);
+                  ctrlHdrs.push({ ctrlId, imgId, wPt, hPt });
+                  j = skipKids(recs, j);
+                }
+              } else {
+                j = skipKids(recs, j);
               }
-              j = skipKids(recs, j);
             }
             else j++;
           }
@@ -789,7 +807,7 @@ function parseCellRec(
           if (txt && txt.controls.length > 0) {
             for (let ci = 0; ci < txt.controls.length; ci++) {
               const ch = ctrlHdrs[ci];
-              if (!ch) continue; // anchor-only ctrl char (gso is sibling, not child of this para)
+              if (!ch) continue;
               const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
               if (!isImg) continue;
               const dimStr = (ch.wPt > 0 && ch.hPt > 0) ? `_W${Math.round(ch.wPt)}_H${Math.round(ch.hPt)}` : '';
@@ -797,15 +815,16 @@ function parseCellRec(
             }
           }
           const kids = paraContent.length > 0 ? paraContent as any : [buildSpan('')];
-          return { para: buildPara(kids, buildParaProps(ps)), next: j };
+          const items: (ParaNode | GridNode)[] = [buildPara(kids, buildParaProps(ps)), ...innerGrids];
+          return { items, next: j };
         },
-        { para: buildPara([buildSpan('')]), next: k + 1 },
+        { items: [buildPara([buildSpan('')])] as (ParaNode | GridNode)[], next: k + 1 },
         `hwp:cellP@${k}`,
       );
-      paras.push(r.para);
+      cellChildren.push(...r.items);
       k = r.next;
     } else if (recs[k].tag === TAG_CTRL_HEADER && recs[k].data.length >= 4) {
-      // CTRL_HEADER at cell level (sibling of PARA_HEADER) — handles anchored 'gso' images and nested tables
+      // CTRL_HEADER at cell level (sibling of PARA_HEADER) — anchored 'gso' images and outer-level nested tables
       const cellCtrlId = BinaryKit.readU32LE(recs[k].data, 0);
       if (cellCtrlId === CTRL_GSO) {
         const gsoId = gsoCtx.count++;
@@ -814,7 +833,7 @@ function parseCellRec(
         const wPt = rawW > 0 && rawW < MAX_HWP ? Metric.hwpToPt(rawW) : 0;
         const hPt = rawH > 0 && rawH < MAX_HWP ? Metric.hwpToPt(rawH) : 0;
         const dimStr = (wPt > 0 && hPt > 0) ? `_W${Math.round(wPt)}_H${Math.round(hPt)}` : '';
-        paras.push(buildPara([buildSpan(`__EXT_${gsoId}${dimStr}__`)]));
+        cellChildren.push(buildPara([buildSpan(`__EXT_${gsoId}${dimStr}__`)]));
         k = skipKids(recs, k);
       } else if (cellCtrlId === CTRL_TABLE) {
         const tr = shield.guard(
@@ -822,7 +841,7 @@ function parseCellRec(
           { grid: null, next: skipKids(recs, k) },
           `hwp:nestedTbl@${k}`,
         );
-        if (tr.grid) nestedGrids.push(tr.grid as GridNode);
+        if (tr.grid) cellChildren.push(tr.grid as GridNode);
         k = tr.next;
       } else {
         k = skipKids(recs, k);
@@ -833,8 +852,7 @@ function parseCellRec(
   return {
     row, col, cs, rs, props, widthHwp,
     heightHwp: heightHwp || undefined,
-    paras: paras.length ? paras : [buildPara([buildSpan('')])],
-    nestedGrids,
+    cellChildren: cellChildren.length ? cellChildren : [buildPara([buildSpan('')])],
   };
 }
 
