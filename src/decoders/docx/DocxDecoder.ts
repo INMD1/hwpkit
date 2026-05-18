@@ -1,0 +1,1703 @@
+import type {
+  DocRoot,
+  ContentNode,
+  ParaNode,
+  SpanNode,
+  GridNode,
+  ImgNode,
+  LinkNode,
+  PageNumNode,
+  CellNode,
+} from "../../model/doc-tree";
+import type { Outcome } from "../../contract/result";
+import type {
+  DocMeta,
+  PageDims,
+  TextProps,
+  ParaProps,
+  CellProps,
+  GridProps,
+  TableLook,
+  Stroke,
+  ImgLayout,
+  ImgHorzAlign,
+  ImgVertAlign,
+  ImgHorzRelTo,
+  ImgVertRelTo,
+  ImgWrap,
+} from "../../model/doc-props";
+import { A4 } from "../../model/doc-props";
+import { succeed, fail } from "../../contract/result";
+import {
+  buildRoot,
+  buildSheet,
+  buildPara,
+  buildSpan,
+  buildImg,
+  buildGrid,
+  buildRow,
+  buildCell,
+  buildPb,
+} from "../../model/builders";
+import { ShieldedParser } from "../../safety/ShieldedParser";
+import {
+  Metric,
+  safeAlign,
+  safeFont,
+  safeHex,
+  safeStrokeDocx,
+} from "../../safety/StyleBridge";
+import { BaseDecoder } from "../../core/BaseDecoder";
+import { ArchiveKit } from "../../toolkit/ArchiveKit";
+import { XmlKit } from "../../toolkit/XmlKit";
+import { TextKit } from "../../toolkit/TextKit";
+import { registry } from "../../pipeline/registry";
+
+export class DocxDecoder extends BaseDecoder {
+  protected getFormat(): string {
+    return "docx";
+  }
+
+  async decode(data: Uint8Array): Promise<Outcome<DocRoot>> {
+    const shield = new ShieldedParser();
+    const warns: string[] = [];
+
+    try {
+      const files = await ArchiveKit.unzip(data);
+
+      const getFile = (path: string) => {
+        const lower = path.toLowerCase();
+        for (const [name, data] of files.entries()) {
+          if (name.toLowerCase() === lower) return data;
+        }
+        return undefined;
+      };
+
+      const docXml = getFile("word/document.xml");
+      if (!docXml) return fail("DOCX: word/document.xml not found");
+
+      const relsXml = getFile("word/_rels/document.xml.rels");
+      const relsMap = relsXml
+        ? await parseRels(TextKit.decode(relsXml))
+        : new Map<string, string>();
+
+      const coreXml = getFile("docProps/core.xml");
+      let meta: DocMeta = {};
+      if (coreXml) {
+        try {
+          meta = await parseCoreProps(TextKit.decode(coreXml));
+        } catch {
+          // ignore — meta is optional
+        }
+      }
+
+      // Parse numbering.xml for list support
+      const numXml = getFile("word/numbering.xml");
+      let numMap: NumMap = new Map();
+      if (numXml) {
+        try {
+          numMap = await parseNumbering(TextKit.decode(numXml));
+        } catch {
+          /* non-fatal */
+        }
+      }
+
+      // Parse styles.xml for table and paragraph/character style defaults
+      let stylesMap: StylesMap = new Map();
+      let paraStyleMap: ParaStyleMap = new Map();
+      const stylesXml = getFile("word/styles.xml");
+      if (stylesXml) {
+        try {
+          const stylesStr = TextKit.decode(stylesXml);
+          stylesMap = await parseStylesMap(stylesStr);
+          paraStyleMap = await parseParaStyleMap(stylesStr);
+        } catch {
+          /* non-fatal */
+        }
+      }
+
+      let docStr = TextKit.decode(docXml).trim();
+      if (!docStr) {
+        warns.push(
+          "DOCX: word/document.xml is empty, using fallback empty document",
+        );
+        docStr =
+          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>';
+      }
+      const docObj: any = await XmlKit.parseStrict(docStr);
+
+      const body = getBody(docObj);
+      const dims = extractDims(body) ?? { ...A4 };
+      const elements = getBodyElements(body);
+      console.log(
+        `[DocxDecoder] 파싱된 전체 본문 요소 개수: ${elements.length}`,
+      );
+
+      const decCtx: DecCtx = {
+        relsMap,
+        files,
+        shield,
+        numMap,
+        warns,
+        stylesMap,
+        paraStyleMap,
+      };
+
+      const kids: ContentNode[] = [];
+      for (const el of elements) {
+        const nodes = shield.guard(
+          () => decodeElement(el, decCtx),
+          [buildPara([buildSpan("[요소 파싱 실패]")])],
+          "docx:bodyElement",
+        );
+        if (Array.isArray(nodes)) {
+          kids.push(...nodes);
+        } else {
+          kids.push(nodes);
+        }
+
+        // Inline sectPr in pPr = section break → insert page-break paragraph after
+        if (el.type === "para") {
+          const pPr = el.node?.["w:pPr"]?.[0] ?? el.node?.pPr?.[0] ?? {};
+          const inlineSectPr = pPr?.["w:sectPr"]?.[0] ?? pPr?.sectPr?.[0];
+          if (inlineSectPr) {
+            const typeAttr = inlineSectPr?.["w:type"]?.[0]?._attr;
+            const sectType = typeAttr?.["w:val"] ?? typeAttr?.val ?? "nextPage";
+            if (sectType !== "continuous") {
+              kids.push(
+                buildPara([{ tag: "span", props: {}, kids: [buildPb()] }]),
+              );
+            }
+          }
+        }
+      }
+
+      // Decode header/footer
+      const headersMap = await decodeHeaderFooter(
+        "header",
+        body,
+        relsMap,
+        files,
+        decCtx,
+      );
+      const footersMap = await decodeHeaderFooter(
+        "footer",
+        body,
+        relsMap,
+        files,
+        decCtx,
+      );
+
+      warns.push(...shield.flush());
+      const sheet = buildSheet(kids.filter(Boolean) as ContentNode[], dims, {
+        headers: headersMap,
+        footers: footersMap,
+      });
+      return succeed(buildRoot(meta, [sheet]), warns);
+    } catch (e: any) {
+      warns.push(...shield.flush());
+      return fail(`DOCX decode error: ${e?.message ?? String(e)}`, warns);
+    }
+  }
+}
+
+// ─── types ─────────────────────────────────────────────────
+
+interface TblBorderDef {
+  top?: Stroke;
+  bottom?: Stroke;
+  left?: Stroke;
+  right?: Stroke;
+  insideH?: Stroke;
+  insideV?: Stroke;
+}
+
+/** Parsed tblStyle defaults from styles.xml */
+interface TblStyleDef {
+  tblBorders?: TblBorderDef;
+  cellBg?: string; // default cell background
+}
+
+/** Parsed paragraph/character style defaults */
+interface ParaStyleDef {
+  rPr?: {
+    b?: boolean;
+    i?: boolean;
+    u?: boolean;
+    s?: boolean;
+    pt?: number;
+    color?: string;
+    font?: string;
+  };
+  pPr?: {
+    align?: string;
+    spaceBefore?: number;
+    spaceAfter?: number;
+    lineHeight?: number;
+    indentPt?: number;
+    indentRightPt?: number;
+    firstLineIndentPt?: number;
+  };
+  basedOn?: string; // parent style id
+}
+
+type StylesMap = Map<string, TblStyleDef>; // styleId → table style defaults
+type ParaStyleMap = Map<string, ParaStyleDef>; // styleId → para/char style defaults
+
+interface DecCtx {
+  relsMap: Map<string, string>;
+  files: Map<string, Uint8Array>;
+  shield: ShieldedParser;
+  numMap: NumMap;
+  warns: string[];
+  stylesMap: StylesMap;
+  paraStyleMap: ParaStyleMap;
+}
+
+// numId → { abstractNumId, levels: Map<ilvl, { fmt, isOrdered }> }
+type NumMap = Map<
+  number,
+  { levels: Map<number, { fmt: string; isOrdered: boolean }> }
+>;
+
+// ─── helpers ────────────────────────────────────────────────
+
+function toArr(v: any): any[] {
+  return v == null ? [] : Array.isArray(v) ? v : [v];
+}
+
+/** Resolve DOCX relative paths. e.g. ("word", "../media/image1.png") → "word/media/image1.png" */
+function resolveDocxPath(baseDir: string, target: string): string {
+  if (target.startsWith("/")) return target.slice(1);
+  const parts = (baseDir + "/" + target).split("/");
+  const stack: string[] = [];
+  for (const p of parts) {
+    if (p === "..") {
+      stack.pop();
+    } else if (p !== ".") {
+      stack.push(p);
+    }
+  }
+  return stack.join("/");
+}
+
+async function parseRels(xml: string): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  const trimmed = xml.trim();
+  if (!trimmed) return map;
+  try {
+    const obj: any = await XmlKit.parseStrict(trimmed);
+    for (const rel of toArr(obj?.Relationships?.[0]?.Relationship)) {
+      const a = rel?._attr ?? {};
+      if (a.Id && a.Target) map.set(a.Id, a.Target);
+    }
+  } catch {
+    /* ignore */
+  }
+  return map;
+}
+
+async function parseCoreProps(xml: string): Promise<DocMeta> {
+  const trimmed = xml.trim();
+  if (!trimmed) return {};
+  try {
+    const obj: any = await XmlKit.parseStrict(trimmed);
+    const c = obj?.["cp:coreProperties"]?.[0] ?? obj?.coreProperties?.[0] ?? {};
+    return {
+      title: c?.["dc:title"]?.[0]?._text ?? undefined,
+      author: c?.["dc:creator"]?.[0]?._text ?? undefined,
+      subject: c?.["dc:subject"]?.[0]?._text ?? undefined,
+      created: c?.["dcterms:created"]?.[0]?._text ?? undefined,
+      modified: c?.["dcterms:modified"]?.[0]?._text ?? undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+async function parseNumbering(xml: string): Promise<NumMap> {
+  const map: NumMap = new Map();
+  const trimmed = xml.trim();
+  if (!trimmed) return map;
+  try {
+    const obj: any = await XmlKit.parseStrict(trimmed);
+    const root = obj?.["w:numbering"]?.[0] ?? obj?.numbering?.[0] ?? obj;
+
+    // Parse abstractNums
+    const absMap = new Map<
+      number,
+      Map<number, { fmt: string; isOrdered: boolean }>
+    >();
+    for (const abs of toArr(root?.["w:abstractNum"] ?? root?.abstractNum)) {
+      const absId = Number(
+        abs?._attr?.["w:abstractNumId"] ?? abs?._attr?.abstractNumId ?? 0,
+      );
+      const levels = new Map<number, { fmt: string; isOrdered: boolean }>();
+      for (const lvl of toArr(abs?.["w:lvl"] ?? abs?.lvl)) {
+        const ilvl = Number(lvl?._attr?.["w:ilvl"] ?? lvl?._attr?.ilvl ?? 0);
+        const fmtNode =
+          lvl?.["w:numFmt"]?.[0]?._attr ?? lvl?.numFmt?.[0]?._attr ?? {};
+        const fmt = fmtNode?.["w:val"] ?? fmtNode?.val ?? "decimal";
+        levels.set(ilvl, { fmt, isOrdered: fmt !== "bullet" });
+      }
+      absMap.set(absId, levels);
+    }
+
+    // Parse nums
+    for (const num of toArr(root?.["w:num"] ?? root?.num)) {
+      const numId = Number(num?._attr?.["w:numId"] ?? num?._attr?.numId ?? 0);
+      const absRef =
+        num?.["w:abstractNumId"]?.[0]?._attr ??
+        num?.abstractNumId?.[0]?._attr ??
+        {};
+      const absId = Number(absRef?.["w:val"] ?? absRef?.val ?? 0);
+      const levels = absMap.get(absId) ?? new Map();
+      map.set(numId, { levels });
+    }
+  } catch {
+    /* non-fatal */
+  }
+  return map;
+}
+
+function getBody(obj: any): any {
+  // XML 파서에 따라 w:document 또는 document 형태일 수 있음
+  const doc = obj?.["w:document"]?.[0] ?? obj?.document?.[0] ?? obj;
+  const body = doc?.["w:body"]?.[0] ?? doc?.body?.[0] ?? doc;
+
+  if (!body) {
+    console.error("[DocxDecoder] 본문(body)을 찾을 수 없습니다.");
+  }
+  return body;
+}
+
+function extractDims(body: any): PageDims | null {
+  try {
+    const sp = body?.["w:sectPr"]?.[0] ?? body?.sectPr?.[0];
+    if (!sp) return null;
+    const sz = sp?.["w:pgSz"]?.[0]?._attr ?? sp?.pgSz?.[0]?._attr;
+    const mar = sp?.["w:pgMar"]?.[0]?._attr ?? sp?.pgMar?.[0]?._attr;
+    if (!sz) return null;
+    const headerDxa = Number(mar?.["w:header"] ?? mar?.header ?? 0);
+    const footerDxa = Number(mar?.["w:footer"] ?? mar?.footer ?? 0);
+    return {
+      wPt: Metric.dxaToPt(Number(sz["w:w"] ?? sz.w ?? 11906)),
+      hPt: Metric.dxaToPt(Number(sz["w:h"] ?? sz.h ?? 16838)),
+      mt: Metric.dxaToPt(Number(mar?.["w:top"] ?? mar?.top ?? 1440)),
+      mb: Metric.dxaToPt(Number(mar?.["w:bottom"] ?? mar?.bottom ?? 1440)),
+      ml: Metric.dxaToPt(Number(mar?.["w:left"] ?? mar?.left ?? 1800)),
+      mr: Metric.dxaToPt(Number(mar?.["w:right"] ?? mar?.right ?? 1800)),
+      orient:
+        (sz["w:orient"] ?? sz.orient) === "landscape"
+          ? "landscape"
+          : "portrait",
+      headerPt: headerDxa > 0 ? Metric.dxaToPt(headerDxa) : undefined,
+      footerPt: footerDxa > 0 ? Metric.dxaToPt(footerDxa) : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getBodyElements(body: any): { type: string; node: any }[] {
+  const paras = toArr(body?.["w:p"] ?? body?.p);
+  const tables = toArr(body?.["w:tbl"] ?? body?.tbl);
+  const sdts = toArr(body?.["w:sdt"] ?? body?.sdt);
+
+  const childOrder = body?.["_childOrder"] as string[] | undefined;
+  if (Array.isArray(childOrder)) {
+    const items: { type: string; node: any }[] = [];
+    let pi = 0,
+      ti = 0,
+      si = 0;
+    for (const tag of childOrder) {
+      if ((tag === "w:p" || tag === "p") && pi < paras.length) {
+        items.push({ type: "para", node: paras[pi++] });
+      } else if ((tag === "w:tbl" || tag === "tbl") && ti < tables.length) {
+        items.push({ type: "table", node: tables[ti++] });
+      } else if ((tag === "w:sdt" || tag === "sdt") && si < sdts.length) {
+        items.push({ type: "sdt", node: sdts[si++] });
+      }
+    }
+    // Append any remainders
+    while (pi < paras.length) items.push({ type: "para", node: paras[pi++] });
+    while (ti < tables.length)
+      items.push({ type: "table", node: tables[ti++] });
+    while (si < sdts.length) items.push({ type: "sdt", node: sdts[si++] });
+    return items;
+  }
+
+  // Fallback: paragraphs, then tables, then sdts
+  return [
+    ...paras.map((n: any) => ({ type: "para", node: n })),
+    ...tables.map((n: any) => ({ type: "table", node: n })),
+    ...sdts.map((n: any) => ({ type: "sdt", node: n })),
+  ];
+}
+
+// ─── Header/Footer decoding ────────────────────────────────
+
+async function decodeHeaderFooter(
+  kind: "header" | "footer",
+  body: any,
+  relsMap: Map<string, string>, // document.xml.rels (기존)
+  files: Map<string, Uint8Array>,
+  ctx: DecCtx,
+): Promise<Record<string, ParaNode[]> | undefined> {
+  try {
+    const sp = body?.["w:sectPr"]?.[0] ?? body?.sectPr?.[0];
+    if (!sp) return undefined;
+
+    const refTag =
+      kind === "header" ? "w:headerReference" : "w:footerReference";
+    const refs = toArr(sp?.[refTag] ?? sp?.[refTag.replace("w:", "")]);
+    if (refs.length === 0) return undefined;
+
+    const result: Record<string, ParaNode[]> = {};
+
+    for (const ref of refs) {
+      const type = ref._attr?.["w:type"] ?? ref._attr?.type ?? "default";
+      const rId = ref._attr?.["r:id"] ?? ref._attr?.["r:Id"] ?? ref._attr?.id;
+      if (!rId) continue;
+
+      const target = relsMap.get(rId);
+      if (!target) continue;
+
+      const filePath = resolveDocxPath("word", target);
+      const fileData = files.get(filePath);
+      if (!fileData) continue;
+
+      // ★ 핵심 수정: 헤더/풋터 전용 rels 파일 로드
+      const hfFileName = filePath.split("/").pop() ?? "";
+      const hfRelsPath = `word/_rels/${hfFileName}.rels`;
+      const hfRelsData = files.get(hfRelsPath);
+      // 헤더/풋터 rels를 document rels와 병합
+      let hfRelsMap = relsMap;
+      if (hfRelsData) {
+        const hfRelsStr = TextKit.decode(hfRelsData).trim();
+        const parsed = hfRelsStr
+          ? await parseRels(hfRelsStr)
+          : new Map<string, string>();
+        // 병합 (헤더/풋터 rels 우선)
+        hfRelsMap = new Map([...relsMap, ...parsed]);
+      }
+
+      const xmlStr = TextKit.decode(fileData).trim();
+      if (!xmlStr) continue;
+
+      const watermark = extractWatermark(xmlStr);
+      if (watermark) {
+        result[type] = [
+          buildPara([
+            buildSpan(watermark, { pt: 80, color: "CCCCCC", b: true }),
+          ]),
+        ];
+        continue;
+      }
+
+      try {
+        const obj: any = await XmlKit.parseStrict(xmlStr);
+        const rootTag = kind === "header" ? "w:hdr" : "w:ftr";
+        const root =
+          obj?.[rootTag]?.[0] ?? obj?.[rootTag.replace("w:", "")]?.[0] ?? obj;
+
+        // ctx에 hfRelsMap 임시 적용
+        const origRelsMap = ctx.relsMap;
+        (ctx as any).relsMap = hfRelsMap;
+        const paras = toArr(root?.["w:p"] ?? root?.p);
+        result[type] = paras.map((p: any) => decodePara(p, ctx));
+        (ctx as any).relsMap = origRelsMap;
+      } catch (err) {
+        console.warn(`[DocxDecoder] ${kind} (${type}) XML 파싱 실패:`, err);
+        continue;
+      }
+    }
+
+    return Object.keys(result).length > 0 ? result : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 워터마크 텍스트 추출 (VML v:textpath 기반) */
+function extractWatermark(xml: string): string | null {
+  if (!xml.includes("v:textpath")) return null;
+  const m = xml.match(/string="([^"]+)"/);
+  return m ? m[1] : null;
+}
+
+// ─── Element decoding ──────────────────────────────────────
+
+//만약에 drawing 태그가 안에 있으면 true 반환
+function hasDrawingDeep(node: any): boolean {
+  if (!node || typeof node !== "object") return false;
+
+  if (node["w:drawing"] || node["w:pict"]) return true;
+
+  return Object.values(node).some((v) => {
+    if (Array.isArray(v)) return v.some(hasDrawingDeep);
+    return hasDrawingDeep(v);
+  });
+}
+
+function decodeElement(
+  el: { type: string; node: any },
+  ctx: DecCtx,
+): ContentNode | ContentNode[] {
+  if (el.type === "table") {
+    const { value } = ctx.shield.guardGrid(
+      el.node,
+      (n) => decodeGrid(n as any, ctx),
+      (n) => decodeGridSimple(n as any),
+      (n) => decodeGridFlat(n as any),
+      (n) => decodeGridText(n as any) as unknown as GridNode,
+      "docx:table",
+    );
+    return value;
+  } else if (el.type === "sdt") {
+    return decodeSdt(el.node, ctx);
+  }
+  return decodePara(el.node, ctx);
+}
+
+function decodeSdt(sdt: any, ctx: DecCtx): ContentNode[] {
+  const content = sdt?.["w:sdtContent"]?.[0] ?? sdt?.sdtContent?.[0];
+  if (!content) return [];
+  const elements = getBodyElements(content);
+  const kids: ContentNode[] = [];
+  for (const el of elements) {
+    const res = decodeElement(el, ctx);
+    if (Array.isArray(res)) kids.push(...res);
+    else kids.push(res);
+  }
+  return kids;
+}
+
+function decodePara(p: any, ctx: DecCtx): ParaNode {
+  const pPr = p?.["w:pPr"]?.[0] ?? {};
+  const alignVal =
+    pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ?? pPr?.["w:jc"]?.[0]?._attr?.val;
+  const headStyle =
+    pPr?.["w:pStyle"]?.[0]?._attr?.["w:val"] ??
+    pPr?.["w:pStyle"]?.[0]?._attr?.val ??
+    "";
+
+  // Resolve paragraph style inheritance chain
+  const styleInherited = resolveParaStyle(
+    headStyle || undefined,
+    ctx.paraStyleMap,
+  );
+
+  const props: ParaProps = {
+    align: safeAlign(alignVal),
+    heading: parseHeading(headStyle),
+    styleId: headStyle || undefined,
+  };
+
+  // Spacing (before/after/line height) — inline pPr wins over style
+  const spacingAttr =
+    pPr?.["w:spacing"]?.[0]?._attr ?? pPr?.spacing?.[0]?._attr ?? {};
+  const beforeVal = Number(
+    spacingAttr?.["w:before"] ?? spacingAttr?.before ?? 0,
+  );
+  const afterVal = Number(spacingAttr?.["w:after"] ?? spacingAttr?.after ?? 0);
+  const lineVal = Number(spacingAttr?.["w:line"] ?? spacingAttr?.line ?? 0);
+  const lineRule =
+    spacingAttr?.["w:lineRule"] ?? spacingAttr?.lineRule ?? "auto";
+  if (beforeVal > 0) props.spaceBefore = Metric.dxaToPt(beforeVal);
+  else if (styleInherited.pPr?.spaceBefore)
+    props.spaceBefore = styleInherited.pPr.spaceBefore;
+  if (afterVal > 0) props.spaceAfter = Metric.dxaToPt(afterVal);
+  else if (styleInherited.pPr?.spaceAfter)
+    props.spaceAfter = styleInherited.pPr.spaceAfter;
+  if (lineVal > 0 && lineRule === "auto") props.lineHeight = lineVal / 240;
+  else if (styleInherited.pPr?.lineHeight)
+    props.lineHeight = styleInherited.pPr.lineHeight;
+
+  // Indentation
+  const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
+  const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
+  const rightVal = Number(indAttr?.["w:right"] ?? indAttr?.right ?? 0);
+  const firstLineVal = Number(
+    indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0,
+  );
+  const hangingVal = Number(indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0);
+  if (leftVal > 0) props.indentPt = Metric.dxaToPt(leftVal);
+  else if (styleInherited.pPr?.indentPt)
+    props.indentPt = styleInherited.pPr.indentPt;
+  if (rightVal > 0) props.indentRightPt = Metric.dxaToPt(rightVal);
+  else if (styleInherited.pPr?.indentRightPt)
+    props.indentRightPt = styleInherited.pPr.indentRightPt;
+  if (firstLineVal > 0) props.firstLineIndentPt = Metric.dxaToPt(firstLineVal);
+  else if (hangingVal > 0)
+    props.firstLineIndentPt = -Metric.dxaToPt(hangingVal);
+  else if (styleInherited.pPr?.firstLineIndentPt)
+    props.firstLineIndentPt = styleInherited.pPr.firstLineIndentPt;
+
+  // Alignment from style if not set inline
+  if (!alignVal && styleInherited.pPr?.align)
+    props.align = safeAlign(styleInherited.pPr.align);
+
+  // List/numbering
+  const numPr = pPr?.["w:numPr"]?.[0] ?? pPr?.numPr?.[0];
+  if (numPr) {
+    const ilvlNode =
+      numPr?.["w:ilvl"]?.[0]?._attr ?? numPr?.ilvl?.[0]?._attr ?? {};
+    const numIdNode =
+      numPr?.["w:numId"]?.[0]?._attr ?? numPr?.numId?.[0]?._attr ?? {};
+    const ilvl = Number(ilvlNode?.["w:val"] ?? ilvlNode?.val ?? 0);
+    const numId = Number(numIdNode?.["w:val"] ?? numIdNode?.val ?? 0);
+
+    props.listLv = ilvl;
+    const numEntry = ctx.numMap.get(numId);
+    if (numEntry) {
+      const lvlInfo = numEntry.levels.get(ilvl) ?? numEntry.levels.get(0);
+      props.listOrd = lvlInfo?.isOrdered ?? false;
+    } else {
+      // Fallback: numId=1 is typically bullet, numId=2 is numbered
+      props.listOrd = numId >= 2;
+    }
+  }
+
+  // pageBreakBefore: paragraph always starts on a new page
+  const pbBeforeNode =
+    pPr?.["w:pageBreakBefore"]?.[0] ?? pPr?.pageBreakBefore?.[0];
+  const hasPageBreakBefore =
+    pbBeforeNode != null &&
+    (pbBeforeNode?._attr?.["w:val"] ?? pbBeforeNode?._attr?.val ?? "1") !== "0";
+
+  // Resolve all children (runs AND hyperlinks) in document order
+  const children = p?.["_childOrder"] as string[] | undefined;
+  const kids: (SpanNode | ImgNode | LinkNode)[] = [];
+
+  if (Array.isArray(children)) {
+    const runsArr = toArr(p?.["w:r"] ?? p?.r);
+    const hlArr = toArr(p?.["w:hyperlink"] ?? p?.hyperlink);
+    const sdtArr = toArr(p?.["w:sdt"] ?? p?.sdt);
+    let ri = 0;
+    let hi = 0;
+    let si = 0;
+
+    for (const tag of children) {
+      if (tag === "w:r" || tag === "r") {
+        const run = runsArr[ri++];
+        if (run) {
+          kids.push(
+            ctx.shield.guard(
+              () =>
+                hasDrawingDeep(run)
+                  ? decodeRunOrImage(run, ctx)
+                  : decodeRun(run, ctx, styleInherited.rPr),
+              buildSpan(""),
+              "docx:run",
+            ),
+          );
+        }
+      } else if (tag === "w:hyperlink" || tag === "hyperlink") {
+        const hl = hlArr[hi++];
+        if (hl) {
+          const rId = hl?._attr?.["r:id"] ?? hl?._attr?.id;
+          const url = rId ? ctx.relsMap.get(rId) : "";
+          const hlRuns = toArr(hl?.["w:r"] ?? hl?.r);
+          const hlKids = hlRuns.map((r: any) =>
+            decodeRun(r, ctx, {
+              ...styleInherited.rPr,
+              u: true,
+              color: "0000FF",
+            }),
+          );
+          kids.push({
+            tag: "link",
+            href: url || "",
+            kids: hlKids,
+          });
+        }
+      } else if (tag === "w:sdt" || tag === "sdt") {
+        const sdt = sdtArr[si++];
+        if (sdt) {
+          const sdtContent = sdt?.["w:sdtContent"]?.[0] ?? sdt?.sdtContent?.[0];
+          if (sdtContent) {
+            const innerRuns = toArr(sdtContent?.["w:r"] ?? sdtContent?.r);
+            for (const ir of innerRuns) {
+              kids.push(
+                ctx.shield.guard(
+                  () =>
+                    hasDrawingDeep(ir)
+                      ? decodeRunOrImage(ir, ctx)
+                      : decodeRun(ir, ctx, styleInherited.rPr),
+                  buildSpan(""),
+                  "docx:run",
+                ),
+              );
+            }
+          }
+        }
+      }
+    }
+  } else {
+    // Fallback if _childOrder is missing
+    const runs = toArr(p?.["w:r"] ?? p?.r);
+    const legacyKids: (SpanNode | ImgNode)[] = ctx.shield.guardAll(
+      runs,
+      (run: any) =>
+        hasDrawingDeep(run)
+          ? decodeRunOrImage(run, ctx)
+          : decodeRun(run, ctx, styleInherited.rPr),
+      () => buildSpan(""),
+      "docx:run",
+    );
+    kids.push(...legacyKids);
+  }
+
+  const filteredKids = kids.filter(Boolean) as ParaNode["kids"];
+
+  // Prepend pb span when pageBreakBefore is set
+  if (hasPageBreakBefore) {
+    filteredKids.unshift({ tag: "span", props: {}, kids: [buildPb()] });
+  }
+
+  return buildPara(filteredKids, props);
+}
+
+// 3/28 코드 수정
+function decodeRunOrImage(run: any, ctx: DecCtx): SpanNode | ImgNode {
+  function findFirstDrawing(node: any): any | null {
+    if (!node || typeof node !== "object") return null;
+
+    if (node["w:drawing"]) return node["w:drawing"][0];
+    if (node["w:pict"]) return node["w:pict"][0];
+
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) {
+        for (const v of value) {
+          const found = findFirstDrawing(v);
+          if (found) return found;
+        }
+      } else {
+        const found = findFirstDrawing(value);
+        if (found) return found;
+      }
+    }
+
+    return null;
+  }
+
+  const drawing = findFirstDrawing(run);
+
+  if (drawing) {
+    const img = decodeDrawing(drawing, ctx);
+    if (img) return img;
+  }
+
+  return decodeRun(run, ctx);
+}
+/** Decode image layout from anchor element */
+function decodeImageLayout(anchor: any): ImgLayout {
+  const wrap = anchor?.["wp:wrapTop"]?.[0] ?? anchor?.wrapTop?.[0];
+  const anchorPos =
+    anchor?.["wp:anchorPos"]?.[0]?._attr ?? anchor?.anchorPos?.[0]?._attr ?? {};
+
+  const layout: ImgLayout = {
+    wrap: "square",
+    horzAlign: "left",
+    vertAlign: "top",
+    horzRelTo: "page",
+    vertRelTo: "page",
+    xPt: Number(anchorPos?.x ?? 0) / 12700, // emu to pt
+    yPt: Number(anchorPos?.y ?? 0) / 12700, // emu to pt
+  };
+
+  // Parse wrap type
+  if (wrap?.["wp:none"]) layout.wrap = "none";
+  else if (wrap?.["wp:square"]) layout.wrap = "square";
+  else if (wrap?.["wp:tight"]) layout.wrap = "tight";
+  else if (wrap?.["wp:through"]) layout.wrap = "through";
+  else if (wrap?.["wp:behind"]) layout.wrap = "behind";
+  else if (wrap?.["wp:inFront"]) layout.wrap = "front";
+
+  return layout;
+}
+
+function decodeDrawing(drawing: any, ctx: DecCtx): ImgNode | null {
+  try {
+    const inline = drawing?.["wp:inline"]?.[0] ?? drawing?.inline?.[0];
+    const anchor = drawing?.["wp:anchor"]?.[0] ?? drawing?.anchor?.[0];
+    const container = inline ?? anchor;
+    if (!container) return null;
+
+    // Get dimensions
+    const extent =
+      container?.["wp:extent"]?.[0]?._attr ??
+      container?.extent?.[0]?._attr ??
+      {};
+    const cx = Number(extent?.cx ?? 0);
+    const cy = Number(extent?.cy ?? 0);
+    const wPt = Metric.emuToPt(cx);
+    const hPt = Metric.emuToPt(cy);
+
+    // Get alt text
+    const docPr =
+      container?.["wp:docPr"]?.[0]?._attr ?? container?.docPr?.[0]?._attr ?? {};
+    const alt = docPr?.descr ?? docPr?.name ?? "";
+
+    // Navigate to blip
+    const graphic = container?.["a:graphic"]?.[0] ?? container?.graphic?.[0];
+    const graphicData =
+      graphic?.["a:graphicData"]?.[0] ?? graphic?.graphicData?.[0];
+
+    // 1. 차트 감지
+    if (graphicData?.["c:chart"] || graphicData?.chart) {
+      return {
+        tag: "img",
+        b64: "", // 플레이스홀더
+        mime: "image/png",
+        w: wPt,
+        h: hPt,
+        alt: `[차트: ${alt || "차트"}]`,
+        layout: decodeImageLayout(anchor),
+      };
+    }
+
+    const pic = graphicData?.["pic:pic"]?.[0] ?? graphicData?.pic?.[0];
+    const blipFill = pic?.["pic:blipFill"]?.[0] ?? pic?.blipFill?.[0];
+    const blip =
+      blipFill?.["a:blip"]?.[0]?._attr ?? blipFill?.blip?.[0]?._attr ?? {};
+    const rId = blip?.["r:embed"] ?? blip?.embed;
+
+    if (!rId) return null;
+
+    const target = ctx.relsMap.get(rId);
+    if (!target) return null;
+
+    let filePath = resolveDocxPath("word", target);
+    let fileData = ctx.files.get(filePath);
+
+    if (!fileData) {
+      filePath = resolveDocxPath("word/_rels", target);
+      fileData = ctx.files.get(filePath);
+    }
+
+    if (!fileData) {
+      const fileName = target.split("/").pop() ?? "";
+      for (const [k, v] of ctx.files) {
+        if (fileName && (k.endsWith("/" + fileName) || k === fileName)) {
+          fileData = v;
+          filePath = k;
+          break;
+        }
+      }
+    }
+
+    if (!fileData) {
+      console.warn(`[DocxDecoder] image not found: "${target}"`);
+      return null;
+    }
+
+    const ext = target.split(".").pop()?.toLowerCase() ?? "png";
+    const mimeMap: Record<string, ImgNode["mime"]> = {
+      png: "image/png",
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      gif: "image/gif",
+      bmp: "image/bmp",
+    };
+    const mime = mimeMap[ext] ?? "image/png";
+    console.log(
+      `[DocxDecoder] image loaded: ${filePath} (${mime}, ${fileData.length} bytes)`,
+    );
+
+    // ── layout 추출 ──────────────────────────────────────────
+    const layout: ImgLayout = inline
+      ? { wrap: "inline" }
+      : extractAnchorLayout(anchor);
+
+    return buildImg(
+      TextKit.base64Encode(fileData),
+      mime,
+      wPt,
+      hPt,
+      alt || undefined,
+      layout,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** w:highlight val → hex 색상 매핑 (OOXML 명세) */
+const HIGHLIGHT_COLOR_MAP: Record<string, string> = {
+  yellow: "FFFF00",
+  green: "00FF00",
+  cyan: "00FFFF",
+  magenta: "FF00FF",
+  blue: "0000FF",
+  red: "FF0000",
+  darkBlue: "00008B",
+  darkCyan: "008B8B",
+  darkGreen: "006400",
+  darkMagenta: "8B008B",
+  darkRed: "8B0000",
+  darkYellow: "808000",
+  darkGray: "A9A9A9",
+  lightGray: "D3D3D3",
+  black: "000000",
+  white: "FFFFFF",
+};
+
+function decodeRun(
+  run: any,
+  ctx: DecCtx,
+  styleRpr?: ParaStyleDef["rPr"],
+): SpanNode {
+  const rPr = run?.["w:rPr"]?.[0] ?? run?.rPr?.[0] ?? {};
+
+  // w:vanish — 숨긴 텍스트: run 전체 건너뜀 (빈 span 반환)
+  const vanishNode = rPr?.["w:vanish"]?.[0] ?? rPr?.vanish?.[0];
+  if (vanishNode != null) {
+    const vanishVal =
+      vanishNode?._attr?.["w:val"] ?? vanishNode?._attr?.val ?? "1";
+    if (vanishVal !== "0") return buildSpan("");
+  }
+
+  // w:sz → 없으면 w:szCs 로 fallback (한글 글꼴 크기)
+  const szAttr = rPr?.["w:sz"]?.[0]?._attr ?? rPr?.sz?.[0]?._attr ?? {};
+  const szVal = szAttr?.["w:val"] ?? szAttr?.val;
+  const szCsAttr = rPr?.["w:szCs"]?.[0]?._attr ?? rPr?.szCs?.[0]?._attr ?? {};
+  const szCsVal = szCsAttr?.["w:val"] ?? szCsAttr?.val;
+  const effectiveSzVal = szVal ?? szCsVal;
+
+  const colorAttr =
+    rPr?.["w:color"]?.[0]?._attr ?? rPr?.color?.[0]?._attr ?? {};
+  const colorVal = colorAttr?.["w:val"] ?? colorAttr?.val;
+
+  const fontAttr =
+    rPr?.["w:rFonts"]?.[0]?._attr ?? rPr?.rFonts?.[0]?._attr ?? {};
+  const fontName =
+    fontAttr?.["w:ascii"] ??
+    fontAttr?.ascii ??
+    fontAttr?.["w:hAnsi"] ??
+    fontAttr?.hAnsi ??
+    fontAttr?.["w:eastAsia"] ??
+    fontAttr?.eastAsia;
+
+  const underVal =
+    rPr?.["w:u"]?.[0]?._attr?.["w:val"] ?? rPr?.["w:u"]?.[0]?._attr?.val;
+
+  // w:shd — 배경색 (낮은 우선순위)
+  const shdAttr = rPr?.["w:shd"]?.[0]?._attr ?? rPr?.shd?.[0]?._attr ?? {};
+  const shdBg = safeHex(shdAttr?.["w:fill"] ?? shdAttr?.fill);
+
+  // w:highlight — 형광펜 색상 (w:shd보다 우선)
+  const hlAttr =
+    rPr?.["w:highlight"]?.[0]?._attr ?? rPr?.highlight?.[0]?._attr ?? {};
+  const hlVal = hlAttr?.["w:val"] ?? hlAttr?.val;
+  const bgVal = (hlVal ? HIGHLIGHT_COLOR_MAP[hlVal] : undefined) ?? shdBg;
+
+  // w:vertAlign — superscript / subscript
+  const vertAlignVal =
+    rPr?.["w:vertAlign"]?.[0]?._attr?.["w:val"] ??
+    rPr?.["w:vertAlign"]?.[0]?._attr?.val;
+
+  // w:position — 글자 상하 이동 (half-point, 양수=위, 음수=아래)
+  // vertAlign이 없을 때 보조 판단: ±4 half-pt(≈2pt) 이상이면 sup/sub
+  const posAttr =
+    rPr?.["w:position"]?.[0]?._attr ?? rPr?.position?.[0]?._attr ?? {};
+  const posVal = Number(posAttr?.["w:val"] ?? posAttr?.val ?? 0);
+  let isSup = vertAlignVal === "superscript";
+  let isSub = vertAlignVal === "subscript";
+  if (!isSup && !isSub && posVal !== 0) {
+    if (posVal >= 4) isSup = true;
+    else if (posVal <= -4) isSub = true;
+  }
+
+  // Check bold/italic/strike — val="0" means explicitly OFF
+  const bNode = rPr?.["w:b"]?.[0] ?? rPr?.b?.[0];
+  const isBold =
+    bNode != null &&
+    (bNode?._attr?.["w:val"] ?? bNode?._attr?.val ?? "1") !== "0";
+  const iNode = rPr?.["w:i"]?.[0] ?? rPr?.i?.[0];
+  const isItalic =
+    iNode != null &&
+    (iNode?._attr?.["w:val"] ?? iNode?._attr?.val ?? "1") !== "0";
+  const sNode = rPr?.["w:strike"]?.[0] ?? rPr?.strike?.[0];
+  const isStrike =
+    sNode != null &&
+    (sNode?._attr?.["w:val"] ?? sNode?._attr?.val ?? "1") !== "0";
+
+  // Run-level properties: run wins, then fall back to paragraph style inheritance
+  const props: TextProps = {
+    b: (bNode != null ? isBold : styleRpr?.b) || undefined,
+    i: (iNode != null ? isItalic : styleRpr?.i) || undefined,
+    u: (underVal ? underVal !== "none" : styleRpr?.u) || undefined,
+    s: (sNode != null ? isStrike : styleRpr?.s) || undefined,
+    sup: isSup || undefined,
+    sub: isSub || undefined,
+    pt: effectiveSzVal
+      ? Metric.halfPtToPt(Number(effectiveSzVal))
+      : styleRpr?.pt,
+    color: safeHex(colorVal) ?? styleRpr?.color,
+    font: fontName ? safeFont(fontName) : styleRpr?.font,
+    bg: bgVal,
+  };
+
+  // Check for field codes (PAGE number)
+  const fldChar = run?.["w:fldChar"]?.[0]?._attr ?? run?.fldChar?.[0]?._attr;
+  const instrText = run?.["w:instrText"]?.[0];
+
+  // Page break: <w:br w:type="page"/>
+  const brNodes = toArr(run?.["w:br"] ?? run?.br ?? []);
+  for (const br of brNodes) {
+    const brType = br?._attr?.["w:type"] ?? br?._attr?.type;
+    if (brType === "page") {
+      return { tag: "span", props, kids: [buildPb()] };
+    }
+  }
+
+  const textNodes = toArr(run?.["w:t"] ?? run?.t);
+  const content = textNodes
+    .map((t: any) => (typeof t === "string" ? t : (t?._ ?? t?._text ?? "")))
+    .join("");
+
+  // Handle page number field in instrText
+  if (instrText) {
+    const instrStr =
+      typeof instrText === "string" ? instrText : (instrText?._text ?? "");
+    if (instrStr.trim().toUpperCase() === "PAGE") {
+      const pageNum: PageNumNode = { tag: "pagenum", format: "decimal" };
+      return { tag: "span", props, kids: [pageNum] };
+    }
+  }
+
+  return buildSpan(content, props);
+}
+
+/** Parse all 6 border sides from a w:tblBorders or w:tcBorders node */
+function parseBorderDef(bdrNode: any): TblBorderDef {
+  const sides: [string, keyof TblBorderDef][] = [
+    ["top", "top"],
+    ["bottom", "bottom"],
+    ["left", "left"],
+    ["right", "right"],
+    ["insideH", "insideH"],
+    ["insideV", "insideV"],
+  ];
+  const result: TblBorderDef = {};
+  for (const [xml, prop] of sides) {
+    const bdr = bdrNode?.["w:" + xml]?.[0]?._attr ?? bdrNode?.[xml]?.[0]?._attr;
+    if (!bdr) continue;
+    const val = bdr?.["w:val"] ?? bdr?.val;
+    if (val === "none" || val === "nil") continue; // explicit none → skip (no border)
+    result[prop] = safeStrokeDocx(
+      val,
+      Number(bdr?.["w:sz"] ?? bdr?.sz ?? 4),
+      bdr?.["w:color"] ?? bdr?.color,
+    );
+  }
+  return result;
+}
+
+/** Parse styles.xml and build a map of tblStyle defaults */
+async function parseStylesMap(xml: string): Promise<StylesMap> {
+  const map: StylesMap = new Map();
+  const trimmed = xml.trim();
+  if (!trimmed) return map;
+  try {
+    const obj: any = await XmlKit.parseStrict(trimmed);
+    const stylesRoot = obj?.["w:styles"]?.[0] ?? obj?.styles?.[0] ?? obj;
+    const styleArr = toArr(stylesRoot?.["w:style"] ?? stylesRoot?.style);
+    for (const style of styleArr) {
+      const attr = style?._attr ?? {};
+      const type = attr?.["w:type"] ?? attr?.type;
+      if (type !== "table") continue;
+      const id = attr?.["w:styleId"] ?? attr?.styleId;
+      if (!id) continue;
+      const tblPr = style?.["w:tblPr"]?.[0] ?? style?.tblPr?.[0];
+      const tblBdrNode = tblPr?.["w:tblBorders"]?.[0] ?? tblPr?.tblBorders?.[0];
+      const tblBorders = tblBdrNode ? parseBorderDef(tblBdrNode) : undefined;
+      // tcStyle > tcBdr for default cell borders
+      const tcStyle = style?.["w:tcStyle"]?.[0] ?? style?.tcStyle?.[0];
+      const tcBdrNode = tcStyle?.["w:tcBdr"]?.[0] ?? tcStyle?.tcBdr?.[0];
+      if (tcBdrNode) {
+        const cellDef = parseBorderDef(tcBdrNode);
+        // merge into tblBorders as inner/outer defaults
+        if (!tblBorders) {
+          map.set(id, { tblBorders: cellDef });
+        } else {
+          map.set(id, { tblBorders: { ...cellDef, ...tblBorders } });
+        }
+      } else if (tblBorders) {
+        map.set(id, { tblBorders });
+      }
+    }
+  } catch {
+    /* non-fatal */
+  }
+  return map;
+}
+
+/** Parse styles.xml and build a map of paragraph/character style defaults */
+async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
+  const map: ParaStyleMap = new Map();
+  const trimmed = xml.trim();
+  if (!trimmed) return map;
+  try {
+    const obj: any = await XmlKit.parseStrict(trimmed);
+    const stylesRoot = obj?.["w:styles"]?.[0] ?? obj?.styles?.[0] ?? obj;
+    const styleArr = toArr(stylesRoot?.["w:style"] ?? stylesRoot?.style);
+    for (const style of styleArr) {
+      const attr = style?._attr ?? {};
+      const type = attr?.["w:type"] ?? attr?.type;
+      if (type !== "paragraph" && type !== "character") continue;
+      const id = attr?.["w:styleId"] ?? attr?.styleId;
+      if (!id) continue;
+      const basedOn = (style?.["w:basedOn"]?.[0]?._attr ??
+        style?.basedOn?.[0]?._attr)?.["w:val"];
+
+      const def: ParaStyleDef = { basedOn };
+
+      // rPr from run properties
+      const rPr = style?.["w:rPr"]?.[0] ?? style?.rPr?.[0];
+      if (rPr) {
+        const szAttr = rPr?.["w:sz"]?.[0]?._attr ?? rPr?.sz?.[0]?._attr ?? {};
+        const szVal = szAttr?.["w:val"] ?? szAttr?.val;
+        const colorAttr =
+          rPr?.["w:color"]?.[0]?._attr ?? rPr?.color?.[0]?._attr ?? {};
+        const colorVal = colorAttr?.["w:val"] ?? colorAttr?.val;
+        const fontAttr =
+          rPr?.["w:rFonts"]?.[0]?._attr ?? rPr?.rFonts?.[0]?._attr ?? {};
+        const fontName =
+          fontAttr?.["w:ascii"] ??
+          fontAttr?.ascii ??
+          fontAttr?.["w:eastAsia"] ??
+          fontAttr?.eastAsia;
+        const bNode = rPr?.["w:b"]?.[0] ?? rPr?.b?.[0];
+        const isBold =
+          bNode != null &&
+          (bNode?._attr?.["w:val"] ?? bNode?._attr?.val ?? "1") !== "0";
+        const iNode = rPr?.["w:i"]?.[0] ?? rPr?.i?.[0];
+        const isItalic =
+          iNode != null &&
+          (iNode?._attr?.["w:val"] ?? iNode?._attr?.val ?? "1") !== "0";
+        const underVal =
+          rPr?.["w:u"]?.[0]?._attr?.["w:val"] ?? rPr?.["w:u"]?.[0]?._attr?.val;
+        const sNode = rPr?.["w:strike"]?.[0] ?? rPr?.strike?.[0];
+        const isStrike =
+          sNode != null &&
+          (sNode?._attr?.["w:val"] ?? sNode?._attr?.val ?? "1") !== "0";
+        def.rPr = {
+          b: isBold || undefined,
+          i: isItalic || undefined,
+          u: underVal && underVal !== "none" ? true : undefined,
+          s: isStrike || undefined,
+          pt: szVal ? Metric.halfPtToPt(Number(szVal)) : undefined,
+          color: safeHex(colorVal),
+          font: fontName ? safeFont(fontName) : undefined,
+        };
+      }
+
+      // pPr from paragraph properties
+      const pPr = style?.["w:pPr"]?.[0] ?? style?.pPr?.[0];
+      if (pPr) {
+        const spacingAttr =
+          pPr?.["w:spacing"]?.[0]?._attr ?? pPr?.spacing?.[0]?._attr ?? {};
+        const beforeVal = Number(
+          spacingAttr?.["w:before"] ?? spacingAttr?.before ?? 0,
+        );
+        const afterVal = Number(
+          spacingAttr?.["w:after"] ?? spacingAttr?.after ?? 0,
+        );
+        const lineVal = Number(
+          spacingAttr?.["w:line"] ?? spacingAttr?.line ?? 0,
+        );
+        const lineRule =
+          spacingAttr?.["w:lineRule"] ?? spacingAttr?.lineRule ?? "auto";
+        const indAttr =
+          pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
+        const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
+        const rightVal = Number(indAttr?.["w:right"] ?? indAttr?.right ?? 0);
+        const firstLineVal = Number(
+          indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0,
+        );
+        const hangingVal = Number(
+          indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0,
+        );
+        const alignVal =
+          pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ??
+          pPr?.["w:jc"]?.[0]?._attr?.val;
+        def.pPr = {
+          align: alignVal,
+          spaceBefore: beforeVal > 0 ? Metric.dxaToPt(beforeVal) : undefined,
+          spaceAfter: afterVal > 0 ? Metric.dxaToPt(afterVal) : undefined,
+          lineHeight:
+            lineVal > 0 && lineRule === "auto" ? lineVal / 240 : undefined,
+          indentPt: leftVal > 0 ? Metric.dxaToPt(leftVal) : undefined,
+          indentRightPt: rightVal > 0 ? Metric.dxaToPt(rightVal) : undefined,
+          firstLineIndentPt:
+            firstLineVal > 0
+              ? Metric.dxaToPt(firstLineVal)
+              : hangingVal > 0
+                ? -Metric.dxaToPt(hangingVal)
+                : undefined,
+        };
+      }
+
+      map.set(id, def);
+    }
+  } catch {
+    /* non-fatal */
+  }
+  return map;
+}
+
+/** Resolve paragraph style inheritance chain (max depth 8) */
+function resolveParaStyle(
+  styleId: string | undefined,
+  map: ParaStyleMap,
+): ParaStyleDef {
+  let merged: ParaStyleDef = {};
+  const visited = new Set<string>();
+  let cur = styleId;
+  while (cur && !visited.has(cur)) {
+    visited.add(cur);
+    const def = map.get(cur);
+    if (!def) break;
+    // Merge: child values win over parent
+    if (def.rPr) {
+      merged.rPr = { ...def.rPr, ...merged.rPr };
+    }
+    if (def.pPr) {
+      merged.pPr = { ...def.pPr, ...merged.pPr };
+    }
+    cur = def.basedOn;
+  }
+  return merged;
+}
+
+/** Resolve final CellProps borders using 3-level priority chain */
+function resolveCellBorders(
+  cp: CellProps,
+  ri: number,
+  ci: number,
+  rs: number,
+  cs: number,
+  rowCount: number,
+  colCount: number,
+  tblBdr: TblBorderDef,
+): CellProps {
+  const isTopEdge = ri === 0;
+  const isBottomEdge = ri + rs >= rowCount;
+  const isLeftEdge = ci === 0;
+  const isRightEdge = ci + cs >= colCount;
+
+  // Apply tblBorders only where no explicit tcBorder was set
+  const resolved: CellProps = { ...cp };
+  if (!resolved.top) resolved.top = isTopEdge ? tblBdr.top : tblBdr.insideH;
+  if (!resolved.bot)
+    resolved.bot = isBottomEdge ? tblBdr.bottom : tblBdr.insideH;
+  if (!resolved.left) resolved.left = isLeftEdge ? tblBdr.left : tblBdr.insideV;
+  if (!resolved.right)
+    resolved.right = isRightEdge ? tblBdr.right : tblBdr.insideV;
+  return resolved;
+}
+
+function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
+  // Parse tblPr for table styles
+  const tblPr = tbl?.["w:tblPr"]?.[0] ?? tbl?.tblPr?.[0] ?? {};
+  const tblLookAttr =
+    tblPr?.["w:tblLook"]?.[0]?._attr ?? tblPr?.tblLook?.[0]?._attr ?? {};
+
+  const look: TableLook = {
+    firstRow: tblLookAttr?.["w:firstRow"] === "1" || undefined,
+    lastRow: tblLookAttr?.["w:lastRow"] === "1" || undefined,
+    firstCol:
+      tblLookAttr?.["w:firstColumn"] === "1" ||
+      tblLookAttr?.["w:firstCol"] === "1" ||
+      undefined,
+    lastCol:
+      tblLookAttr?.["w:lastColumn"] === "1" ||
+      tblLookAttr?.["w:lastCol"] === "1" ||
+      undefined,
+    bandedRows: tblLookAttr?.["w:noHBand"] === "0" || undefined,
+    bandedCols: tblLookAttr?.["w:noVBand"] === "0" || undefined,
+  };
+
+  // ① tblStyle 기본값 로드
+  const tblStyleId = (tblPr?.["w:tblStyle"]?.[0]?._attr ??
+    tblPr?.tblStyle?.[0]?._attr)?.["w:val"];
+  const styleDef = tblStyleId ? ctx.stylesMap.get(tblStyleId) : undefined;
+  let tblBdr: TblBorderDef = styleDef?.tblBorders ?? {};
+
+  // ② tblBorders 재정의 (tblStyle보다 우선)
+  const tblBordersNode = tblPr?.["w:tblBorders"]?.[0] ?? tblPr?.tblBorders?.[0];
+  if (tblBordersNode) {
+    const parsed = parseBorderDef(tblBordersNode);
+    tblBdr = { ...tblBdr, ...parsed };
+  }
+
+  // defaultStroke for HWPX/HWP encoders: use insideH (inner horizontal border)
+  const defaultStroke = tblBdr.insideH ?? tblBdr.top;
+  const gridProps: GridProps = { look, defaultStroke };
+
+  // Read column widths from w:tblGrid
+  const tblGrid = tbl?.["w:tblGrid"]?.[0] ?? tbl?.tblGrid?.[0];
+  if (tblGrid) {
+    const gridCols = toArr(tblGrid?.["w:gridCol"] ?? tblGrid?.gridCol ?? []);
+    const colWidthsPt = gridCols
+      .map((gc: any) =>
+        Metric.dxaToPt(Number(gc?._attr?.["w:w"] ?? gc?._attr?.w ?? 0)),
+      )
+      .filter((w: number) => w > 0);
+    if (colWidthsPt.length > 0) gridProps.colWidths = colWidthsPt;
+  }
+
+  const rowArr = toArr(tbl?.["w:tr"] ?? tbl?.tr);
+
+  // ── Pass 1: parse raw cells with vMerge info ──
+  interface RawCell {
+    cell: any;
+    gridSpan: number;
+    vMergeRestart: boolean;
+    vMergeContinue: boolean;
+  }
+  const rawGrid: RawCell[][] = rowArr.map((row: any) => {
+    const cellArr = toArr(row?.["w:tc"] ?? row?.tc);
+    return cellArr.map((cell: any): RawCell => {
+      const tcPr = cell?.["w:tcPr"]?.[0] ?? {};
+      const gridSpan = Number(tcPr?.["w:gridSpan"]?.[0]?._attr?.["w:val"] ?? 1);
+      const vMergeNode = tcPr?.["w:vMerge"]?.[0];
+      const vMergeVal = vMergeNode?._attr?.["w:val"] ?? vMergeNode?._attr?.val;
+      const vMergeRestart = vMergeVal === "restart";
+      // vMerge present but val is not "restart" → continuation cell
+      const vMergeContinue = vMergeNode != null && !vMergeRestart;
+      return { cell, gridSpan, vMergeRestart, vMergeContinue };
+    });
+  });
+
+  // ── Pass 2: compute rowSpan for restart cells ──
+  // rsMap[ri][ci] = computed rowSpan (only set for restart cells)
+  const rsMap: Map<string, number> = new Map();
+  for (let ri = 0; ri < rawGrid.length; ri++) {
+    let gridCol = 0;
+    for (let ci = 0; ci < rawGrid[ri].length; ci++) {
+      const rc = rawGrid[ri][ci];
+      if (rc.vMergeRestart) {
+        let span = 1;
+        for (let nr = ri + 1; nr < rawGrid.length; nr++) {
+          // Find the cell at the same grid column in the next row
+          let col = 0;
+          let found = false;
+          for (const nc of rawGrid[nr]) {
+            if (col === gridCol && nc.vMergeContinue) {
+              span++;
+              found = true;
+              break;
+            }
+            col += nc.gridSpan;
+          }
+          if (!found) break;
+        }
+        rsMap.set(`${ri},${ci}`, span);
+      }
+      gridCol += rc.gridSpan;
+    }
+  }
+
+  // ── Pass 3: build CellNodes, skip continuation cells ──
+  const rowNodes = rawGrid.map((rawRow, ri) => {
+    // Check for header row
+    const row = rowArr[ri];
+    const trPr = row?.["w:trPr"]?.[0] ?? row?.trPr?.[0] ?? {};
+    const isHeaderRow =
+      trPr?.["w:tblHeader"]?.[0] != null || trPr?.tblHeader?.[0] != null;
+    if (ri === 0 && isHeaderRow) gridProps.headerRow = true;
+
+    // Row height from w:trHeight
+    let rowHeightPt: number | undefined;
+    const trHAttr =
+      trPr?.["w:trHeight"]?.[0]?._attr ?? trPr?.trHeight?.[0]?._attr;
+    if (trHAttr) {
+      const hDxa = Number(trHAttr?.["w:val"] ?? trHAttr?.val ?? 0);
+      if (hDxa > 0) rowHeightPt = Metric.dxaToPt(hDxa);
+    }
+
+    const cellNodes: CellNode[] = [];
+    for (let ci = 0; ci < rawRow.length; ci++) {
+      const rc = rawRow[ci];
+      // Skip continuation cells — they are part of a vertical merge
+      if (rc.vMergeContinue) continue;
+
+      const cell = rc.cell;
+      const tcPr = cell?.["w:tcPr"]?.[0] ?? {};
+
+      // Cell background
+      const bgAttr = tcPr?.["w:shd"]?.[0]?._attr ?? {};
+      const bg = safeHex(bgAttr?.["w:fill"] ?? bgAttr?.fill);
+
+      // ③ tcBorders 셀 수준 재정의 (우선순위 가장 높음)
+      const tcBordersNode = tcPr?.["w:tcBorders"]?.[0] ?? tcPr?.tcBorders?.[0];
+      const cp: CellProps = { bg, isHeader: isHeaderRow || undefined };
+
+      if (tcBordersNode) {
+        const dirs: Array<[string, "top" | "bot" | "left" | "right"]> = [
+          ["top", "top"],
+          ["bottom", "bot"],
+          ["left", "left"],
+          ["right", "right"],
+        ];
+        for (const [xmlTag, propKey] of dirs) {
+          const bdr =
+            tcBordersNode?.["w:" + xmlTag]?.[0]?._attr ??
+            tcBordersNode?.[xmlTag]?.[0]?._attr;
+          if (!bdr) continue;
+          const val = bdr?.["w:val"] ?? bdr?.val;
+          if (val === "none" || val === "nil") {
+            // explicit none: keep as undefined (no border)
+          } else {
+            cp[propKey] = safeStrokeDocx(
+              val,
+              Number(bdr?.["w:sz"] ?? bdr?.sz ?? 4),
+              bdr?.["w:color"] ?? bdr?.color,
+            );
+          }
+        }
+      }
+
+      // Vertical alignment
+      const vaAttr =
+        tcPr?.["w:vAlign"]?.[0]?._attr ?? tcPr?.vAlign?.[0]?._attr ?? {};
+      const vaVal = vaAttr?.["w:val"] ?? vaAttr?.val;
+      if (vaVal) {
+        const vaMap: Record<string, "top" | "mid" | "bot"> = {
+          top: "top",
+          center: "mid",
+          bottom: "bot",
+        };
+        cp.va = vaMap[vaVal];
+      }
+
+      // Cell margins (padding)
+      const tcMar = tcPr?.["w:tcMar"]?.[0] ?? tcPr?.tcMar?.[0];
+      if (tcMar) {
+        const top = tcMar?.["w:top"]?.[0]?._attr ?? tcMar?.top?.[0]?._attr;
+        const bot =
+          tcMar?.["w:bottom"]?.[0]?._attr ?? tcMar?.bottom?.[0]?._attr;
+        const left = tcMar?.["w:left"]?.[0]?._attr ?? tcMar?.left?.[0]?._attr;
+        const right =
+          tcMar?.["w:right"]?.[0]?._attr ?? tcMar?.right?.[0]?._attr;
+
+        if (top) cp.padT = Metric.dxaToPt(Number(top?.["w:w"] ?? top?.w ?? 0));
+        if (bot) cp.padB = Metric.dxaToPt(Number(bot?.["w:w"] ?? bot?.w ?? 0));
+        if (left)
+          cp.padL = Metric.dxaToPt(Number(left?.["w:w"] ?? left?.w ?? 0));
+        if (right)
+          cp.padR = Metric.dxaToPt(Number(right?.["w:w"] ?? right?.w ?? 0));
+      }
+
+      const rs = rsMap.get(`${ri},${ci}`) ?? 1;
+
+      // Compute logical column index for this cell
+      let gridColIdx = 0;
+      for (let prevCi = 0; prevCi < ci; prevCi++) {
+        if (!rawRow[prevCi].vMergeContinue)
+          gridColIdx += rawRow[prevCi].gridSpan;
+      }
+
+      // Apply 3-level border resolution (tblStyle → tblBorders → tcBorders already in cp)
+      const colCount =
+        gridProps.colWidths?.length ??
+        rawGrid[0]?.reduce((s, c) => s + c.gridSpan, 0) ??
+        1;
+      const resolvedCp = resolveCellBorders(
+        cp,
+        ri,
+        gridColIdx,
+        rs,
+        rc.gridSpan,
+        rawGrid.length,
+        colCount,
+        tblBdr,
+      );
+
+      const paras = toArr(cell?.["w:p"] ?? cell?.p).map((p: any) =>
+        decodePara(p, ctx),
+      );
+      cellNodes.push(
+        buildCell(paras.length > 0 ? paras : [buildPara([buildSpan("")])], {
+          cs: rc.gridSpan,
+          rs,
+          props: resolvedCp,
+        }),
+      );
+    }
+    return buildRow(cellNodes, rowHeightPt);
+  });
+  return buildGrid(rowNodes, gridProps);
+}
+
+function decodeGridSimple(tbl: any): GridNode {
+  const rowArr = toArr(tbl?.["w:tr"] ?? tbl?.tr);
+  const rowNodes = rowArr.map((row: any) => {
+    const cellArr = toArr(row?.["w:tc"] ?? row?.tc);
+    return buildRow(
+      cellArr.map((c: any) => buildCell([buildPara([buildSpan(cellText(c))])])),
+    );
+  });
+  return buildGrid(rowNodes);
+}
+
+function decodeGridFlat(tbl: any): GridNode {
+  return buildGrid([
+    buildRow([buildCell([buildPara([buildSpan(tableText(tbl))])])]),
+  ]);
+}
+
+function decodeGridText(tbl: any): ParaNode {
+  return buildPara([buildSpan(tableText(tbl))]);
+}
+
+function cellText(cell: any): string {
+  return toArr(cell?.["w:p"] ?? cell?.p)
+    .map((p: any) =>
+      toArr(p?.["w:r"] ?? p?.r)
+        .map((r: any) =>
+          toArr(r?.["w:t"] ?? r?.t)
+            .map((t: any) => (typeof t === "string" ? t : (t?._ ?? "")))
+            .join(""),
+        )
+        .join(""),
+    )
+    .join(" ");
+}
+
+function tableText(tbl: any): string {
+  return toArr(tbl?.["w:tr"] ?? tbl?.tr)
+    .map((row: any) =>
+      toArr(row?.["w:tc"] ?? row?.tc)
+        .map((c: any) => cellText(c))
+        .join("\t"),
+    )
+    .join("\n");
+}
+
+function parseHeading(style?: string): 1 | 2 | 3 | 4 | 5 | 6 | undefined {
+  if (!style) return undefined;
+  const m = style.match(/[Hh]eading(\d)/);
+  if (m) {
+    const n = Number(m[1]);
+    if (n >= 1 && n <= 6) return n as any;
+  }
+  return undefined;
+}
+
+registry.registerDecoder(new DocxDecoder());
+
+// ─── Anchor layout 추출 ─────────────────────────────────────
+
+function extractAnchorLayout(anchor: any): ImgLayout {
+  const attr = anchor?._attr ?? {};
+  const behindDoc = attr.behindDoc === "1";
+
+  // 텍스트 감싸기 타입
+  let wrap: ImgWrap = "square";
+  if (anchor?.["wp:wrapNone"]?.[0] != null)
+    wrap = behindDoc ? "behind" : "none";
+  else if (anchor?.["wp:wrapTight"]?.[0] != null) wrap = "tight";
+  else if (anchor?.["wp:wrapThrough"]?.[0] != null) wrap = "through";
+  else if (anchor?.["wp:wrapSquare"]?.[0] != null) wrap = "square";
+  else if (anchor?.["wp:wrapTopAndBottom"]?.[0] != null) wrap = "square";
+  else if (anchor?.["wp:wrapBehind"]?.[0] != null || behindDoc) wrap = "behind";
+
+  // 가로 위치
+  const posH = anchor?.["wp:positionH"]?.[0];
+  const horzRelTo = parseHorzRelTo(posH?._attr?.relativeFrom);
+  const horzAlignTxt = posH?.["wp:align"]?.[0]?._text;
+  const horzOffsetTxt = posH?.["wp:posOffset"]?.[0]?._text;
+  const horzAlign = horzAlignTxt ? parseHorzAlign(horzAlignTxt) : undefined;
+  const xPt =
+    horzOffsetTxt && !horzAlignTxt
+      ? Metric.emuToPt(Number(horzOffsetTxt))
+      : undefined;
+
+  // 세로 위치
+  const posV = anchor?.["wp:positionV"]?.[0];
+  const vertRelTo = parseVertRelTo(posV?._attr?.relativeFrom);
+  const vertAlignTxt = posV?.["wp:align"]?.[0]?._text;
+  const vertOffsetTxt = posV?.["wp:posOffset"]?.[0]?._text;
+  const vertAlign = vertAlignTxt ? parseVertAlign(vertAlignTxt) : undefined;
+  const yPt =
+    vertOffsetTxt && !vertAlignTxt
+      ? Metric.emuToPt(Number(vertOffsetTxt))
+      : undefined;
+
+  // 텍스트와의 거리
+  const distT = attr.distT ? Metric.emuToPt(Number(attr.distT)) : undefined;
+  const distB = attr.distB ? Metric.emuToPt(Number(attr.distB)) : undefined;
+  const distL = attr.distL ? Metric.emuToPt(Number(attr.distL)) : undefined;
+  const distR = attr.distR ? Metric.emuToPt(Number(attr.distR)) : undefined;
+  const zOrder = attr.relativeHeight ? Number(attr.relativeHeight) : undefined;
+
+  return {
+    wrap,
+    horzAlign,
+    vertAlign,
+    horzRelTo,
+    vertRelTo,
+    xPt,
+    yPt,
+    distT,
+    distB,
+    distL,
+    distR,
+    behindDoc,
+    zOrder,
+  };
+}
+
+const HORZ_RELTO_MAP: Record<string, ImgHorzRelTo> = {
+  margin: "margin",
+  leftMargin: "margin",
+  rightMargin: "margin",
+  insideMargin: "margin",
+  outsideMargin: "margin",
+  column: "column",
+  page: "page",
+  character: "para",
+  paragraph: "para",
+};
+const VERT_RELTO_MAP: Record<string, ImgVertRelTo> = {
+  margin: "margin",
+  topMargin: "margin",
+  bottomMargin: "margin",
+  insideMargin: "margin",
+  outsideMargin: "margin",
+  line: "line",
+  page: "page",
+  paragraph: "para",
+};
+const HORZ_ALIGN_MAP: Record<string, ImgHorzAlign> = {
+  left: "left",
+  center: "center",
+  right: "right",
+  inside: "left",
+  outside: "right",
+};
+const VERT_ALIGN_MAP: Record<string, ImgVertAlign> = {
+  top: "top",
+  center: "center",
+  bottom: "bottom",
+  inside: "top",
+  outside: "bottom",
+};
+
+function parseHorzRelTo(v?: string): ImgHorzRelTo {
+  return HORZ_RELTO_MAP[v ?? ""] ?? "column";
+}
+function parseVertRelTo(v?: string): ImgVertRelTo {
+  return VERT_RELTO_MAP[v ?? ""] ?? "para";
+}
+function parseHorzAlign(v?: string): ImgHorzAlign | undefined {
+  return HORZ_ALIGN_MAP[v ?? ""];
+}
+function parseVertAlign(v?: string): ImgVertAlign | undefined {
+  return VERT_ALIGN_MAP[v ?? ""];
+}
