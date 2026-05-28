@@ -53,6 +53,7 @@ const NS = [
   'xmlns:ooxmlchart="http://www.hancom.co.kr/hwpml/2016/ooxmlchart"',
   'xmlns:epub="http://www.idpf.org/2007/ops"',
   'xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"',
+  'xmlns:hwpunitchar="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar"',
 ].join(" ");
 
 // ─── LinesegArray Flags 상수 (HWPX 스펙) ─────────────────
@@ -643,6 +644,11 @@ export class HwpxEncoder extends BaseEncoder {
           mime: "application/rdf+xml",
         },
         {
+          name: "META-INF/manifest.xml",
+          data: this.stringToBytes(MANIFEST_XML),
+          mime: "application/xml",
+        },
+        {
           name: "Contents/content.hpf",
           data: this.stringToBytes(buildContentHpf(ctx, doc.meta)),
           mime: "application/hwpml-package+xml",
@@ -693,7 +699,7 @@ export class HwpxEncoder extends BaseEncoder {
 
 const VERSION_XML =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
-  `<hv:HCFVersion xmlns:hv="http://www.owpml.org/owpml/2024/version" ` +
+  `<hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" ` +
   `targetApplication="WORDPROCESSING" major="5" minor="1" micro="0" buildNumber="1" ` +
   `os="1" xmlVersion="1.4" application="Hancom Office Hangul" appVersion="11, 0, 0, 0"/>`;
 
@@ -1069,7 +1075,7 @@ function buildSectionXml(
       `</hp:p>`;
   }
 
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hs:sec ${NS} xmlns:hwpunitchar="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">${contentXml}</hs:sec>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hs:sec ${NS}>${contentXml}</hs:sec>`;
 }
 
 function buildSecPrXml(dims: PageDims): string {
