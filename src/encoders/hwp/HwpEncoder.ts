@@ -165,10 +165,11 @@ class BufWriter {
 
 function mkRec(tag: number, level: number, data: Uint8Array): Uint8Array {
   const sz = data.length;
-  const enc = Math.min(sz, 0xfff);
-  const hdr = (enc << 20) | ((level & 0x3ff) << 10) | (tag & 0x3ff);
+  const isLarge = sz >= 0xfff;
+  const enc = isLarge ? 0xfff : sz;
+  const hdr = (((enc & 0xfff) * 0x100000) | ((level & 0x3ff) << 10) | (tag & 0x3ff)) >>> 0;
   const w = new BufWriter().u32(hdr);
-  if (enc >= 0xfff) w.u32(sz);
+  if (isLarge) w.u32(sz);
   w.bytes(data);
   return w.build();
 }
@@ -674,7 +675,9 @@ function mkPageDef(dims: PageDims): Uint8Array {
     .u32(Metric.ptToHwp(dims.mr))
     .u32(Metric.ptToHwp(dims.mt))
     .u32(Metric.ptToHwp(dims.mb))
-    .zeros(12)
+    .u32(dims.headerPt ? Metric.ptToHwp(dims.headerPt) : 0)
+    .u32(dims.footerPt ? Metric.ptToHwp(dims.footerPt) : 0)
+    .u32(0) // gutter
     .u32(dims.orient === "landscape" ? 1 : 0)
     .build(); // 40 bytes
 }
@@ -1085,7 +1088,7 @@ function mkTableCtrl(
 ): Uint8Array {
   // 표 정렬 속성 플래그 (HWP 표 제어 문자)
   // offset 20-21: 속성 플래그 (align: left=0, center=1, right=2, justify=3)
-  const alignFlags = { left: 0, center: 1, right: 2, justify: 3 }[align] ?? 0;
+  const alignFlags = { left: 0, center: 1, right: 2, justify: 3, distribute: 0, distribute_space: 0 }[align] ?? 0;
   return new BufWriter()
     .u32(CTRL_TABLE)
     .u32(0x082a2211)
@@ -1256,7 +1259,7 @@ function encodeGrid(
       const cellWidthHwp = Metric.ptToHwp(cwPt[c] ?? defColPt);
       for (const para of paras) {
         records.push(
-          ...encodePara(para as ParaNode, bank, lv + 2, idGen(), cellWidthHwp),
+          ...encodePara(para as ParaNode, bank, lv + 1, idGen(), cellWidthHwp),
         );
       }
     }
@@ -1594,7 +1597,8 @@ function buildHwpOle2(
   section0Data: Uint8Array,
   binImages: BinImage[] = [],
 ): Uint8Array {
-  const SS = 512;
+  const SS = 512; // 정규 섹터 크기
+  const MSS = 64; // 미니 섹터 크기
   const ENDOFCHAIN = 0xfffffffe;
   const FREESECT = 0xffffffff;
   const FATSECT = 0xfffffffd;
@@ -1606,73 +1610,193 @@ function buildHwpOle2(
     );
   }
 
-  function padSector(d: Uint8Array): Uint8Array {
-    const n = Math.ceil(Math.max(d.length, 1) / SS) * SS;
-    if (d.length === n) return d;
-    const out = new Uint8Array(n);
-    out.set(d);
-    return out;
+  // 스트림 정의 및 4096바이트 미만(isMini) 여부 분류
+  interface OleStream {
+    name: string;
+    data: Uint8Array;
+    dirIdx: number;
+    isMini: boolean;
+    startSec?: number; // 미니 스트림은 미니 FAT 내 시작 인덱스, 정규 스트림은 regular FAT 내 시작 섹터
   }
 
-  const fhPad = padSector(fileHeaderData);
-  const diPad = padSector(docInfoData);
-  const s0Pad = padSector(section0Data);
-  const imgPads = binImages.map((img) => padSector(img.data));
+  const streams: OleStream[] = [];
+  streams.push({
+    name: "FileHeader",
+    data: fileHeaderData,
+    dirIdx: 1,
+    isMini: fileHeaderData.length < 4096,
+  });
+  streams.push({
+    name: "DocInfo",
+    data: docInfoData,
+    dirIdx: 2,
+    isMini: docInfoData.length < 4096,
+  });
+  streams.push({
+    name: "Section0",
+    data: section0Data,
+    dirIdx: 4,
+    isMini: section0Data.length < 4096,
+  });
 
-  const fhN = fhPad.length / SS;
-  const diN = diPad.length / SS;
-  const s0N = s0Pad.length / SS;
-  const imgNs = imgPads.map((p) => p.length / SS);
-  const totalImgN = imgNs.reduce((s, n) => s + n, 0);
+  for (let i = 0; i < binImages.length; i++) {
+    const img = binImages[i];
+    const name = `BIN${String(img.id).padStart(4, "0")}.${img.ext}`;
+    streams.push({
+      name,
+      data: img.data,
+      dirIdx: 6 + i,
+      isMini: img.data.length < 4096,
+    });
+  }
 
+  // 미니 스트림 패킹 및 Mini FAT 체인 생성
+  const miniStreams = streams.filter((s) => s.isMini);
+  const miniSectorList: number[] = [];
+  let miniStreamDataLength = 0;
+
+  for (const s of miniStreams) {
+    const startSec = miniStreamDataLength / MSS;
+    s.startSec = startSec;
+
+    const len = s.data.length;
+    const numMiniSecs = Math.ceil(len / MSS);
+
+    for (let i = 0; i < numMiniSecs; i++) {
+      const curSec = startSec + i;
+      const nextSec = i === numMiniSecs - 1 ? ENDOFCHAIN : curSec + 1;
+
+      while (miniSectorList.length <= curSec) {
+        miniSectorList.push(FREESECT);
+      }
+      miniSectorList[curSec] = nextSec;
+    }
+
+    miniStreamDataLength += numMiniSecs * MSS;
+  }
+
+  // 미니 스트림 데이터 버퍼 구성
+  const miniStreamData = new Uint8Array(miniStreamDataLength);
+  let miniStreamOffset = 0;
+  for (const s of miniStreams) {
+    miniStreamData.set(s.data, miniStreamOffset);
+    miniStreamOffset += Math.ceil(s.data.length / MSS) * MSS;
+  }
+
+  // 정규 스트림 패딩 및 섹터 개수 계산
+  const regularStreams = streams.filter((s) => !s.isMini);
+  const regPads = regularStreams.map((s) => {
+    const len = s.data.length;
+    const n = Math.ceil(Math.max(len, 1) / SS) * SS;
+    const out = new Uint8Array(n);
+    out.set(s.data);
+    return out;
+  });
+  const regNs = regPads.map((p) => p.length / SS);
+
+  // 디렉토리 섹터 크기 결정 (엔트리 개수 비례)
   const numDirEntries = 5 + (binImages.length > 0 ? 1 + binImages.length : 0);
-  const dirN = Math.max(2, Math.ceil(numDirEntries / 4));
+  const dirN = Math.max(1, Math.ceil((numDirEntries * 128) / SS));
+
+  // Mini FAT 섹터 크기 결정 (1 섹터당 128개 FAT 엔트리 수용)
+  const miniFatN = Math.ceil(miniSectorList.length / 128);
+
+  // Mini Stream을 위한 정규 섹터 크기 결정
+  const miniStreamN = Math.ceil(miniStreamData.length / SS);
+
+  // 정규 FAT 섹터 수 (fatN) 계산 루프
+  const totalRegStreamN = regNs.reduce((a, b) => a + b, 0);
+  const neededDataSec = dirN + miniFatN + miniStreamN + totalRegStreamN;
 
   let fatN = 1;
   for (let iter = 0; iter < 10; iter++) {
-    const total = fatN + dirN + fhN + diN + s0N + totalImgN;
-    const needed = Math.ceil(total / 128);
-    if (needed <= fatN) break;
-    fatN = needed;
+    const totalSec = fatN + neededDataSec;
+    const neededFat = Math.ceil(totalSec / 128);
+    if (neededFat <= fatN) break;
+    fatN = neededFat;
   }
 
-  const dir1Sec = fatN;
-  const fhSec = dir1Sec + dirN;
-  const diSec = fhSec + fhN;
-  const s0Sec = diSec + diN;
+  const totalSec = fatN + neededDataSec;
 
-  const imgSecs: number[] = [];
-  let curSec = s0Sec + s0N;
-  for (const n of imgNs) {
-    imgSecs.push(curSec);
-    curSec += n;
+  // 각 정규 섹터 영역의 시작 위치 할당
+  const dirStartSec = fatN;
+  const miniFatStartSec = dirStartSec + dirN;
+  const miniStreamStartSec = miniFatStartSec + miniFatN;
+
+  let curSec = miniStreamStartSec + miniStreamN;
+  for (let i = 0; i < regularStreams.length; i++) {
+    regularStreams[i].startSec = curSec;
+    curSec += regNs[i];
   }
-  const totalSec = curSec;
 
+  // 정규 FAT 버퍼 구성
   const fatBuf = new Uint8Array(fatN * SS).fill(0xff);
   const setFat = (i: number, v: number) => {
-    fatBuf[i * 4] = v & 0xff;
-    fatBuf[i * 4 + 1] = (v >>> 8) & 0xff;
-    fatBuf[i * 4 + 2] = (v >>> 16) & 0xff;
-    fatBuf[i * 4 + 3] = (v >>> 24) & 0xff;
+    const off = i * 4;
+    fatBuf[off] = v & 0xff;
+    fatBuf[off + 1] = (v >>> 8) & 0xff;
+    fatBuf[off + 2] = (v >>> 16) & 0xff;
+    fatBuf[off + 3] = (v >>> 24) & 0xff;
   };
 
-  for (let i = 0; i < fatN; i++) setFat(i, FATSECT);
-  for (let i = 0; i < dirN; i++)
-    setFat(dir1Sec + i, i + 1 < dirN ? dir1Sec + i + 1 : ENDOFCHAIN);
-  for (let i = 0; i < fhN; i++)
-    setFat(fhSec + i, i + 1 < fhN ? fhSec + i + 1 : ENDOFCHAIN);
-  for (let i = 0; i < diN; i++)
-    setFat(diSec + i, i + 1 < diN ? diSec + i + 1 : ENDOFCHAIN);
-  for (let i = 0; i < s0N; i++)
-    setFat(s0Sec + i, i + 1 < s0N ? s0Sec + i + 1 : ENDOFCHAIN);
-  for (let ii = 0; ii < imgNs.length; ii++) {
-    const start = imgSecs[ii];
-    const n = imgNs[ii];
-    for (let i = 0; i < n; i++)
-      setFat(start + i, i + 1 < n ? start + i + 1 : ENDOFCHAIN);
+  // FAT 섹터 자신 표시
+  for (let i = 0; i < fatN; i++) {
+    setFat(i, FATSECT);
   }
 
+  // Directory 섹터 체인 연결
+  for (let i = 0; i < dirN; i++) {
+    setFat(
+      dirStartSec + i,
+      i + 1 < dirN ? dirStartSec + i + 1 : ENDOFCHAIN,
+    );
+  }
+
+  // Mini FAT 섹터 체인 연결
+  if (miniFatN > 0) {
+    for (let i = 0; i < miniFatN; i++) {
+      setFat(
+        miniFatStartSec + i,
+        i + 1 < miniFatN ? miniFatStartSec + i + 1 : ENDOFCHAIN,
+      );
+    }
+  }
+
+  // Mini Stream 섹터 체인 연결
+  if (miniStreamN > 0) {
+    for (let i = 0; i < miniStreamN; i++) {
+      setFat(
+        miniStreamStartSec + i,
+        i + 1 < miniStreamN ? miniStreamStartSec + i + 1 : ENDOFCHAIN,
+      );
+    }
+  }
+
+  // 정규 스트림 섹터 체인 연결
+  for (let i = 0; i < regularStreams.length; i++) {
+    const s = regularStreams[i];
+    const n = regNs[i];
+    const start = s.startSec!;
+    for (let j = 0; j < n; j++) {
+      setFat(start + j, j + 1 < n ? start + j + 1 : ENDOFCHAIN);
+    }
+  }
+
+  // Mini FAT 버퍼 생성
+  const miniFatBuf = new Uint8Array(miniFatN * SS).fill(0xff);
+  const setMiniFat = (i: number, v: number) => {
+    const off = i * 4;
+    miniFatBuf[off] = v & 0xff;
+    miniFatBuf[off + 1] = (v >>> 8) & 0xff;
+    miniFatBuf[off + 2] = (v >>> 16) & 0xff;
+    miniFatBuf[off + 3] = (v >>> 24) & 0xff;
+  };
+
+  for (let i = 0; i < miniSectorList.length; i++) {
+    setMiniFat(i, miniSectorList[i]);
+  }
+
+  // 디렉토리 버퍼 생성
   const dirBuf = new Uint8Array(dirN * SS);
   const dv = new DataView(dirBuf.buffer);
 
@@ -1689,11 +1813,12 @@ function buildHwpOle2(
     const base = idx * 128;
     const nl = name.length;
     // OLE2: 이름은 UTF-16LE, (글자수+1)*2 바이트가 길이 필드에 기록됨
-    for (let i = 0; i < nl; i++)
+    for (let i = 0; i < nl; i++) {
       dv.setUint16(base + i * 2, name.charCodeAt(i), true);
+    }
     dv.setUint16(base + 64, (nl + 1) * 2, true);
     dirBuf[base + 66] = type;
-    dirBuf[base + 67] = 1; // DE_NODE
+    dirBuf[base + 67] = 1; // DE_NODE (블랙 노드)
     dv.setInt32(base + 68, left, true);
     dv.setInt32(base + 72, right, true);
     dv.setInt32(base + 76, child, true);
@@ -1701,7 +1826,7 @@ function buildHwpOle2(
     dv.setUint32(base + 120, size >>> 0, true);
   }
 
-  // 초기값 -1 (NOSTREAM)
+  // 모든 디렉토리 엔트리 -1 (NOSTREAM)으로 초기화
   for (let i = 0; i < dirN * 4; i++) {
     const base = i * 128;
     dv.setInt32(base + 68, -1, true);
@@ -1709,142 +1834,163 @@ function buildHwpOle2(
     dv.setInt32(base + 76, -1, true);
   }
 
-  /**
-   * 트리 구조 설계:
-   * 0: Root Entry (child -> 1)
-   * 1: FileHeader (left -> -1, right -> 2)
-   * 2: DocInfo    (left -> -1, right -> 3)
-   * 3: BodyText   (left -> -1, right -> 5, child -> 4)
-   * 4: Section0   (left -> -1, right -> -1)
-   * 5: BinData    (left -> -1, right -> -1, child -> 6...)
-   */
-
-  if (binImages.length > 0) {
-    writeDirEntry(0, "Root Entry", 5, -1, -1, 1, ENDOFCHAIN, 0);
-    writeDirEntry(1, "FileHeader", 2, -1, 2, -1, fhSec, fileHeaderData.length);
-    writeDirEntry(2, "DocInfo", 2, -1, 3, -1, diSec, docInfoData.length);
-    writeDirEntry(3, "BodyText", 1, -1, 5, 4, ENDOFCHAIN, 0);
-    writeDirEntry(4, "Section0", 2, -1, -1, -1, s0Sec, section0Data.length);
-    writeDirEntry(5, "BinData", 1, -1, -1, 6, ENDOFCHAIN, 0);
-    for (let ii = 0; ii < binImages.length; ii++) {
-      const img = binImages[ii];
-      const streamName = `BIN${String(img.id).padStart(4, "0")}.${img.ext}`;
-      const sibling = ii + 1 < binImages.length ? 7 + ii : -1;
-      writeDirEntry(
-        6 + ii,
-        streamName,
-        2,
-        -1,
-        sibling,
-        -1,
-        imgSecs[ii],
-        img.data.length,
-      );
-    }
-  } else {
-    writeDirEntry(0, "Root Entry", 5, -1, -1, 1, ENDOFCHAIN, 0);
-    writeDirEntry(1, "FileHeader", 2, -1, 2, -1, fhSec, fileHeaderData.length);
-    writeDirEntry(2, "DocInfo", 2, -1, 3, -1, diSec, docInfoData.length);
-    writeDirEntry(3, "BodyText", 1, -1, -1, 4, ENDOFCHAIN, 0);
-    writeDirEntry(4, "Section0", 2, -1, -1, -1, s0Sec, section0Data.length);
+  // 스트림 인덱스 맵 생성
+  const streamMap = new Map<number, OleStream>();
+  for (const s of streams) {
+    streamMap.set(s.dirIdx, s);
   }
 
-  // HWP Root Entry CLSID
+  // Root Entry (0번): 미니 스트림의 루트 역할을 하며 미니 스트림 데이터를 가리킴
+  writeDirEntry(
+    0,
+    "Root Entry",
+    5,
+    -1,
+    -1,
+    3,
+    miniStreamStartSec,
+    miniStreamData.length,
+  );
+
+  // HWP Root Entry CLSID 설정
   const HWP_CLSID = [
     0x20, 0xe9, 0xe3, 0xc0, 0x46, 0x35, 0xcf, 0x11, 0x8d, 0x81, 0x00, 0xaa,
     0x00, 0x38, 0x9b, 0x71,
   ];
-  for (let i = 0; i < 16; i++) dirBuf[80 + i] = HWP_CLSID[i];
+  for (let i = 0; i < 16; i++) {
+    dirBuf[0 * 128 + 80 + i] = HWP_CLSID[i];
+  }
 
+  // FileHeader (1번)
+  const fhStream = streamMap.get(1)!;
+  writeDirEntry(
+    1,
+    "FileHeader",
+    2,
+    -1,
+    -1,
+    -1,
+    fhStream.startSec!,
+    fhStream.data.length,
+  );
+
+  // DocInfo (2번) - 이미지가 있는 경우 BinData(5번)를 left로 지정
+  const diStream = streamMap.get(2)!;
+  const docInfoLeft = binImages.length > 0 ? 5 : -1;
+  writeDirEntry(
+    2,
+    "DocInfo",
+    2,
+    docInfoLeft,
+    -1,
+    -1,
+    diStream.startSec!,
+    diStream.data.length,
+  );
+
+  // BodyText (3번) - Root Entry 아래의 검색 허브 역할 (left: DocInfo(2), right: FileHeader(1), child: Section0(4))
+  writeDirEntry(3, "BodyText", 1, 2, 1, 4, ENDOFCHAIN, 0);
+
+  // Section0 (4번)
+  const s0Stream = streamMap.get(4)!;
+  writeDirEntry(
+    4,
+    "Section0",
+    2,
+    -1,
+    -1,
+    -1,
+    s0Stream.startSec!,
+    s0Stream.data.length,
+  );
+
+  // BinData (5번)
+  if (binImages.length > 0) {
+    writeDirEntry(5, "BinData", 1, -1, -1, 6, ENDOFCHAIN, 0);
+
+    for (let i = 0; i < binImages.length; i++) {
+      const imgStream = streamMap.get(6 + i)!;
+      const sibling = i + 1 < binImages.length ? 7 + i : -1;
+      writeDirEntry(
+        6 + i,
+        imgStream.name,
+        2,
+        -1,
+        sibling,
+        -1,
+        imgStream.startSec!,
+        imgStream.data.length,
+      );
+    }
+  }
+
+  // 헤더 생성 (512바이트)
   const hdr = new Uint8Array(SS);
   const hdv = new DataView(hdr.buffer);
 
-  // OLE2/CFB 헤더 구조:
-  // 0-7:   Magic number (D0 CF 11 E0 A1 B1 1A E1)
-  // 8-23:  CLSID (16 bytes)
-  // 24-25: Minor version (0x003E = 62)
-  // 26-27: Major version (0x0003 = 3)
-  // 28-29: Byte order (0x00FE = Little-Endian)
-  // 30-31: Sector size exponent (0x0009 = 2^9 = 512)
-  // 32-33: Mini sector size exponent (0x0006 = 2^6 = 64)
-  // 34-39: Reserved (6 bytes)
-  // 40-43: Number of FAT sectors
-  // 44-47: Directory start sector location
-  // 48-51: Transaction signature number
-  // 52-55: Mini stream cutoff size (0x1000 = 4096)
-  // 56-59: Mini FAT start sector location
-  // 60-63: Number of mini FAT sectors
-  // 64-67: FAT start sector location
-  // 68-71: Number of backup FAT sectors
-  // 72-75: Backup FAT start sector location
-  // 76-511: Sector bitmap (109 sectors worth)
-
-  // Magic number
+  // OLE2 시그니처 (Magic)
   const MAGIC = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
   MAGIC.forEach((b, i) => {
     hdr[i] = b;
   });
 
-  // CLSID is already set in dirBuf[0][80:96] for Root Entry
-
-  // Version
   hdv.setUint16(24, 0x003e, true); // Minor version
   hdv.setUint16(26, 0x0003, true); // Major version
+  hdv.setUint16(28, 0xfffe, true); // Byte order (0xFFFE = 리틀 엔디안 BOM)
+  hdv.setUint16(30, 0x0009, true); // Sector size exponent (2^9 = 512)
+  hdv.setUint16(32, 0x0006, true); // Mini sector size exponent (2^6 = 64)
 
-  // Byte order
-  hdv.setUint16(28, 0x00fe, true); // Little-Endian
+  hdv.setUint32(40, 0, true); // Number of Directory Sectors (Version 3에서는 0으로 채움)
+  hdv.setUint32(44, fatN, true); // Number of FAT Sectors (0x002C)
+  hdv.setUint32(48, dirStartSec, true); // Starting Sector of Directory Stream (0x0030)
+  hdv.setUint32(52, 0, true); // Transaction Signature Number (0x0034)
+  hdv.setUint32(56, 0x1000, true); // Mini Stream Cutoff Size (0x0038)
+  hdv.setUint32(60, miniFatN > 0 ? miniFatStartSec : ENDOFCHAIN, true); // Starting Sector of Mini FAT (0x003C)
+  hdv.setUint32(64, miniFatN, true); // Number of Mini FAT Sectors (0x0040)
+  hdv.setUint32(68, ENDOFCHAIN, true); // Starting Sector of DIFAT (0x0044)
+  hdv.setUint32(72, 0, true); // Number of DIFAT Sectors (0x0048)
 
-  // Sector size exponent (2^9 = 512)
-  hdv.setUint16(30, 0x0009, true);
-
-  // Mini sector size exponent (2^6 = 64)
-  hdv.setUint16(32, 0x0006, true);
-
-  // Reserved (34-39, 6 bytes) - already zero
-
-  // Number of FAT sectors
-  hdv.setUint32(40, fatN, true);
-
-  // Directory start sector location
-  hdv.setUint32(44, dir1Sec, true);
-
-  // Transaction signature number
-  hdv.setUint32(48, 0, true);
-
-  // Mini stream cutoff size
-  hdv.setUint32(52, 0x1000, true);
-
-  // Mini FAT start sector location
-  hdv.setUint32(56, ENDOFCHAIN, true);
-
-  // Number of mini FAT sectors
-  hdv.setUint32(60, 0, true);
-
-  // FAT start sector location
-  hdv.setUint32(64, ENDOFCHAIN, true);
-
-  // Number of backup FAT sectors
-  hdv.setUint32(68, 0, true);
-
-  // Backup FAT start sector location
-  hdv.setUint32(72, 0, true);
-
-  // Sector bitmap (76-511)
+  // Sector bitmap (DIFAT) 슬롯 채우기 (처음 109개 FAT 섹터 번호 지정)
   for (let i = 0; i < 109; i++) {
     hdv.setUint32(76 + i * 4, i < fatN ? i : FREESECT, true);
   }
 
+  // 최종 바이트 어레이 조립 및 출력 생성
   const out = new Uint8Array(SS + totalSec * SS);
-  out.set(hdr, 0);
-  for (let i = 0; i < fatN; i++)
-    out.set(fatBuf.subarray(i * SS, (i + 1) * SS), SS + i * SS);
-  for (let i = 0; i < dirN; i++)
-    out.set(dirBuf.subarray(i * SS, (i + 1) * SS), SS + (dir1Sec + i) * SS);
-  out.set(fhPad, SS + fhSec * SS);
-  out.set(diPad, SS + diSec * SS);
-  out.set(s0Pad, SS + s0Sec * SS);
-  for (let ii = 0; ii < imgPads.length; ii++)
-    out.set(imgPads[ii], SS + imgSecs[ii] * SS);
+  let outOff = 0;
+
+  // 1. Header (Sector -1)
+  out.set(hdr, outOff);
+  outOff += SS;
+
+  // 2. FAT sectors
+  out.set(fatBuf, outOff);
+  outOff += fatN * SS;
+
+  // 3. Directory sectors
+  out.set(dirBuf, outOff);
+  outOff += dirN * SS;
+
+  // 4. Mini FAT sectors
+  if (miniFatN > 0) {
+    out.set(miniFatBuf, outOff);
+    outOff += miniFatN * SS;
+  }
+
+  // 5. Mini Stream sectors (Root Entry Data)
+  if (miniStreamN > 0) {
+    const miniStreamPad = new Uint8Array(miniStreamN * SS);
+    miniStreamPad.set(miniStreamData);
+    out.set(miniStreamPad, outOff);
+    outOff += miniStreamN * SS;
+  }
+
+  // 6. Regular Streams sectors
+  for (let i = 0; i < regularStreams.length; i++) {
+    out.set(regPads[i], outOff);
+    outOff += regNs[i] * SS;
+  }
+
   return out;
 }
 

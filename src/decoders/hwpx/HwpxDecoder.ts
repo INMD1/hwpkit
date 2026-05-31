@@ -1028,6 +1028,16 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
   const gridProps: GridProps = { headerRow: headerRow || undefined };
   if (borderFill?.stroke) gridProps.defaultStroke = borderFill.stroke;
 
+  // 표 정렬 — <hp:pos horzAlign="..."> 에서 읽음 (OWPML CAbstractShapeObjectType)
+  const posAttr = tbl?.["hp:pos"]?.[0]?._attr ?? {};
+  if (posAttr.horzAlign) {
+    const alignMap: Record<string, "left" | "right" | "center" | "justify"> = {
+      LEFT: "left", RIGHT: "right", CENTER: "center", JUSTIFY: "justify",
+    };
+    const a = alignMap[posAttr.horzAlign];
+    if (a) gridProps.align = a;
+  }
+
   const rowArr = getTag(tbl, "hp:tr", "hp:ROW");
 
   // Read column widths: first try a row where ALL cells have cs=1
@@ -1112,7 +1122,7 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
         cellProps.right = cellBf.right ?? cellBf.stroke;
       }
 
-      // Vertical alignment and cell padding from subList
+      // 수직 정렬 — <hp:subList vertAlign="..."> (OWPML CParaListType::GetVertAlign)
       const subList = cell?.["hp:subList"]?.[0] ?? cell?.subList?.[0];
       const subAttr = subList?._attr ?? {};
       if (subAttr.vertAlign) {
@@ -1123,17 +1133,18 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
         };
         cellProps.va = vaMap[subAttr.vertAlign];
       }
-      // Cell margins (stored in HWPUNIT on subList attributes)
-      const HWPX_DEFAULT_MARGIN_LR = 360; // typical default: 3.6pt
-      const HWPX_DEFAULT_MARGIN_TB = 141; // typical default: ~1.4pt
-      const mL = Number(subAttr.marginLeft ?? HWPX_DEFAULT_MARGIN_LR);
-      const mR = Number(subAttr.marginRight ?? HWPX_DEFAULT_MARGIN_LR);
-      const mT = Number(subAttr.marginTop ?? HWPX_DEFAULT_MARGIN_TB);
-      const mB = Number(subAttr.marginBottom ?? HWPX_DEFAULT_MARGIN_TB);
-      if (mL !== HWPX_DEFAULT_MARGIN_LR) cellProps.padL = Metric.hwpToPt(mL);
-      if (mR !== HWPX_DEFAULT_MARGIN_LR) cellProps.padR = Metric.hwpToPt(mR);
-      if (mT !== HWPX_DEFAULT_MARGIN_TB) cellProps.padT = Metric.hwpToPt(mT);
-      if (mB !== HWPX_DEFAULT_MARGIN_TB) cellProps.padB = Metric.hwpToPt(mB);
+      // 셀 여백 — <hp:cellMargin left/right/top/bottom> (OWPML CTc::SetcellMargin)
+      // subList 속성이 아닌 <hp:cellMargin> 자식 요소에서 읽어야 함
+      const cellMarginAttr =
+        cell?.["hp:cellMargin"]?.[0]?._attr ?? {};
+      const mL = cellMarginAttr.left !== undefined ? Number(cellMarginAttr.left) : -1;
+      const mR = cellMarginAttr.right !== undefined ? Number(cellMarginAttr.right) : -1;
+      const mT = cellMarginAttr.top !== undefined ? Number(cellMarginAttr.top) : -1;
+      const mB = cellMarginAttr.bottom !== undefined ? Number(cellMarginAttr.bottom) : -1;
+      if (mL >= 0) cellProps.padL = Metric.hwpToPt(mL);
+      if (mR >= 0) cellProps.padR = Metric.hwpToPt(mR);
+      if (mT >= 0) cellProps.padT = Metric.hwpToPt(mT);
+      if (mB >= 0) cellProps.padB = Metric.hwpToPt(mB);
 
       // Colspan/rowspan from cellSpan element or attributes
       const cellSpan = cell?.["hp:cellSpan"]?.[0]?._attr ?? {};

@@ -1,4 +1,4 @@
-export type Align = 'left' | 'center' | 'right' | 'justify';
+export type Align = 'left' | 'center' | 'right' | 'justify' | 'distribute' | 'distribute_space';
 
 // ─── 이미지 배치 ────────────────────────────────────────────
 export type ImgWrap = 'inline' | 'square' | 'tight' | 'through' | 'none' | 'behind' | 'front' | 'topAndBottom';
@@ -37,9 +37,7 @@ export interface TextProps {
   pt?: number;
   color?: string;
   bg?: string;
-}
-
-export interface ParaProps {
+}export interface ParaProps {
   align?: Align;
   heading?: Heading;
   styleId?: string;              // DOCX pStyle styleId (e.g. "Heading1", "TOC1")
@@ -54,8 +52,9 @@ export interface ParaProps {
   listLv?: number;
   listOrd?: boolean;
   listMark?: string;
+  verAlign?: 'baseline' | 'top' | 'center' | 'bottom';
+  lineWrap?: 'break' | 'squeeze' | 'keep';
 }
-
 export interface Stroke {
   kind: StrokeKind;
   pt: number;

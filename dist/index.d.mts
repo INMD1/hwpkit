@@ -1,4 +1,4 @@
-type Align = 'left' | 'center' | 'right' | 'justify';
+type Align = 'left' | 'center' | 'right' | 'justify' | 'distribute' | 'distribute_space';
 type ImgWrap = 'inline' | 'square' | 'tight' | 'through' | 'none' | 'behind' | 'front' | 'topAndBottom';
 type ImgHorzAlign = 'left' | 'center' | 'right';
 type ImgVertAlign = 'top' | 'center' | 'bottom';
@@ -49,6 +49,8 @@ interface ParaProps {
     listLv?: number;
     listOrd?: boolean;
     listMark?: string;
+    verAlign?: 'baseline' | 'top' | 'center' | 'bottom';
+    lineWrap?: 'break' | 'squeeze' | 'keep';
 }
 interface Stroke {
     kind: StrokeKind;
