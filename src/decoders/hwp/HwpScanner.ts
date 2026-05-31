@@ -66,16 +66,18 @@ interface HwpCharShape {
   subscript: boolean;
   textColor: string;
 }
-
 interface HwpParaShape {
   align: Align;
   spaceBefore: number;
   spaceAfter: number;
   lineSpacing: number;
+  lineSpacingType: 0 | 1 | 2 | 3; // 0=PERCENT, 1=FIXED, 2=BETWEEN_LINES, 3=AT_LEAST
   leftMargin: number;
+  rightMargin: number;
   indent: number;
+  verAlign?: 'baseline' | 'top' | 'center' | 'bottom';
+  lineWrap?: 'break' | 'squeeze' | 'keep';
 }
-
 interface HwpBorderFill {
   borders: { type: number; widthPt: number; color: string }[];
   bgColor?: string;
@@ -213,7 +215,7 @@ function parseCharShape(d: Uint8Array): HwpCharShape {
 
 /* ── PARA_SHAPE ─────────────────────────────────────────────── */
 /*  offset  size  field
-    0       4     attr1   (bits 0-1 = alignment: 0=justify,1=left,2=right,3=center)
+    0       4     attr1   (bits 0-1 = line spacing type, bits 2-4 = alignment)
     4       4     leftMargin   (HWPUNIT)
     8       4     rightMargin
     12      4     indent
@@ -221,18 +223,36 @@ function parseCharShape(d: Uint8Array): HwpCharShape {
     20      4     spaceAfter
     24      4     lineSpacing                                         */
 
-const ALIGN_TBL: Record<number, Align> = { 0: 'justify', 1: 'left', 2: 'right', 3: 'center', 4: 'justify' };
+const ALIGN_TBL: Record<number, Align> = { 0: 'justify', 1: 'left', 2: 'right', 3: 'center', 4: 'distribute', 5: 'distribute_space' };
 
 function parseParaShape(d: Uint8Array): HwpParaShape {
-  if (d.length < 4) return { align: 'left', spaceBefore: 0, spaceAfter: 0, lineSpacing: 160, leftMargin: 0, indent: 0 };
+  if (d.length < 4) return { align: 'left', spaceBefore: 0, spaceAfter: 0, lineSpacing: 160, lineSpacingType: 0, leftMargin: 0, rightMargin: 0, indent: 0 };
   const attr = BinaryKit.readU32LE(d, 0);
+
+  // bits 0-1: 줄 간격 종류 (0=PERCENT, 1=FIXED, 2=BETWEEN_LINES, 3=AT_LEAST)
+  const lineSpacingType = (attr & 0x3) as 0 | 1 | 2 | 3;
+
+  // bits 2-4: 정렬 방식 (0=justify,1=left,2=right,3=center,4=distribute,5=split)
+  const align = ALIGN_TBL[(attr >> 2) & 0x7] ?? 'left';
+
+  // 세로 정렬 (Bit 18 ~ Bit 19)
+  const vVal = (attr >> 18) & 0x3;
+  const verAlign = vVal === 1 ? 'top' : vVal === 2 ? 'center' : vVal === 3 ? 'bottom' : 'baseline';
+
+  // 줄 바꿈 기준: attr1 에는 별도 비트 없음, 기본값 'break'
+  const lineWrap: 'break' = 'break';
+
   return {
-    align:       ALIGN_TBL[(attr >> 2) & 0x7] ?? 'left',
-    leftMargin:  d.length >= 8  ? i32(d, 4)  : 0,  // offset 4: leftMargin (들여쓰기)
-    indent:      d.length >= 16 ? i32(d, 12) : 0,  // offset 12: first-line indent
+    align,
+    lineSpacingType,
+    leftMargin:  d.length >= 8  ? i32(d, 4)  : 0,  // offset 4: 문단 몸체 왼쪽 여백 (HWPUNIT)
+    rightMargin: d.length >= 12 ? i32(d, 8)  : 0,  // offset 8: 문단 몸체 오른쪽 여백 (HWPUNIT)
+    indent:      d.length >= 16 ? i32(d, 12) : 0,  // offset 12: 첫 줄 들여쓰기 (HWPUNIT)
     spaceBefore: d.length >= 20 ? i32(d, 16) : 0,
     spaceAfter:  d.length >= 24 ? i32(d, 20) : 0,
     lineSpacing: d.length >= 28 ? i32(d, 24) : 160,
+    verAlign,
+    lineWrap,
   };
 }
 
@@ -384,18 +404,21 @@ function parseParagraphGroup(
 
   const nodes: ContentNode[] = [];
 
-  // Build paragraph from text and inline controls (images)
-  if (text && (text.chars.length > 0 || text.controls.length > 0)) {
+  // Build paragraph from text/inline controls.
+  // Emit empty paragraphs too (preserve para_shape alignment/spacing),
+  // UNLESS this paragraph only contains a table — in that case the grid
+  // itself carries the para_shape and a preceding empty para is wrong.
+  {
     const paraContent: (SpanNode | ContentNode)[] = [];
 
-    if (text.chars.length > 0) {
+    if (text && text.chars.length > 0) {
       const spans = resolveCharShapes(text.chars, csPairs, di);
       paraContent.push(...spans);
     }
 
     // Image placeholder spans: only for actual image controls.
     // Non-image controls (footnotes, TOC entries, etc.) are silently skipped.
-    if (text.controls.length > 0) {
+    if (text && text.controls.length > 0) {
       for (let ci = 0; ci < text.controls.length; ci++) {
         const ch = ctrlHeaders[ci];
         if (!ch) continue; // anchor-only ctrl (gso is sibling, not inline)
@@ -408,8 +431,14 @@ function parseParagraphGroup(
       }
     }
 
-    if (paraContent.length > 0) {
-      nodes.push(buildPara(paraContent as any, buildParaProps(ps)));
+    // Emit paragraph if: has visible content, OR is a clean empty paragraph
+    // (no grids, no ctrl headers at all — i.e. not a CTRL_SECD/section carrier)
+    const isCleanEmpty = paraContent.length === 0 && grids.length === 0 && ctrlHeaders.length === 0;
+    if (paraContent.length > 0 || isCleanEmpty) {
+      nodes.push(buildPara(
+        paraContent.length > 0 ? paraContent as any : [buildSpan('')],
+        buildParaProps(ps),
+      ));
     }
   }
 
@@ -858,7 +887,7 @@ function parseCellRec(
 
 /* ── PAGE_DEF ───────────────────────────────────────────────── */
 /*  [0:4] width  [4:4] height  [8:4] ml  [12:4] mr
-    [16:4] mt  [20:4] mb  [36:4] attr (bit0=landscape)           */
+    [16:4] mt  [20:4] mb  [24:4] header  [28:4] footer  [36:4] attr (bit0=landscape) */
 
 function parsePageDef(d: Uint8Array): PageDims {
   if (d.length < 24) return A4;
@@ -868,11 +897,15 @@ function parsePageDef(d: Uint8Array): PageDims {
   const mr = BinaryKit.readU32LE(d, 12);
   const mt = BinaryKit.readU32LE(d, 16);
   const mb = BinaryKit.readU32LE(d, 20);
+  const header = d.length >= 28 ? BinaryKit.readU32LE(d, 24) : 0;
+  const footer = d.length >= 32 ? BinaryKit.readU32LE(d, 28) : 0;
   const at = d.length >= 40 ? BinaryKit.readU32LE(d, 36) : 0;
   return {
     wPt: Metric.hwpToPt(w),  hPt: Metric.hwpToPt(h),
     ml: Metric.hwpToPt(ml),  mr: Metric.hwpToPt(mr),
     mt: Metric.hwpToPt(mt),  mb: Metric.hwpToPt(mb),
+    headerPt: header > 0 ? Metric.hwpToPt(header) : undefined,
+    footerPt: footer > 0 ? Metric.hwpToPt(footer) : undefined,
     orient: (at & 1) ? 'landscape' : 'portrait',
   };
 }
@@ -921,12 +954,22 @@ function buildParaProps(ps?: HwpParaShape): ParaProps {
   if (ps.align && ps.align !== 'left') p.align = ps.align;
   if (ps.spaceBefore > 0) p.spaceBefore = Metric.hwpToPt(ps.spaceBefore);
   if (ps.spaceAfter > 0)  p.spaceAfter  = Metric.hwpToPt(ps.spaceAfter);
-  if (ps.lineSpacing > 0 && ps.lineSpacing !== 160) p.lineHeight = ps.lineSpacing / 100;
+  // 줄 간격: type=0(PERCENT) → lineHeight, type=1(FIXED) → lineHeightFixed
+  if (ps.lineSpacingType === 1) {
+    if (ps.lineSpacing > 0) p.lineHeightFixed = Metric.hwpToPt(ps.lineSpacing);
+  } else {
+    if (ps.lineSpacing > 0 && ps.lineSpacing !== 160) p.lineHeight = ps.lineSpacing / 100;
+  }
   // leftMargin (offset 4) = 문단 몸체 왼쪽 여백 → leftMargin (pt), ensure non-negative
   const leftMarginPt = Math.max(0, Metric.hwpToPt(ps.leftMargin));
   if (leftMarginPt > 0) p.leftMargin = leftMarginPt;
+  // rightMargin (offset 8) = 문단 몸체 오른쪽 여백 → indentRightPt (pt)
+  const rightMarginPt = Math.max(0, Metric.hwpToPt(ps.rightMargin));
+  if (rightMarginPt > 0) p.indentRightPt = rightMarginPt;
   // indent (offset 12) = 첫 줄 들여쓰기(양수) / 내어쓰기(음수) → firstLineIndentPt
   if (ps.indent !== 0) p.firstLineIndentPt = Metric.hwpToPt(ps.indent);
+  if (ps.verAlign && ps.verAlign !== 'baseline') p.verAlign = ps.verAlign;
+  if (ps.lineWrap && ps.lineWrap !== 'break') p.lineWrap = ps.lineWrap;
   return p;
 }
 

@@ -53,7 +53,6 @@ const NS = [
   'xmlns:ooxmlchart="http://www.hancom.co.kr/hwpml/2016/ooxmlchart"',
   'xmlns:epub="http://www.idpf.org/2007/ops"',
   'xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"',
-  'xmlns:hwpunitchar="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar"',
 ].join(" ");
 
 // ─── LinesegArray Flags 상수 (HWPX 스펙) ─────────────────
@@ -173,6 +172,31 @@ const KIND_MAP: Record<string, string> = {
   dash_dot_dot: "DASH_DOT_DOT",
 };
 
+/**
+ * 테두리 선 굵기 mm 값을 한글 표준 규격 리스트 중 가장 가까운 값으로 매핑(양자화)합니다.
+ */
+function quantizeBorderWidth(pt: number): string {
+  const mm = pt * 0.3528;
+  const standardWidths = [0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
+  let closest = standardWidths[0];
+  let minDiff = Math.abs(mm - closest);
+  for (let i = 1; i < standardWidths.length; i++) {
+    const diff = Math.abs(mm - standardWidths[i]);
+    if (diff < minDiff) {
+      minDiff = diff;
+      closest = standardWidths[i];
+    }
+  }
+  let str = closest.toFixed(2);
+  if (str.endsWith("0")) {
+    str = str.slice(0, -1);
+  }
+  if (str.endsWith(".0")) {
+    str = str.slice(0, -2);
+  }
+  return `${str} mm`;
+}
+
 class BorderFillBank {
   private fills: { id: number; xml: string }[] = [];
   private keyMap = new Map<string, number>();
@@ -191,7 +215,7 @@ class BorderFillBank {
     const type =
       s && s.kind !== "none" ? (KIND_MAP[s.kind] ?? "SOLID") : "NONE";
     const w =
-      s && s.kind !== "none" ? `${(s.pt * 0.3528).toFixed(2)} mm` : "0.12 mm";
+      s && s.kind !== "none" ? quantizeBorderWidth(s.pt) : "0.12 mm";
     const c = s
       ? s.color.startsWith("#")
         ? s.color
@@ -347,7 +371,6 @@ interface CharPrDef {
   latinId: number; // LATIN 그룹 폰트 ID
   bg?: string;
 }
-
 interface ParaPrDef {
   id: number;
   align: string;
@@ -357,10 +380,12 @@ interface ParaPrDef {
   prevHwp: number;
   nextHwp: number;
   lineSpacing: number;
+  lineSpacingFixed?: number; // HWPUNIT, type=FIXED
   listType?: string;
   listLevel?: number;
+  verAlign?: string;
+  lineWrap?: string;
 }
-
 interface StyleEntry {
   id: number;
   name: string;
@@ -384,7 +409,7 @@ function charPrKey(p: TextProps): string {
  * null/undefined는 0 으로 처리하여 일관성 유지
  */
 function paraPrKey(p: ParaProps): string {
-  return `${p.align ?? "left"}|${p.listOrd ?? ""}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.firstLineIndentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}|${p.styleId ?? ""}`;
+  return `${p.align ?? "left"}|${p.verAlign ?? "baseline"}|${p.lineWrap ?? "break"}|${p.listOrd ?? ""}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.leftMargin ?? 0}|${p.indentRightPt ?? 0}|${p.firstLineIndentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}|${p.lineHeightFixed ?? 0}|${p.styleId ?? ""}`;
 }
 
 // ─── 인코딩 컨텍스트 ─────────────────────────────────────────
@@ -431,21 +456,51 @@ function registerCharPr(props: TextProps, ctx: HwpxCtx): number {
   return id;
 }
 
+const ALIGN_MAP: Record<string, string> = {
+  left: "LEFT",
+  center: "CENTER",
+  right: "RIGHT",
+  justify: "JUSTIFY",
+  distribute: "DISTRIBUTE",
+  distribute_space: "DISTRIBUTE_SPACE",
+};
+
+const V_ALIGN_MAP: Record<string, string> = {
+  baseline: "BASELINE",
+  top: "TOP",
+  center: "CENTER",
+  bottom: "BOTTOM",
+};
+
+const LINE_WRAP_MAP: Record<string, string> = {
+  break: "BREAK",
+  squeeze: "SQUEEZE",
+  keep: "KEEP",
+};
+
 function registerParaPr(props: ParaProps, ctx: HwpxCtx): number {
   const key = paraPrKey(props);
   const existing = ctx.paraPrMap.get(key);
   if (existing !== undefined) return existing;
 
   const id = ctx.paraPrs.length;
+
+  const alignStr = props.align ? (ALIGN_MAP[props.align] ?? "LEFT") : "LEFT";
+  const verAlignStr = props.verAlign ? (V_ALIGN_MAP[props.verAlign] ?? "BASELINE") : "BASELINE";
+  const lineWrapStr = props.lineWrap ? (LINE_WRAP_MAP[props.lineWrap] ?? "BREAK") : "BREAK";
+
   const def: ParaPrDef = {
     id,
-    align: (props.align ?? "left").toUpperCase(),
-    leftHwp: Metric.ptToHwp(props.indentPt ?? 0),
+    align: alignStr,
+    verAlign: verAlignStr,
+    lineWrap: lineWrapStr,
+    leftHwp: Metric.ptToHwp(props.leftMargin ?? 0),
     rightHwp: Metric.ptToHwp(props.indentRightPt ?? 0),
     intentHwp: Metric.ptToHwp(props.firstLineIndentPt ?? 0),
     prevHwp: Metric.ptToHwp(props.spaceBefore ?? 0),
     nextHwp: Metric.ptToHwp(props.spaceAfter ?? 0),
-    lineSpacing: props.lineHeight ? Math.round(props.lineHeight * 100) : 160,
+    lineSpacing: props.lineHeightFixed ? 0 : (props.lineHeight ? Math.round(props.lineHeight * 100) : 160),
+    lineSpacingFixed: props.lineHeightFixed ? Metric.ptToHwp(props.lineHeightFixed) : undefined,
   };
   if (props.listOrd !== undefined) {
     def.listType = props.listOrd ? "DIGIT" : "BULLET";
@@ -571,8 +626,8 @@ export class HwpxEncoder extends BaseEncoder {
       const sheet = doc.kids[0];
       const dims = normalizeDims(sheet?.dims ?? A4);
 
-      const safeML = dims.ml > 0 ? dims.ml : 70.87;
-      const safeMR = dims.mr > 0 ? dims.mr : 70.87;
+      const safeML = (dims.ml !== undefined && dims.ml >= 0) ? dims.ml : 70.87;
+      const safeMR = (dims.mr !== undefined && dims.mr >= 0) ? dims.mr : 70.87;
       const availableWidth = Math.round(
         Metric.ptToHwp(dims.wPt) -
           Metric.ptToHwp(safeML) -
@@ -639,11 +694,6 @@ export class HwpxEncoder extends BaseEncoder {
           mime: "application/xml",
         },
         {
-          name: "META-INF/container.rdf",
-          data: this.stringToBytes(CONTAINER_RDF),
-          mime: "application/rdf+xml",
-        },
-        {
           name: "META-INF/manifest.xml",
           data: this.stringToBytes(MANIFEST_XML),
           mime: "application/xml",
@@ -697,12 +747,14 @@ export class HwpxEncoder extends BaseEncoder {
 
 // ─── 상수 XML ────────────────────────────────────────────────
 
+// namespace: 실제 HWP가 기대하는 2011 버전 네임스페이스 사용 (owpml.org/2024는 열리지 않음)
 const VERSION_XML =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
   `<hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" ` +
-  `targetApplication="WORDPROCESSING" major="5" minor="1" micro="0" buildNumber="1" ` +
-  `os="1" xmlVersion="1.4" application="Hancom Office Hangul" appVersion="11, 0, 0, 0"/>`;
+  `tagetApplication="WORDPROCESSOR" major="5" minor="0" micro="5" buildNumber="0" ` +
+  `os="1" xmlVersion="1.4" application="Hancom Office Hangul" appVersion="9, 6, 1, 10097"/>`;
 
+// container.rdf rootfile 항목 제거 — 실제 HWPX 파일 구조와 일치
 const CONTAINER_XML =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
   `<ocf:container xmlns:ocf="urn:oasis:names:tc:opendocument:xmlns:container" ` +
@@ -710,19 +762,9 @@ const CONTAINER_XML =
   `<ocf:rootfiles>` +
   `<ocf:rootfile full-path="Contents/content.hpf" media-type="application/hwpml-package+xml"/>` +
   `<ocf:rootfile full-path="Preview/PrvText.txt" media-type="text/plain"/>` +
-  `<ocf:rootfile full-path="META-INF/container.rdf" media-type="application/rdf+xml"/>` +
   `</ocf:rootfiles></ocf:container>`;
 
-const CONTAINER_RDF =
-  `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
-  `<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">` +
-  `<rdf:Description rdf:about=""><ns0:hasPart xmlns:ns0="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/header.xml"/></rdf:Description>` +
-  `<rdf:Description rdf:about="Contents/header.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#HeaderFile"/></rdf:Description>` +
-  `<rdf:Description rdf:about=""><ns0:hasPart xmlns:ns0="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/section0.xml"/></rdf:Description>` +
-  `<rdf:Description rdf:about="Contents/section0.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#SectionFile"/></rdf:Description>` +
-  `<rdf:Description rdf:about=""><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#Document"/></rdf:Description>` +
-  `</rdf:RDF>`;
-
+// HWPX 파일은 container.rdf 대신 manifest.xml(빈 ODF 매니페스트) 사용
 const MANIFEST_XML =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
   `<odf:manifest xmlns:odf="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"/>`;
@@ -823,6 +865,73 @@ function buildBulletsXml(): string {
 
 // ─── header.xml ──────────────────────────────────────────────
 
+/**
+ * Contents/header.xml 용 전역 구역 설정 리스트(secPrList)를 생성합니다.
+ */
+/**
+ * 페이지 여백 (margin) 과 헤더/푸터 영역 (zone) 을 계산합니다.
+ * HWPX spec 에서는 pagePr > margin 의 header/footer 가 헤더/푸터 영역의 높이 (zone height) 입니다.
+ * - headerZone: 용지 상단에서 헤더 영역 상단까지의 거리 (headerPt 가 없으면 0)
+ * - footerZone: 용지 하단에서 푸터 영역 하단까지의 거리 (footerPt 가 없으면 0)
+ * - mt/mb: 용지 상단/하단에서 본문 영역 상단/하단까지의 거리
+ */
+function buildHeaderSecPrListXml(dims: PageDims): string {
+  const wHwp = Metric.ptToHwp(dims.wPt);
+  const hHwp = Metric.ptToHwp(dims.hPt);
+  const ml = Metric.ptToHwp(dims.ml);
+  const mr = Metric.ptToHwp(dims.mr);
+  const mt = Metric.ptToHwp(dims.mt);
+  const mb = Metric.ptToHwp(dims.mb);
+
+  // 헤더/푸터 영역 높이 계산 (HWPX 는 zone height 를 직접 지정)
+  // headerPt 가 설정되어 있으면 그 값을 zone height 로 사용, 없으면 0 으로 설정
+  const headerZone = dims.headerPt !== undefined && dims.headerPt > 0
+    ? Metric.ptToHwp(dims.headerPt)
+    : 0;
+  const footerZone = dims.footerPt !== undefined && dims.footerPt > 0
+    ? Metric.ptToHwp(dims.footerPt)
+    : 0;
+
+  const pageBorderFill =
+    `<hh:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER">` +
+    `<hh:offset left="1417" right="1417" top="1417" bottom="1417"/>` +
+    `</hh:pageBorderFill>` +
+    `<hh:pageBorderFill type="EVEN" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER">` +
+    `<hh:offset left="1417" right="1417" top="1417" bottom="1417"/>` +
+    `</hh:pageBorderFill>` +
+    `<hh:pageBorderFill type="ODD" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER">` +
+    `<hh:offset left="1417" right="1417" top="1417" bottom="1417"/>` +
+    `</hh:pageBorderFill>`;
+
+  return (
+    `<hh:secPrList itemCnt="1">` +
+    `<hh:secPr id="0" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">` +
+    `<hh:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/>` +
+    `<hh:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/>` +
+    `<hh:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/>` +
+    `<hh:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/>` +
+    `<hh:pagePr landscape="WIDELY" width="${wHwp}" height="${hHwp}" gutterType="LEFT_ONLY">` +
+    `<hh:margin header="${headerZone}" footer="${footerZone}" gutter="0" left="${ml}" right="${mr}" top="${mt}" bottom="${mb}"/>` +
+    `</hh:pagePr>` +
+    `<hh:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/>` +
+    `<hh:footNotePr><hh:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar="" supscript="1"/>` +
+    `<hh:noteLine length="-1" type="SOLID" width="0.25 mm" color="#000000"/>` +
+    `<hh:noteSpacing betweenNotes="283" belowLine="0" aboveLine="1000"/>` +
+    `<hh:numbering type="CONTINUOUS" newNum="1"/>` +
+    `<hh:placement place="EACH_COLUMN" beneathText="0"/>` +
+    `</hh:footNotePr>` +
+    `<hh:endNotePr><hh:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar="" supscript="1"/>` +
+    `<hh:noteLine length="-1" type="SOLID" width="0.25 mm" color="#000000"/>` +
+    `<hh:noteSpacing betweenNotes="0" belowLine="0" aboveLine="1000"/>` +
+    `<hh:numbering type="CONTINUOUS" newNum="1"/>` +
+    `<hh:placement place="END_OF_DOCUMENT" beneathText="0"/>` +
+    `</hh:endNotePr>` +
+    pageBorderFill +
+    `</hh:secPr>` +
+    `</hh:secPrList>`
+  );
+}
+
 function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
   // 언어별 폰트 (LangFontBank → XML)
   const fontFacesXml = ctx.fontBank.toXml();
@@ -852,14 +961,18 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
       `</hh:charPr>`;
   }
 
-  // paraPr 목록
+  // paraPr 목록 (동적 정렬 및 줄바꿈 적용)
   let paraPrXml = "";
   for (const pp of ctx.paraPrs) {
+    const ver = pp.verAlign ?? "BASELINE";
+    const wrap = pp.lineWrap ?? "BREAK";
+    const lsType = pp.lineSpacingFixed !== undefined ? "FIXED" : "PERCENT";
+    const lsValue = pp.lineSpacingFixed !== undefined ? pp.lineSpacingFixed : pp.lineSpacing;
     paraPrXml +=
       `<hh:paraPr id="${pp.id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="0" suppressLineNumbers="0" checked="0">` +
-      `<hh:align horizontal="${pp.align}" vertical="BASELINE"/>` +
+      `<hh:align horizontal="${pp.align}" vertical="${ver}"/>` +
       `<hh:heading type="NONE" idRef="0" level="0"/>` +
-      `<hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="BREAK_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/>` +
+      `<hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="${wrap}"/>` +
       `<hh:autoSpacing eAsianEng="0" eAsianNum="0"/>` +
       `<hh:margin>` +
       `<hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/>` +
@@ -868,7 +981,7 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
       `<hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/>` +
       `<hc:next value="${pp.nextHwp}" unit="HWPUNIT"/>` +
       `</hh:margin>` +
-      `<hh:lineSpacing type="PERCENT" value="${pp.lineSpacing}" unit="HWPUNIT"/>` +
+      `<hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/>` +
       `<hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/>` +
       `</hh:paraPr>`;
   }
@@ -902,45 +1015,8 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
     `<hh:paraProperties itemCnt="${ctx.paraPrs.length}">${paraPrXml}</hh:paraProperties>` +
     stylesXml +
     `</hh:refList>` +
-    `<hh:compatibleDocument targetProgram="MS_WORD">        
-          <hh:layoutCompatibility>
-            <hh:applyFontWeightToBold />
-            <hh:useInnerUnderline />
-            <hh:useLowercaseStrikeout />
-            <hh:extendLineheightToOffset />
-            <hh:treatQuotationAsLatin />
-            <hh:doNotAlignWhitespaceOnRight />
-            <hh:doNotAdjustWordInJustify />
-            <hh:baseCharUnitOnEAsian />
-            <hh:baseCharUnitOfIndentOnFirstChar />
-            <hh:adjustLineheightToFont />
-            <hh:adjustBaselineInFixedLinespacing />
-            <hh:applyPrevspacingBeneathObject />
-            <hh:applyNextspacingOfLastPara />
-            <hh:adjustParaBorderfillToSpacing />
-            <hh:connectParaBorderfillOfEqualBorder />
-            <hh:adjustParaBorderOffsetWithBorder />
-            <hh:extendLineheightToParaBorderOffset />
-            <hh:applyParaBorderToOutside />
-            <hh:applyMinColumnWidthTo1mm />
-            <hh:applyTabPosBasedOnSegment />
-            <hh:breakTabOverLine />
-            <hh:adjustVertPosOfLine />
-            <hh:doNotAlignLastForbidden />
-            <hh:adjustMarginFromAdjustLineheight />
-            <hh:baseLineSpacingOnLineGrid />
-            <hh:applyCharSpacingToCharGrid />
-            <hh:doNotApplyGridInHeaderFooter />
-            <hh:applyExtendHeaderFooterEachSection />
-            <hh:doNotApplyLinegridAtNoLinespacing />
-            <hh:doNotAdjustEmptyAnchorLine />
-            <hh:overlapBothAllowOverlap />
-            <hh:extendVertLimitToPageMargins />
-            <hh:doNotHoldAnchorOfTable />
-            <hh:doNotFormattingAtBeneathAnchor />
-            <hh:adjustBaselineOfObjectToBottom />
-        </hh:layoutCompatibility>
-    </hh:compatibleDocument>` +
+    buildHeaderSecPrListXml(dims) +
+    `<hh:compatibleDocument targetProgram="HWP201X"><hh:layoutCompatibility/></hh:compatibleDocument>` +
     `<hh:docOption><hh:linkinfo path="" pageInherit="0" footnoteInherit="0"/></hh:docOption>` +
     `<hh:trackchageConfig flags="56"/>` +
     `</hh:head>`
@@ -962,8 +1038,8 @@ function buildHeaderFooterRunXml(
   const availW = ctx.availableWidth;
   const mtHwp = Metric.ptToHwp(dims.mt);
   const mbHwp = Metric.ptToHwp(dims.mb);
-  const headerZoneH = dims.headerPt ? Math.max(100, mtHwp - Metric.ptToHwp(dims.headerPt)) : 3600;
-  const footerZoneH = dims.footerPt ? Math.max(100, mbHwp - Metric.ptToHwp(dims.footerPt)) : 3600;
+  const headerZoneH = dims.headerPt ? Metric.ptToHwp(dims.headerPt) : 4252; // 기본값 15mm
+  const footerZoneH = dims.footerPt ? Metric.ptToHwp(dims.footerPt) : 4252; // 기본값 15mm
 
   let inner = "";
 
@@ -973,6 +1049,7 @@ function buildHeaderFooterRunXml(
 
   // 2. 헤더들 생성
   for (const [type, paras] of Object.entries(headers)) {
+    if (!Array.isArray(paras) || paras.length === 0) continue;
     const applyPageType = type === "even" ? "EVEN" : (type === "default" || type === "first" ? "BOTH" : "ODD");
     const savedId = ctx.nextElementId;
     ctx.nextElementId = 0;
@@ -992,6 +1069,7 @@ function buildHeaderFooterRunXml(
 
   // 3. 푸터들 생성
   for (const [type, paras] of Object.entries(footers)) {
+    if (!Array.isArray(paras) || paras.length === 0) continue;
     const applyPageType = type === "even" ? "EVEN" : (type === "default" || type === "first" ? "BOTH" : "ODD");
     const savedId = ctx.nextElementId;
     ctx.nextElementId = 0;
@@ -1034,11 +1112,12 @@ function buildSectionXml(
   for (let i = 0; i < kids.length; i++) {
     const kid = kids[i];
     const isFirst = i === 0;
-    const curSecPr = isFirst ? secPrXml : "";
+    // secPr은 hs:sec 하위에 직접 기입하므로 문단 내에는 기입하지 않습니다.
+    const curSecPr = "";
     const curHfRun = isFirst ? hfRunXml : "";
 
     if (kid.tag === "para") {
-      const { xml, nextVertPos } = encodeParaPositioned(
+      const { xml, nextVertPos, hasPageBreak } = encodeParaPositioned(
         kid,
         ctx,
         vertPos,
@@ -1047,9 +1126,9 @@ function buildSectionXml(
         curHfRun,
       );
       contentXml += xml;
-      vertPos = nextVertPos;
+      vertPos = nextVertPos; // 페이지 브레이크 발생 시에도 누적 절대 좌표 유지
     } else if (kid.tag === "grid") {
-      const { xml, nextVertPos } = encodeGridPositioned(
+      const { xml, nextVertPos, hasPageBreak } = encodeGridPositioned(
         kid,
         ctx,
         vertPos,
@@ -1057,7 +1136,7 @@ function buildSectionXml(
         curHfRun,
       );
       contentXml += xml;
-      vertPos = nextVertPos;
+      vertPos = nextVertPos; // 페이지 브레이크 발생 시에도 누적 절대 좌표 유지
     }
   }
 
@@ -1068,14 +1147,14 @@ function buildSectionXml(
     const { xml: linesegXml } = buildLinesegarray(" ", 0, fs, vs / (fs / 100), availWidth);
     contentXml =
       `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0" paraTcId="0">` +
-      secPrXml +
       hfRunXml +
       `<hp:run charPrIDRef="0" charTcId="0"><hp:t xml:space="preserve"> </hp:t></hp:run>` +
       linesegXml +
       `</hp:p>`;
   }
 
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hs:sec ${NS}>${contentXml}</hs:sec>`;
+  // hs:sec 바로 아래 직계 첫 자식으로 secPrXml 기입!
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hs:sec ${NS} xmlns:hwpunitchar="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">${secPrXml}${contentXml}</hs:sec>`;
 }
 
 function buildSecPrXml(dims: PageDims): string {
@@ -1087,12 +1166,8 @@ function buildSecPrXml(dims: PageDims): string {
   const mb = Metric.ptToHwp(dims.mb);
   // HWPX margin header/footer = header/footer ZONE HEIGHT (not distance from paper edge)
   // = top_hwp - header_from_top_hwp  (and  bottom_hwp - footer_from_bottom_hwp)
-  const headerZone = dims.headerPt
-    ? Math.max(0, mt - Metric.ptToHwp(dims.headerPt))
-    : 0;
-  const footerZone = dims.footerPt
-    ? Math.max(0, mb - Metric.ptToHwp(dims.footerPt))
-    : 0;
+  const headerZone = dims.headerPt ? Metric.ptToHwp(dims.headerPt) : 0;
+  const footerZone = dims.footerPt ? Metric.ptToHwp(dims.footerPt) : 0;
 
   const pageBorderFill =
     `<hp:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER">` +
@@ -1111,7 +1186,7 @@ function buildSecPrXml(dims: PageDims): string {
     `<hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/>` +
     `<hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/>` +
     `<hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/>` +
-    `<hp:pagePr landscape="${dims.wPt >= dims.hPt ? 'WIDELY' : 'NARROWLY'}" width="${wHwp}" height="${hHwp}" gutterType="LEFT_ONLY">` +
+    `<hp:pagePr landscape="WIDELY" width="${wHwp}" height="${hHwp}" gutterType="LEFT_ONLY">` +
     `<hp:margin header="${headerZone}" footer="${footerZone}" gutter="0" left="${ml}" right="${mr}" top="${mt}" bottom="${mb}"/>` +
     `</hp:pagePr>` +
     `<hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/>` +
@@ -1146,18 +1221,67 @@ function buildLinesegarray(
   const spacing = vertsizeLine - fontSize;
   const baseline = Math.round(fontSize * 0.83);
 
-  // 글자 너비 추정 (영문 0.47, 한글 1.0)
-  const isKorean = /[\uAC00-\uD7A3\u3131-\u318E]/.test(text);
-  const charW = isKorean ? fontSize : Math.round(fontSize * 0.47);
-  const charsPerLine = Math.max(1, Math.floor(horzSize / charW));
-  const lineCount = text.length === 0 ? 1 : Math.ceil(text.length / charsPerLine);
+  if (text.length === 0) {
+    const xml = `<hp:linesegarray>` +
+      `<hp:lineseg textpos="0" vertpos="${vertPosStart}" vertsize="${vertsizeLine}" ` +
+      `textheight="${fontSize}" baseline="${baseline}" spacing="${spacing}" ` +
+      `horzpos="0" horzsize="${horzSize}" flags="${LINESEG_FLAGS_FIRST}"/>` +
+      `</hp:linesegarray>`;
+    return { xml, totalHeight: vertsizeLine };
+  }
 
-  // 성능 최적화: 문자열 병합 대신 배열 수집 후 join 사용 (O(n²) → O(n))
+  // 문자 단위 정밀 가로 폭 계산 및 자동 줄바꿈 알고리즘 (개행 문자 지원)
+  const lines: { startPos: number; width: number }[] = [];
+  let currentLineWidth = 0;
+  let lineStartIdx = 0;
+
+  for (let i = 0; i < text.length; i++) {
+    const charCode = text.charCodeAt(i);
+
+    // 개행 문자 (\n 또는 \r) 감지 시, 현재 줄 세그먼트를 무조건 마감하고 새로운 줄 시작
+    if (charCode === 10 || charCode === 13) {
+      lines.push({ startPos: lineStartIdx, width: currentLineWidth });
+      lineStartIdx = i + 1;
+      currentLineWidth = 0;
+      continue;
+    }
+
+    let charW = fontSize * 0.55; // 기본값 (영문 소문자, 숫자 등)
+
+    if (charCode >= 0xac00 && charCode <= 0xd7a3) {
+      charW = fontSize; // 한글
+    } else if (charCode >= 0x3130 && charCode <= 0x318f) {
+      charW = fontSize; // 한글 자모
+    } else if (charCode >= 0x4e00 && charCode <= 0x9fff) {
+      charW = fontSize; // 한자
+    } else if (charCode >= 65 && charCode <= 90) {
+      charW = fontSize * 0.65; // 영문 대문자
+    } else if (charCode === 32) {
+      charW = fontSize * 0.32; // 공백
+    } else if (charCode > 255) {
+      charW = fontSize; // 기타 전각 문자
+    } else {
+      charW = fontSize * 0.42; // 기타 특수기호
+    }
+
+    if (currentLineWidth + charW > horzSize && i > lineStartIdx) {
+      lines.push({ startPos: lineStartIdx, width: currentLineWidth });
+      lineStartIdx = i;
+      currentLineWidth = charW;
+    } else {
+      currentLineWidth += charW;
+    }
+  }
+  lines.push({ startPos: lineStartIdx, width: currentLineWidth });
+
+  const lineCount = lines.length;
   const linesegParts: string[] = [];
+
   for (let i = 0; i < lineCount; i++) {
     const flags = i === 0 ? LINESEG_FLAGS_FIRST : LINESEG_FLAGS_OTHER;
+    const textpos = lines[i].startPos;
     linesegParts.push(
-      `<hp:lineseg textpos="${i * charsPerLine}" ` +
+      `<hp:lineseg textpos="${textpos}" ` +
       `vertpos="${vertPosStart + i * vertsizeLine}" ` +
       `vertsize="${vertsizeLine}" textheight="${fontSize}" ` +
       `baseline="${baseline}" spacing="${spacing}" ` +
@@ -1178,7 +1302,13 @@ function extractParaText(para: ParaNode): string {
   const walk = (kids: any[]) => {
     for (const k of kids) {
       if (k.tag === "span") {
-        for (const c of k.kids) if (c.tag === "txt") text += c.content;
+        for (const c of k.kids) {
+          if (c.tag === "txt") {
+            text += c.content;
+          } else if (c.tag === "br") {
+            text += "\n";
+          }
+        }
       } else if (k.tag === "link") {
         walk(k.kids);
       }
@@ -1207,7 +1337,7 @@ function encodeParaPositioned(
   secPr = "",
   availWidth?: number,
   hfRun = "",
-): { xml: string; nextVertPos: number } {
+): { xml: string; nextVertPos: number; hasPageBreak: boolean } {
   // ✅ 표(Grid)를 포함하는 단락인지 확인
   const gridKid = para.kids.find((k): k is GridNode => k.tag === "grid");
   if (gridKid) {
@@ -1274,7 +1404,7 @@ function encodeParaPositioned(
     linesegXml +
     `</hp:p>`;
 
-  return { xml, nextVertPos: vertPos + totalHeight };
+  return { xml, nextVertPos: vertPos + totalHeight, hasPageBreak };
 }
 
 /** ✅ 가이드 준수: 표를 포함하는 단락 인코딩 */
@@ -1285,7 +1415,7 @@ function encodeTablePara(
   vertPos: number,
   secPr: string,
   hfRun: string,
-): { xml: string; nextVertPos: number } {
+): { xml: string; nextVertPos: number; hasPageBreak: boolean } {
   const paraPrId = ctx.paraPrMap.get(paraPrKey(para.props)) ?? 0;
   
   // 표 알맹이 생성 (기존 로직 재사용)
@@ -1304,16 +1434,23 @@ function encodeTablePara(
     `horzpos="0" horzsize="${ctx.availableWidth}" flags="1441792"/>` +
     `</hp:linesegarray>`;
 
+  const hasPageBreak = para.kids.some(
+    (k) => k.tag === "span" && k.kids.some((c) => c.tag === "pb"),
+  );
+
+  const runId = ctx.nextElementId++;
   const xml =
     `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="${paraPrId}" styleIDRef="0" ` +
-    `pageBreak="0" columnBreak="0" merged="0" paraTcId="0">` +
+    `pageBreak="${hasPageBreak ? 1 : 0}" columnBreak="0" merged="0" paraTcId="0">` +
     secPr +
+    `<hp:run id="${runId}" charPrIDRef="0" charTcId="0">` +
     gridXml +
+    `</hp:run>` +
     hfRun +
     linesegXml +
     `</hp:p>`;
 
-  return { xml, nextVertPos: vertPos + totalHeight };
+  return { xml, nextVertPos: vertPos + totalHeight, hasPageBreak };
 }
 
 function encodeCodeBlockPositioned(
@@ -1324,7 +1461,7 @@ function encodeCodeBlockPositioned(
   fontSize: number,
   spacing: number,
   vertSize: number,
-): { xml: string; nextVertPos: number } {
+): { xml: string; nextVertPos: number; hasPageBreak: boolean } {
   const codeBfId = ctx.borderFillBank.addUniform(
     { kind: "solid", pt: 0.5, color: "aaaaaa" },
     "f4f4f4",
@@ -1364,7 +1501,7 @@ function encodeCodeBlockPositioned(
     linesegXml +
     `</hp:p>`;
 
-  return { xml, nextVertPos: vertPos + totalHeight };
+  return { xml, nextVertPos: vertPos + totalHeight, hasPageBreak: false };
 }
 
 function encodeParaKids(kids: ParaNode["kids"], ctx: HwpxCtx): string {
@@ -1427,7 +1564,7 @@ function encodeRunInner(span: SpanNode): string {
       const content = esc(kid.content);
       if (content) xml += `<hp:t xml:space="preserve">${content}</hp:t>`;
     } else if (kid.tag === "br") {
-      xml += `<hp:t xml:space="preserve">\n</hp:t>`;
+      xml += `<hp:br/>`;
     } else if (kid.tag === "pagenum") {
       const fmt = (kid as any).format === "roman" ? "ROMAN_LOWER" 
                 : (kid as any).format === "romanCaps" ? "ROMAN_UPPER" : "DIGIT";
@@ -1575,7 +1712,7 @@ function encodeGridPositioned(
   vertPos: number,
   secPr = "",
   hfRun = "",
-): { xml: string; nextVertPos: number } {
+): { xml: string; nextVertPos: number; hasPageBreak: boolean } {
   const { xml: gridXml, height: tblHeight } = buildGridXml(grid, ctx);
   const totalHeight = Math.max(1600, tblHeight);
   const fontSize = 1000;
@@ -1589,15 +1726,18 @@ function encodeGridPositioned(
     `horzpos="0" horzsize="${ctx.availableWidth}" flags="${LINESEG_FLAGS_FIRST}"/>` +
     `</hp:linesegarray>`;
 
+  const runId = ctx.nextElementId++;
   const xml =
     `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0" paraTcId="0">` +
     secPr +
     hfRun +
+    `<hp:run id="${runId}" charPrIDRef="0" charTcId="0">` +
     gridXml +
+    `</hp:run>` +
     linesegXml +
     `</hp:p>`;
 
-  return { xml, nextVertPos: vertPos + totalHeight };
+  return { xml, nextVertPos: vertPos + totalHeight, hasPageBreak: false };
 }
 function buildGridXml(
   grid: GridNode,
