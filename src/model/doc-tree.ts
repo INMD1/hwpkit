@@ -14,7 +14,7 @@ export interface PbNode    { tag: 'pb' }
 
 export interface PageNumNode {
   tag: 'pagenum';
-  format?: 'decimal' | 'roman' | 'romanCaps';
+  format?: 'decimal' | 'roman' | 'romanCaps' | 'total';
 }
 
 export interface ImgNode {
@@ -44,7 +44,7 @@ export interface LinkNode {
 export interface ParaNode {
   tag: 'para';
   props: ParaProps;
-  kids: (SpanNode | ImgNode | LinkNode | GridNode)[];
+  kids: (SpanNode | ImgNode | LinkNode | GridNode | PageNumNode)[];
 }
 
 // ─── 표(Grid) 노드 ─────────────────────────────────────────

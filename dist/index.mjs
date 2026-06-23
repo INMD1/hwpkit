@@ -1714,6 +1714,9 @@ var CTRL_IMAGE = 1768777504;
 var CTRL_OBJ = 1868720672;
 var CTRL_FIG = 1718183712;
 var CTRL_GSO = 1735618336;
+var CTRL_HEAD = 1751474532;
+var CTRL_FOOT = 1718579060;
+var CTRL_ATNO = 1635020399;
 function parseRecords(data) {
   const out = [];
   let off = 0;
@@ -1869,6 +1872,8 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
   const hdr = recs[start];
   const lv = hdr.level;
   const psId = hdr.data.length >= 10 ? BinaryKit.readU16LE(hdr.data, 8) : 0;
+  const hwpStyleId = hdr.data.length >= 11 ? hdr.data[10] : 0;
+  const divideSort = hdr.data.length >= 12 ? hdr.data[11] : 0;
   const ps = di.paraShapes[psId];
   let text = null;
   let csPairs = [];
@@ -1886,23 +1891,48 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
     } else if (r.tag === TAG_CTRL_HEADER && r.level === lv + 1) {
       if (r.data.length >= 4) {
         const ctrlId = BinaryKit.readU32LE(r.data, 0);
-        const MAX_HWP = 1e6;
-        const rawW = r.data.length >= 24 ? BinaryKit.readU32LE(r.data, 16) : 0;
-        const rawH = r.data.length >= 28 ? BinaryKit.readU32LE(r.data, 20) : 0;
-        const wPt = rawW > 0 && rawW < MAX_HWP ? Metric.hwpToPt(rawW) : 0;
-        const hPt = rawH > 0 && rawH < MAX_HWP ? Metric.hwpToPt(rawH) : 0;
-        const imgId = ctrlId === CTRL_GSO ? gsoCtx.count++ : r.data.length >= 6 ? BinaryKit.readU16LE(r.data, 4) : 0;
-        ctrlHeaders.push({ ctrlId, imgId, wPt, hPt });
-        if (ctrlId === CTRL_TABLE) {
-          const tr = shield.guard(
-            () => parseTableCtrl(recs, i, di, shield, gsoCtx),
-            { grid: null, next: skipKids(recs, i) },
-            `hwp:tbl@${i}`
-          );
-          if (tr.grid) grids.push(tr.grid);
-          i = tr.next;
+        if (ctrlId === CTRL_HEAD || ctrlId === CTRL_FOOT) {
+          const ctrlLv = r.level;
+          const hfParas = [];
+          let j = i + 1;
+          while (j < recs.length && recs[j].level > ctrlLv) {
+            if (recs[j].tag === TAG_PARA_HEADER) {
+              const pr = shield.guard(
+                () => parseParagraphGroup(recs, j, di, shield, gsoCtx),
+                { nodes: [], next: j + 1 },
+                `hwp:hf@${j}`
+              );
+              hfParas.push(...pr.nodes.filter((n) => n.tag === "para"));
+              j = pr.next;
+            } else {
+              j++;
+            }
+          }
+          if (hfParas.length > 0) {
+            const key = ctrlId === CTRL_HEAD ? "headers" : "footers";
+            if (!gsoCtx[key]) gsoCtx[key] = hfParas;
+          }
+          i = j;
         } else {
-          i = skipKids(recs, i);
+          const MAX_HWP = 1e6;
+          const rawW = r.data.length >= 24 ? BinaryKit.readU32LE(r.data, 16) : 0;
+          const rawH = r.data.length >= 28 ? BinaryKit.readU32LE(r.data, 20) : 0;
+          const wPt = rawW > 0 && rawW < MAX_HWP ? Metric.hwpToPt(rawW) : 0;
+          const hPt = rawH > 0 && rawH < MAX_HWP ? Metric.hwpToPt(rawH) : 0;
+          const atnoType = ctrlId === CTRL_ATNO && r.data.length >= 8 ? BinaryKit.readU32LE(r.data, 4) & 15 : void 0;
+          const imgId = ctrlId === CTRL_GSO ? gsoCtx.count++ : r.data.length >= 6 ? BinaryKit.readU16LE(r.data, 4) : 0;
+          ctrlHeaders.push({ ctrlId, imgId, wPt, hPt, atnoType });
+          if (ctrlId === CTRL_TABLE) {
+            const tr = shield.guard(
+              () => parseTableCtrl(recs, i, di, shield, gsoCtx),
+              { grid: null, next: skipKids(recs, i) },
+              `hwp:tbl@${i}`
+            );
+            if (tr.grid) grids.push(tr.grid);
+            i = tr.next;
+          } else {
+            i = skipKids(recs, i);
+          }
         }
       } else {
         i = skipKids(recs, i);
@@ -1914,9 +1944,31 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
   const nodes = [];
   {
     const paraContent = [];
+    const atnoCtrls = [];
+    if (text && text.controls.length > 0) {
+      for (let ci = 0; ci < text.controls.length; ci++) {
+        const ch = ctrlHeaders[ci];
+        if (ch && ch.ctrlId === CTRL_ATNO)
+          atnoCtrls.push({ pos: text.controls[ci].pos, type: ch.atnoType ?? 0 });
+      }
+      atnoCtrls.sort((a, b) => a.pos - b.pos);
+    }
     if (text && text.chars.length > 0) {
-      const spans = resolveCharShapes(text.chars, csPairs, di);
-      paraContent.push(...spans);
+      if (atnoCtrls.length > 0) {
+        let k = 0;
+        for (const ac of atnoCtrls) {
+          const seg = [];
+          while (k < text.chars.length && text.chars[k].pos < ac.pos) seg.push(text.chars[k++]);
+          if (seg.length > 0) paraContent.push(...resolveCharShapes(seg, csPairs, di));
+          paraContent.push(buildPageNum(ac.type === 0 ? "decimal" : "total"));
+        }
+        const rest = text.chars.slice(k);
+        if (rest.length > 0) paraContent.push(...resolveCharShapes(rest, csPairs, di));
+      } else {
+        paraContent.push(...resolveCharShapes(text.chars, csPairs, di));
+      }
+    } else if (atnoCtrls.length > 0) {
+      for (const ac of atnoCtrls) paraContent.push(buildPageNum(ac.type === 0 ? "decimal" : "total"));
     }
     if (text && text.controls.length > 0) {
       for (let ci = 0; ci < text.controls.length; ci++) {
@@ -1928,15 +1980,15 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
         paraContent.push(buildSpan(`__EXT_${ch.imgId}${dimStr}__`));
       }
     }
-    const isCleanEmpty = paraContent.length === 0 && grids.length === 0 && ctrlHeaders.length === 0;
-    if (paraContent.length > 0 || isCleanEmpty) {
-      nodes.push(buildPara(
-        paraContent.length > 0 ? paraContent : [buildSpan("")],
-        buildParaProps(ps)
-      ));
+    if (divideSort & 4) {
+      nodes.push(buildPara([{ tag: "span", props: {}, kids: [buildPb()] }]));
     }
+    nodes.push(...grids);
+    nodes.push(buildPara(
+      paraContent.length > 0 ? paraContent : [buildSpan("")],
+      buildParaProps(ps, hwpStyleId)
+    ));
   }
-  nodes.push(...grids);
   return { nodes, next: i };
 }
 function skipKids(recs, idx) {
@@ -1945,7 +1997,7 @@ function skipKids(recs, idx) {
   while (i < recs.length && recs[i].level > lv) i++;
   return i;
 }
-var EXT_CTRL = /* @__PURE__ */ new Set([2, 3, 11, 12, 14, 15]);
+var EXT_CTRL = /* @__PURE__ */ new Set([2, 3, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
 var INL_CTRL = /* @__PURE__ */ new Set([4, 5, 6, 7, 8]);
 function decodeParaText(d) {
   const chars = [];
@@ -2243,6 +2295,8 @@ function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gs
           const hdr = recs[k];
           const lv = hdr.level;
           const psId = hdr.data.length >= 10 ? BinaryKit.readU16LE(hdr.data, 8) : 0;
+          const cellStyleId = hdr.data.length >= 11 ? hdr.data[10] : 0;
+          const cellDivide = hdr.data.length >= 12 ? hdr.data[11] : 0;
           const ps = di.paraShapes[psId];
           let txt = null;
           let csp = [];
@@ -2294,7 +2348,8 @@ function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gs
             }
           }
           const kids = paraContent.length > 0 ? paraContent : [buildSpan("")];
-          const items = [buildPara(kids, buildParaProps(ps)), ...innerGrids];
+          const items = [...innerGrids, buildPara(kids, buildParaProps(ps, cellStyleId))];
+          if (cellDivide & 4) items.unshift(buildPara([{ tag: "span", props: {}, kids: [buildPb()] }]));
           return { items, next: j };
         },
         { items: [buildPara([buildSpan("")])], next: k + 1 },
@@ -2389,16 +2444,16 @@ function strokeFromBF(bfId, di) {
   const b = bf.borders[0];
   return { kind: BORDER_KIND[b.type] ?? "solid", pt: b.widthPt, color: b.color };
 }
-function buildParaProps(ps) {
-  if (!ps) return {};
-  const p = {};
+function buildParaProps(ps, hwpStyleId) {
+  const p = hwpStyleId !== void 0 ? { hwpStyleId } : {};
+  if (!ps) return p;
   if (ps.align && ps.align !== "left") p.align = ps.align;
   if (ps.spaceBefore > 0) p.spaceBefore = Metric.hwpToPt(ps.spaceBefore);
   if (ps.spaceAfter > 0) p.spaceAfter = Metric.hwpToPt(ps.spaceAfter);
   if (ps.lineSpacingType === 1) {
     if (ps.lineSpacing > 0) p.lineHeightFixed = Metric.hwpToPt(ps.lineSpacing);
   } else {
-    if (ps.lineSpacing > 0 && ps.lineSpacing !== 160) p.lineHeight = ps.lineSpacing / 100;
+    if (ps.lineSpacing > 0) p.lineHeight = ps.lineSpacing / 100;
   }
   const leftMarginPt = Math.max(0, Metric.hwpToPt(ps.leftMargin));
   if (leftMarginPt > 0) p.leftMargin = leftMarginPt;
@@ -2474,7 +2529,10 @@ var HwpScanner = class {
       }
       warns.push(...shield.flush());
       const content = allContent.length > 0 ? allContent : [buildPara([buildSpan("")])];
-      return succeed(buildRoot({}, [buildSheet(content, pageDims)]), warns);
+      return succeed(buildRoot({}, [buildSheet(content, pageDims, {
+        headers: gsoCtx.headers ? { default: gsoCtx.headers } : void 0,
+        footers: gsoCtx.footers ? { default: gsoCtx.footers } : void 0
+      })]), warns);
     } catch (e) {
       warns.push(...shield.flush());
       return fail(`HWP decode error: ${e?.message ?? String(e)}`, warns);
@@ -5661,6 +5719,40 @@ function stylesXml() {
     </w:pPr></w:pPrDefault>
   </w:docDefaults>
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="0"><w:name w:val="\uBC14\uD0D5\uAE00"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="1"><w:name w:val="\uBCF8\uBB38"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="2"><w:name w:val="\uAC1C\uC694 1"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="3"><w:name w:val="\uAC1C\uC694 2"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="4"><w:name w:val="\uAC1C\uC694 3"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="5"><w:name w:val="\uAC1C\uC694 4"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="6"><w:name w:val="\uAC1C\uC694 5"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="7"><w:name w:val="\uAC1C\uC694 6"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="8"><w:name w:val="\uAC1C\uC694 7"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="9"><w:name w:val="\uAC1C\uC694 8"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="10"><w:name w:val="\uAC1C\uC694 9"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="11"><w:name w:val="\uAC1C\uC694 10"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="12"><w:name w:val="\uCABD \uBC88\uD638"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="13"><w:name w:val="\uBA38\uB9AC\uB9D0"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="14"><w:name w:val="\uAC01\uC8FC"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="15"><w:name w:val="\uBBF8\uC8FC"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="16"><w:name w:val="\uBA54\uBAA8"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="17"><w:name w:val="\uCC28\uB840 \uC81C\uBAA9"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="18"><w:name w:val="\uCC28\uB840 1"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="19"><w:name w:val="\uCC28\uB840 2"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="20"><w:name w:val="\uCC28\uB840 3"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="21"><w:name w:val="\uBCF8\uBB38 \uC81C\uBAA9"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="22"><w:name w:val="\uADF8\uB9BC"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="23"><w:name w:val="\uD45C"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="24"><w:name w:val="\uC218\uC2DD"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="25"><w:name w:val="\uC778\uC6A9\uBB38"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="26"><w:name w:val="\uB0A0\uC9DC"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="27"><w:name w:val="\uBC1C\uC2E0\uBA85\uC758"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="28"><w:name w:val="\uC81C\uBAA9"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="29"><w:name w:val="\uBD80\uC81C\uBAA9"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="30"><w:name w:val="\uBB38\uB2E8 \uC81C\uBAA9"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="31"><w:name w:val="MEMO"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="32"><w:name w:val="\uAC1C\uC694"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="33"><w:name w:val="\uD45C \uC81C\uBAA9"/><w:basedOn w:val="Normal"/></w:style>
   <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:pPr><w:keepNext/><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="44"/><w:szCs w:val="44"/></w:rPr></w:style>
   <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:pPr><w:keepNext/><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="36"/><w:szCs w:val="36"/></w:rPr></w:style>
   <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:basedOn w:val="Normal"/><w:pPr><w:keepNext/><w:outlineLvl w:val="2"/></w:pPr><w:rPr><w:b/><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>
@@ -5750,7 +5842,12 @@ function encodeContent(node, ctx, dims) {
 }
 function encodeParaInner(para, ctx) {
   const align = para.props.align ?? "left";
-  const headStyle = para.props.heading ? `<w:pStyle w:val="Heading${para.props.heading}"/>` : "";
+  let headStyle = "";
+  if (para.props.hwpStyleId !== void 0) {
+    headStyle = `<w:pStyle w:val="${para.props.hwpStyleId}"/>`;
+  } else if (para.props.heading) {
+    headStyle = `<w:pStyle w:val="Heading${para.props.heading}"/>`;
+  }
   let numPr = "";
   if (para.props.listOrd !== void 0) {
     const numId = para.props.listOrd ? 2 : 1;
@@ -5789,6 +5886,10 @@ function encodeParaInner(para, ctx) {
   const runs = para.kids.map((k) => {
     if (k.tag === "span") return encodeRun(k, ctx);
     if (k.tag === "img") return encodeImage2(k, ctx);
+    if (k.tag === "pagenum") {
+      const instr = k.format === "total" ? " NUMPAGES " : " PAGE ";
+      return `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>${instr}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+    }
     return "";
   }).join("");
   return `    <w:p>
@@ -5825,8 +5926,9 @@ function encodeRun(span, _ctx) {
         );
       }
     } else if (kid.tag === "pagenum") {
+      const instr = kid.format === "total" ? " NUMPAGES " : " PAGE ";
       parts.push(
-        `<w:r><w:rPr>${rPr.join("")}</w:rPr><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:instrText> PAGE </w:instrText></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:t>1</w:t></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:fldChar w:fldCharType="end"/></w:r>`
+        `<w:r><w:rPr>${rPr.join("")}</w:rPr><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:instrText>${instr}</w:instrText></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:t>1</w:t></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:fldChar w:fldCharType="end"/></w:r>`
       );
     } else if (kid.tag === "br") {
       parts.push(`<w:r><w:br/></w:r>`);

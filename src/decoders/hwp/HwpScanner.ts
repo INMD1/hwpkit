@@ -1,9 +1,9 @@
 import type { Decoder } from '../../contract/decoder';
-import type { DocRoot, ContentNode, ParaNode, SpanNode, ImgNode, GridNode } from '../../model/doc-tree';
+import type { DocRoot, ContentNode, ParaNode, SpanNode, ImgNode, GridNode, PageNumNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
 import type { Align, Stroke, StrokeKind, PageDims, TextProps, ParaProps, CellProps, GridProps } from '../../model/doc-props';
 import { succeed, fail } from '../../contract/result';
-import { buildRoot, buildSheet, buildPara, buildSpan, buildGrid, buildRow, buildCell, buildImg } from '../../model/builders';
+import { buildRoot, buildSheet, buildPara, buildSpan, buildGrid, buildRow, buildCell, buildImg, buildPb, buildPageNum } from '../../model/builders';
 import { ShieldedParser } from '../../safety/ShieldedParser';
 import { BinaryKit } from '../../toolkit/BinaryKit';
 import { TextKit } from '../../toolkit/TextKit';
@@ -39,11 +39,14 @@ function isTableTag(t: number) { return t === TAG_TABLE_A || t === TAG_TABLE_B; 
 function isCellTag(t: number)  { return t === TAG_CELL_A || t === TAG_CELL_B || t === TAG_LIST_HEADER; }
 
 // CTRL_HEADER ctrlId values (UINT32-LE as ASCII)
-const CTRL_TABLE = 0x74626C20;  // ' lbt' = 표(table)
+const CTRL_TABLE = 0x74626C20;  // 'tbl ' = 표(table)
 const CTRL_IMAGE = 0x696D6720;  // 'img '
 const CTRL_OBJ   = 0x6F626A20;  // 'obj '
 const CTRL_FIG   = 0x66696720;  // 'fig '
 const CTRL_GSO   = 0x67736F20;  // 'gso ' = 그리기 객체 (drawing object, contains embedded images)
+const CTRL_HEAD  = 0x68656164;  // 'head' = 머리말
+const CTRL_FOOT  = 0x666F6F74;  // 'foot' = 꼬리말
+const CTRL_ATNO  = 0x61746E6F;  // 'atno' = 자동 번호 (쪽번호 등)
 
 /* ═══════════════════════════════════════════════════════════════
    Types
@@ -302,7 +305,11 @@ function parseBorderFill(d: Uint8Array): HwpBorderFill {
 // gsoCtx: shared mutable counter for 'gso ' drawing objects.
 // Each 'gso ' CTRL_HEADER encountered increments this counter.
 // objectMap is keyed by 0-based gso order = sequential BinData insertion order.
-interface GsoCtx { count: number }
+interface GsoCtx {
+  count: number;
+  headers?: ParaNode[];
+  footers?: ParaNode[];
+}
 
 function parseBody(
   raw: Uint8Array, compressed: boolean, di: DocInfo, shield: ShieldedParser, gsoCtx: GsoCtx,
@@ -346,15 +353,20 @@ function parseParagraphGroup(
   const hdr = recs[start];
   const lv  = hdr.level;
 
-  // paraShapeId at offset 8 (UINT16)
-  const psId = hdr.data.length >= 10 ? BinaryKit.readU16LE(hdr.data, 8) : 0;
-  const ps   = di.paraShapes[psId];
+  // P1: PARA_HEADER 레이아웃
+  //   offset 8-9: paraShapeId (UINT16)
+  //   offset 10:  styleId (UINT8)
+  //   offset 11:  divideSort (UINT8) — 0x04=쪽나누기
+  const psId       = hdr.data.length >= 10 ? BinaryKit.readU16LE(hdr.data, 8) : 0;
+  const hwpStyleId = hdr.data.length >= 11 ? hdr.data[10] : 0;
+  const divideSort = hdr.data.length >= 12 ? hdr.data[11] : 0;
+  const ps         = di.paraShapes[psId];
 
   let text: ParaTextResult | null = null;
   let csPairs: [number, number][] = [];
   const grids: ContentNode[] = [];
   // imgId: for 'gso' uses sequential gsoCtx.count; for others uses flags-based objId
-  const ctrlHeaders: { ctrlId: number; imgId: number; wPt: number; hPt: number }[] = [];
+  const ctrlHeaders: { ctrlId: number; imgId: number; wPt: number; hPt: number; atnoType?: number }[] = [];
   let i = start + 1;
 
   while (i < recs.length && recs[i].level > lv) {
@@ -370,29 +382,59 @@ function parseParagraphGroup(
       if (r.data.length >= 4) {
         const ctrlId = BinaryKit.readU32LE(r.data, 0);
 
-        // HWP 5.0 general-object layout:
-        //   [0:4] ctrlId  [4:4] flags  [8:4] xOff  [12:4] yOff
-        //   [16:4] width(HWPUNIT)  [20:4] height(HWPUNIT)
-        const MAX_HWP = 1_000_000;
-        const rawW = r.data.length >= 24 ? BinaryKit.readU32LE(r.data, 16) : 0;
-        const rawH = r.data.length >= 28 ? BinaryKit.readU32LE(r.data, 20) : 0;
-        const wPt = rawW > 0 && rawW < MAX_HWP ? Metric.hwpToPt(rawW) : 0;
-        const hPt = rawH > 0 && rawH < MAX_HWP ? Metric.hwpToPt(rawH) : 0;
-
-        // 'gso ' (그리기 객체) uses sequential counter; others use flags-based id
-        const imgId = ctrlId === CTRL_GSO ? gsoCtx.count++ : (r.data.length >= 6 ? BinaryKit.readU16LE(r.data, 4) : 0);
-        ctrlHeaders.push({ ctrlId, imgId, wPt, hPt });
-
-        if (ctrlId === CTRL_TABLE) {
-          const tr = shield.guard(
-            () => parseTableCtrl(recs, i, di, shield, gsoCtx),
-            { grid: null, next: skipKids(recs, i) },
-            `hwp:tbl@${i}`,
-          );
-          if (tr.grid) grids.push(tr.grid);
-          i = tr.next;
+        if (ctrlId === CTRL_HEAD || ctrlId === CTRL_FOOT) {
+          // P8: 머리말/꼬리말 컨트롤 — 자식 문단을 파싱해 gsoCtx에 저장
+          const ctrlLv = r.level;
+          const hfParas: ParaNode[] = [];
+          let j = i + 1;
+          while (j < recs.length && recs[j].level > ctrlLv) {
+            if (recs[j].tag === TAG_PARA_HEADER) {
+              const pr = shield.guard(
+                () => parseParagraphGroup(recs, j, di, shield, gsoCtx),
+                { nodes: [] as ContentNode[], next: j + 1 },
+                `hwp:hf@${j}`,
+              );
+              hfParas.push(...pr.nodes.filter((n): n is ParaNode => n.tag === 'para'));
+              j = pr.next;
+            } else {
+              j++;
+            }
+          }
+          if (hfParas.length > 0) {
+            const key = ctrlId === CTRL_HEAD ? 'headers' : 'footers';
+            if (!gsoCtx[key]) gsoCtx[key] = hfParas;
+          }
+          i = j;
         } else {
-          i = skipKids(recs, i);
+          // HWP 5.0 general-object layout:
+          //   [0:4] ctrlId  [4:4] flags  [8:4] xOff  [12:4] yOff
+          //   [16:4] width(HWPUNIT)  [20:4] height(HWPUNIT)
+          const MAX_HWP = 1_000_000;
+          const rawW = r.data.length >= 24 ? BinaryKit.readU32LE(r.data, 16) : 0;
+          const rawH = r.data.length >= 28 ? BinaryKit.readU32LE(r.data, 20) : 0;
+          const wPt = rawW > 0 && rawW < MAX_HWP ? Metric.hwpToPt(rawW) : 0;
+          const hPt = rawH > 0 && rawH < MAX_HWP ? Metric.hwpToPt(rawH) : 0;
+
+          // P9: atno — offset 4 u32 하위 4bit = 번호 종류 (0=쪽번호, 6=전체쪽수)
+          const atnoType = ctrlId === CTRL_ATNO && r.data.length >= 8
+            ? BinaryKit.readU32LE(r.data, 4) & 15
+            : undefined;
+
+          // 'gso ' (그리기 객체) uses sequential counter; others use flags-based id
+          const imgId = ctrlId === CTRL_GSO ? gsoCtx.count++ : (r.data.length >= 6 ? BinaryKit.readU16LE(r.data, 4) : 0);
+          ctrlHeaders.push({ ctrlId, imgId, wPt, hPt, atnoType });
+
+          if (ctrlId === CTRL_TABLE) {
+            const tr = shield.guard(
+              () => parseTableCtrl(recs, i, di, shield, gsoCtx),
+              { grid: null, next: skipKids(recs, i) },
+              `hwp:tbl@${i}`,
+            );
+            if (tr.grid) grids.push(tr.grid);
+            i = tr.next;
+          } else {
+            i = skipKids(recs, i);
+          }
         }
       } else {
         i = skipKids(recs, i);
@@ -404,16 +446,37 @@ function parseParagraphGroup(
 
   const nodes: ContentNode[] = [];
 
-  // Build paragraph from text/inline controls.
-  // Emit empty paragraphs too (preserve para_shape alignment/spacing),
-  // UNLESS this paragraph only contains a table — in that case the grid
-  // itself carries the para_shape and a preceding empty para is wrong.
   {
-    const paraContent: (SpanNode | ContentNode)[] = [];
+    const paraContent: Array<SpanNode | GridNode | PageNumNode> = [];
 
+    // P9: atno 컨트롤 위치 수집 (pos 기준 정렬)
+    const atnoCtrls: { pos: number; type: number }[] = [];
+    if (text && text.controls.length > 0) {
+      for (let ci = 0; ci < text.controls.length; ci++) {
+        const ch = ctrlHeaders[ci];
+        if (ch && ch.ctrlId === CTRL_ATNO)
+          atnoCtrls.push({ pos: text.controls[ci].pos, type: ch.atnoType ?? 0 });
+      }
+      atnoCtrls.sort((a, b) => a.pos - b.pos);
+    }
+
+    // P9: 텍스트 chars를 atno 위치 기준으로 분할하여 PageNumNode 삽입
     if (text && text.chars.length > 0) {
-      const spans = resolveCharShapes(text.chars, csPairs, di);
-      paraContent.push(...spans);
+      if (atnoCtrls.length > 0) {
+        let k = 0;
+        for (const ac of atnoCtrls) {
+          const seg: ParsedChar[] = [];
+          while (k < text.chars.length && text.chars[k].pos < ac.pos) seg.push(text.chars[k++]);
+          if (seg.length > 0) paraContent.push(...resolveCharShapes(seg, csPairs, di));
+          paraContent.push(buildPageNum(ac.type === 0 ? 'decimal' : 'total'));
+        }
+        const rest = text.chars.slice(k);
+        if (rest.length > 0) paraContent.push(...resolveCharShapes(rest, csPairs, di));
+      } else {
+        paraContent.push(...resolveCharShapes(text.chars, csPairs, di));
+      }
+    } else if (atnoCtrls.length > 0) {
+      for (const ac of atnoCtrls) paraContent.push(buildPageNum(ac.type === 0 ? 'decimal' : 'total'));
     }
 
     // Image placeholder spans: only for actual image controls.
@@ -431,18 +494,18 @@ function parseParagraphGroup(
       }
     }
 
-    // Emit paragraph if: has visible content, OR is a clean empty paragraph
-    // (no grids, no ctrl headers at all — i.e. not a CTRL_SECD/section carrier)
-    const isCleanEmpty = paraContent.length === 0 && grids.length === 0 && ctrlHeaders.length === 0;
-    if (paraContent.length > 0 || isCleanEmpty) {
-      nodes.push(buildPara(
-        paraContent.length > 0 ? paraContent as any : [buildSpan('')],
-        buildParaProps(ps),
-      ));
+    // P5: 쪽나누기(divideSort & 4) → page-break 문단 먼저 출력
+    if (divideSort & 4) {
+      nodes.push(buildPara([{ tag: 'span', props: {}, kids: [buildPb()] } as SpanNode]));
     }
+    // P5: 표 → 앵커 문단 순서 (앵커 문단 드롭 금지)
+    nodes.push(...grids);
+    nodes.push(buildPara(
+      paraContent.length > 0 ? paraContent as any : [buildSpan('')],
+      buildParaProps(ps, hwpStyleId),
+    ));
   }
 
-  nodes.push(...grids);
   return { nodes, next: i };
 }
 
@@ -455,8 +518,8 @@ function skipKids(recs: HwpRecord[], idx: number): number {
 
 /* ── PARA_TEXT ───────────────────────────────────────────────── */
 
-// Extended controls: 8 WORDs, associated CTRL_HEADER
-const EXT_CTRL = new Set([2, 3, 11, 12, 14, 15]);
+// Extended controls: 8 WORDs, associated CTRL_HEADER (16-25 also skip 16 bytes)
+const EXT_CTRL = new Set([2, 3, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
 // Inline controls: 8 WORDs, no CTRL_HEADER
 const INL_CTRL = new Set([4, 5, 6, 7, 8]);
 
@@ -795,6 +858,9 @@ function parseCellRec(
           const hdr = recs[k];
           const lv = hdr.level;
           const psId = hdr.data.length >= 10 ? BinaryKit.readU16LE(hdr.data, 8) : 0;
+          // P6: 셀 내부 문단의 styleId / divideSort 읽기
+          const cellStyleId = hdr.data.length >= 11 ? hdr.data[10] : 0;
+          const cellDivide  = hdr.data.length >= 12 ? hdr.data[11] : 0;
           const ps = di.paraShapes[psId];
           let txt: ParaTextResult | null = null;
           let csp: [number, number][] = [];
@@ -844,7 +910,9 @@ function parseCellRec(
             }
           }
           const kids = paraContent.length > 0 ? paraContent as any : [buildSpan('')];
-          const items: (ParaNode | GridNode)[] = [buildPara(kids, buildParaProps(ps)), ...innerGrids];
+          // P6: innerGrids 먼저, 앵커 문단 나중 (P5와 동일한 순서)
+          const items: (ParaNode | GridNode)[] = [...innerGrids, buildPara(kids, buildParaProps(ps, cellStyleId))];
+          if (cellDivide & 4) items.unshift(buildPara([{ tag: 'span', props: {}, kids: [buildPb()] } as SpanNode]));
           return { items, next: j };
         },
         { items: [buildPara([buildSpan('')])] as (ParaNode | GridNode)[], next: k + 1 },
@@ -948,9 +1016,10 @@ function strokeFromBF(bfId: number, di: DocInfo): Stroke | undefined {
   return { kind: BORDER_KIND[b.type] ?? 'solid', pt: b.widthPt, color: b.color };
 }
 
-function buildParaProps(ps?: HwpParaShape): ParaProps {
-  if (!ps) return {};
-  const p: ParaProps = {};
+function buildParaProps(ps?: HwpParaShape, hwpStyleId?: number): ParaProps {
+  // P2: hwpStyleId를 초기값으로 포함 (undefined이면 빈 객체)
+  const p: ParaProps = hwpStyleId !== undefined ? { hwpStyleId } : {};
+  if (!ps) return p;
   if (ps.align && ps.align !== 'left') p.align = ps.align;
   if (ps.spaceBefore > 0) p.spaceBefore = Metric.hwpToPt(ps.spaceBefore);
   if (ps.spaceAfter > 0)  p.spaceAfter  = Metric.hwpToPt(ps.spaceAfter);
@@ -958,7 +1027,8 @@ function buildParaProps(ps?: HwpParaShape): ParaProps {
   if (ps.lineSpacingType === 1) {
     if (ps.lineSpacing > 0) p.lineHeightFixed = Metric.hwpToPt(ps.lineSpacing);
   } else {
-    if (ps.lineSpacing > 0 && ps.lineSpacing !== 160) p.lineHeight = ps.lineSpacing / 100;
+    // P10: 160%(HWP 기본값) 생략 버그 수정 — 항상 lineHeight 설정
+    if (ps.lineSpacing > 0) p.lineHeight = ps.lineSpacing / 100;
   }
   // leftMargin (offset 4) = 문단 몸체 왼쪽 여백 → leftMargin (pt), ensure non-negative
   const leftMarginPt = Math.max(0, Metric.hwpToPt(ps.leftMargin));
@@ -1064,7 +1134,11 @@ export class HwpScanner implements Decoder {
 
       warns.push(...shield.flush());
       const content = allContent.length > 0 ? allContent : [buildPara([buildSpan('')])];
-      return succeed(buildRoot({}, [buildSheet(content, pageDims)]), warns);
+      // P8: 머리말/꼬리말을 gsoCtx에서 가져와 buildSheet에 전달
+      return succeed(buildRoot({}, [buildSheet(content, pageDims, {
+        headers: gsoCtx.headers ? { default: gsoCtx.headers } : undefined,
+        footers: gsoCtx.footers ? { default: gsoCtx.footers } : undefined,
+      })]), warns);
     } catch (e: any) {
       warns.push(...shield.flush());
       return fail(`HWP decode error: ${e?.message ?? String(e)}`, warns);

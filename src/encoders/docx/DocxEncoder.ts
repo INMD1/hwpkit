@@ -320,6 +320,40 @@ function stylesXml(): string {
     </w:pPr></w:pPrDefault>
   </w:docDefaults>
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="0"><w:name w:val="바탕글"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="1"><w:name w:val="본문"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="2"><w:name w:val="개요 1"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="3"><w:name w:val="개요 2"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="4"><w:name w:val="개요 3"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="5"><w:name w:val="개요 4"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="6"><w:name w:val="개요 5"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="7"><w:name w:val="개요 6"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="8"><w:name w:val="개요 7"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="9"><w:name w:val="개요 8"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="10"><w:name w:val="개요 9"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="11"><w:name w:val="개요 10"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="12"><w:name w:val="쪽 번호"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="13"><w:name w:val="머리말"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="14"><w:name w:val="각주"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="15"><w:name w:val="미주"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="16"><w:name w:val="메모"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="17"><w:name w:val="차례 제목"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="18"><w:name w:val="차례 1"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="19"><w:name w:val="차례 2"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="20"><w:name w:val="차례 3"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="21"><w:name w:val="본문 제목"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="22"><w:name w:val="그림"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="23"><w:name w:val="표"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="24"><w:name w:val="수식"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="25"><w:name w:val="인용문"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="26"><w:name w:val="날짜"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="27"><w:name w:val="발신명의"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="28"><w:name w:val="제목"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="29"><w:name w:val="부제목"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="30"><w:name w:val="문단 제목"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="31"><w:name w:val="MEMO"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="32"><w:name w:val="개요"/><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="33"><w:name w:val="표 제목"/><w:basedOn w:val="Normal"/></w:style>
   <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:pPr><w:keepNext/><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="44"/><w:szCs w:val="44"/></w:rPr></w:style>
   <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:pPr><w:keepNext/><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="36"/><w:szCs w:val="36"/></w:rPr></w:style>
   <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:basedOn w:val="Normal"/><w:pPr><w:keepNext/><w:outlineLvl w:val="2"/></w:pPr><w:rPr><w:b/><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>
@@ -447,9 +481,13 @@ function encodeContent(
 
 function encodeParaInner(para: ParaNode, ctx: EncCtx): string {
   const align = para.props.align ?? "left";
-  const headStyle = para.props.heading
-    ? `<w:pStyle w:val="Heading${para.props.heading}"/>`
-    : "";
+  // P3: hwpStyleId(숫자 ID) 우선, 없으면 heading 스타일, 둘 다 없으면 빈 문자열
+  let headStyle = "";
+  if (para.props.hwpStyleId !== undefined) {
+    headStyle = `<w:pStyle w:val="${para.props.hwpStyleId}"/>`;
+  } else if (para.props.heading) {
+    headStyle = `<w:pStyle w:val="Heading${para.props.heading}"/>`;
+  }
 
   // List numbering
   let numPr = "";
@@ -506,6 +544,11 @@ function encodeParaInner(para: ParaNode, ctx: EncCtx): string {
     .map((k) => {
       if (k.tag === "span") return encodeRun(k, ctx);
       if (k.tag === "img") return encodeImage(k, ctx);
+      // P9: PageNumNode가 para.kids에 직접 있는 경우 (머리말/꼬리말 등)
+      if (k.tag === "pagenum") {
+        const instr = k.format === "total" ? " NUMPAGES " : " PAGE ";
+        return `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>${instr}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+      }
       return "";
     })
     .join("");
@@ -548,8 +591,10 @@ function encodeRun(span: SpanNode, _ctx: EncCtx): string {
         );
       }
     } else if (kid.tag === "pagenum") {
+      // P9: format === 'total' → NUMPAGES 필드, 나머지 → PAGE 필드
+      const instr = kid.format === "total" ? " NUMPAGES " : " PAGE ";
       parts.push(
-        `<w:r><w:rPr>${rPr.join("")}</w:rPr><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:instrText> PAGE </w:instrText></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:t>1</w:t></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:fldChar w:fldCharType="end"/></w:r>`,
+        `<w:r><w:rPr>${rPr.join("")}</w:rPr><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:instrText>${instr}</w:instrText></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:t>1</w:t></w:r><w:r><w:rPr>${rPr.join("")}</w:rPr><w:fldChar w:fldCharType="end"/></w:r>`,
       );
     } else if (kid.tag === "br") {
       parts.push(`<w:r><w:br/></w:r>`);
