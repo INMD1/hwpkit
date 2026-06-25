@@ -41,6 +41,7 @@ export interface TextProps {
   align?: Align;
   heading?: Heading;
   styleId?: string;              // DOCX pStyle styleId (e.g. "Heading1", "TOC1")
+  hwpStyleId?: number;           // HWP native style index (0=바탕글, 1=본문, ...)
   indentPt?: number;             // 문단 왼쪽 전체 들여쓰기 (pt) — OWPML hc:left
   indentRightPt?: number;        // 문단 오른쪽 전체 들여쓰기 (pt) — OWPML hc:right
   firstLineIndentPt?: number;    // 첫 줄 들여쓰기 (pt, 음수=내어쓰기) — OWPML hc:indent

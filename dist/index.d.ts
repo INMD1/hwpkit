@@ -38,6 +38,7 @@ interface ParaProps {
     align?: Align;
     heading?: Heading;
     styleId?: string;
+    hwpStyleId?: number;
     indentPt?: number;
     indentRightPt?: number;
     firstLineIndentPt?: number;
@@ -133,7 +134,7 @@ interface PbNode {
 }
 interface PageNumNode {
     tag: 'pagenum';
-    format?: 'decimal' | 'roman' | 'romanCaps';
+    format?: 'decimal' | 'roman' | 'romanCaps' | 'total';
 }
 interface ImgNode {
     tag: 'img';
@@ -157,7 +158,7 @@ interface LinkNode {
 interface ParaNode {
     tag: 'para';
     props: ParaProps;
-    kids: (SpanNode | ImgNode | LinkNode | GridNode)[];
+    kids: (SpanNode | ImgNode | LinkNode | GridNode | PageNumNode)[];
 }
 interface CellNode {
     tag: 'cell';
