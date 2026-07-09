@@ -244,6 +244,43 @@ function extractDims(headObj: any): PageDims | null {
       headObj?.["hh:HEAD"]?.[0] ??
       headObj?.HEAD?.[0] ??
       headObj;
+
+    const modernSecPr =
+      root?.["hh:secPrList"]?.[0]?.["hh:secPr"]?.[0] ??
+      root?.["hh:SECPRLST"]?.[0]?.["hh:SECPR"]?.[0];
+    const modernPagePr =
+      modernSecPr?.["hh:pagePr"]?.[0]?._attr ??
+      modernSecPr?.["hh:PAGEPR"]?.[0]?._attr;
+    if (modernPagePr) {
+      const margin =
+        modernSecPr?.["hh:pagePr"]?.[0]?.["hh:margin"]?.[0]?._attr ??
+        modernSecPr?.["hh:PAGEPR"]?.[0]?.["hh:MARGIN"]?.[0]?._attr ??
+        {};
+      let ew = Number(modernPagePr.width ?? modernPagePr.Width ?? 59528);
+      let eh = Number(modernPagePr.height ?? modernPagePr.Height ?? 84188);
+      const landscape = String(modernPagePr.landscape ?? "").toUpperCase();
+      if ((landscape === "NARROWLY" || landscape === "LANDSCAPE") && ew < eh) {
+        [ew, eh] = [eh, ew];
+      }
+      const mt = Number(margin.top ?? margin.TopMargin ?? 5670);
+      const mb = Number(margin.bottom ?? margin.BottomMargin ?? 4252);
+      const ml = Number(margin.left ?? margin.LeftMargin ?? 8504);
+      const mr = Number(margin.right ?? margin.RightMargin ?? 8504);
+      const header = Number(margin.header ?? margin.HeaderMargin ?? 0);
+      const footer = Number(margin.footer ?? margin.FooterMargin ?? 0);
+      return {
+        wPt: Metric.hwpToPt(ew),
+        hPt: Metric.hwpToPt(eh),
+        mt: Metric.hwpToPt(mt),
+        mb: Metric.hwpToPt(mb),
+        ml: Metric.hwpToPt(ml),
+        mr: Metric.hwpToPt(mr),
+        headerPt: Metric.hwpToPt(header > 0 ? header : mt),
+        footerPt: Metric.hwpToPt(footer > 0 ? footer : mb),
+        orient: ew > eh ? "landscape" : "portrait",
+      };
+    }
+
     const refList =
       root?.["hh:refList"]?.[0] ??
       root?.["hh:REFLIST"]?.[0] ??
@@ -262,13 +299,21 @@ function extractDims(headObj: any): PageDims | null {
 
     const ew = Number(pa.Width ?? 59528);
     const eh = Number(pa.Height ?? 84188);
+    const mt = Number(pa.TopMargin ?? 5670);
+    const mb = Number(pa.BottomMargin ?? 4252);
+    const ml = Number(pa.LeftMargin ?? 8504);
+    const mr = Number(pa.RightMargin ?? 8504);
+    const header = Number(pa.HeaderMargin ?? 0);
+    const footer = Number(pa.FooterMargin ?? 0);
     return {
       wPt: Metric.hwpToPt(ew),
       hPt: Metric.hwpToPt(eh),
-      mt: Metric.hwpToPt(Number(pa.TopMargin ?? 5670)),
-      mb: Metric.hwpToPt(Number(pa.BottomMargin ?? 4252)),
-      ml: Metric.hwpToPt(Number(pa.LeftMargin ?? 8504)),
-      mr: Metric.hwpToPt(Number(pa.RightMargin ?? 8504)),
+      mt: Metric.hwpToPt(mt),
+      mb: Metric.hwpToPt(mb),
+      ml: Metric.hwpToPt(ml),
+      mr: Metric.hwpToPt(mr),
+      headerPt: Metric.hwpToPt(header > 0 ? header : mt),
+      footerPt: Metric.hwpToPt(footer > 0 ? footer : mb),
       orient: ew > eh ? "landscape" : "portrait",
     };
   } catch {
@@ -428,7 +473,7 @@ function extractCharPrs(headObj: any): Map<number, CharPrInfo> {
       if (attr.height) info.pt = Metric.hHeightToPt(Number(attr.height));
 
       // textColor
-      if (attr.textColor) info.color = safeHex(attr.textColor);
+      if (attr.textColor) info.color = normalizeHwpxTextColor(attr.textColor);
 
       // bold
       if (cp?.["hh:bold"]?.[0] != null) info.b = true;
@@ -539,11 +584,11 @@ function extractParaPrs(headObj: any): Map<number, ParaPrInfo> {
         const lsAttr = lineSpEl._attr ?? {};
         const lsType = lsAttr.type ?? "PERCENT";
         const lsVal = Number(lsAttr.value ?? 160);
-        // OWPML §7.5.4.6: PERCENT(비율), FIXED(고정), BETWEEN_LINE(줄간격), AT_LEAST(최소)
+        // OWPML §7.5.4.6: PERCENT(비율), FIXED(고정), BETWEEN_LINES(줄간격), AT_LEAST(최소)
         if (lsType === "PERCENT" && lsVal > 0 && lsVal !== 160) {
           lineHeight = lsVal / 100;
-        } else if (lsType === "FIXED" && lsVal > 0) {
-          // FIXED: 값이 HWPUNIT 단위의 고정 줄 높이
+        } else if ((lsType === "FIXED" || lsType === "AT_LEAST") && lsVal > 0) {
+          // FIXED/AT_LEAST: 값이 HWPUNIT 단위의 줄 높이
           lineHeightFixed = Metric.hwpToPt(lsVal);
         }
       }
@@ -571,6 +616,7 @@ function addParaItems(p: any, items: { type: string; node: any }[]): void {
   // Check if this paragraph contains a table in its runs
   const runs = getTag(p, "hp:run", "hp:RUN");
   let hasTable = false;
+  let hasDirectText = false;
   for (const run of runs) {
     const tbls = getTag(run, "hp:tbl", "hp:TABLE");
     if (tbls.length > 0) {
@@ -579,9 +625,20 @@ function addParaItems(p: any, items: { type: string; node: any }[]): void {
       }
       hasTable = true;
     }
+    const textNodes = getTag(run, "hp:t", "hp:T", "hp:CHAR");
+    if (
+      textNodes.some((t: any) => {
+        const val =
+          typeof t === "string" ? t : (t?._text ?? t?._ ?? t?.["#text"] ?? "");
+        return String(val).trim().length > 0;
+      })
+    ) {
+      hasDirectText = true;
+    }
   }
-  // 테이블을 포함한 단락은 일반 단락으로 다시 추가하지 않음 (중복 방지)
-  if (!hasTable) {
+  // 테이블만 있는 단락은 중복 방지를 위해 표만 추가한다.
+  // 단, 표 컨트롤 뒤에 본문 텍스트가 이어지는 HWPX 문단은 텍스트 문단도 보존한다.
+  if (!hasTable || hasDirectText) {
     items.push({ type: "para", node: p });
   }
 }
@@ -589,7 +646,7 @@ function addParaItems(p: any, items: { type: string; node: any }[]): void {
 function decodeSection(sec: any, dims: PageDims, ctx: DecCtx) {
   // Try to extract dims from first paragraph's secPr
   const firstParas = getTag(sec, "hp:p", "hp:P");
-  const pageDims = extractSecPrDims(firstParas[0]) ?? dims;
+  const pageDims = extractSectionDims(sec) ?? extractSecPrDims(firstParas[0]) ?? dims;
 
   // Build items list preserving document order via _childOrder
   const items: { type: string; node: any }[] = [];
@@ -660,17 +717,38 @@ function parseSecPrDims(secPr: any): PageDims | null {
     secPr?.["hp:pagePr"]?.[0]?.["hp:margin"]?.[0]?._attr ??
     secPr?.["hp:PAGEPR"]?.[0]?.["hp:MARGIN"]?.[0]?._attr ??
     {};
-  const pw = Number(pagePr.width ?? 59528);
-  const ph = Number(pagePr.height ?? 84188);
+  let pw = Number(pagePr.width ?? 59528);
+  let ph = Number(pagePr.height ?? 84188);
+  const landscape = String(pagePr.landscape ?? "").toUpperCase();
+  if ((landscape === "NARROWLY" || landscape === "LANDSCAPE") && pw < ph) {
+    [pw, ph] = [ph, pw];
+  }
+  const mt = Number(margin.top ?? 5670);
+  const mb = Number(margin.bottom ?? 4252);
+  const ml = Number(margin.left ?? 8504);
+  const mr = Number(margin.right ?? 8504);
+  const header = Number(margin.header ?? 0);
+  const footer = Number(margin.footer ?? 0);
   return {
     wPt: Metric.hwpToPt(pw),
     hPt: Metric.hwpToPt(ph),
-    mt: Metric.hwpToPt(Number(margin.top ?? 5670)),
-    mb: Metric.hwpToPt(Number(margin.bottom ?? 4252)),
-    ml: Metric.hwpToPt(Number(margin.left ?? 8504)),
-    mr: Metric.hwpToPt(Number(margin.right ?? 8504)),
+    mt: Metric.hwpToPt(mt),
+    mb: Metric.hwpToPt(mb),
+    ml: Metric.hwpToPt(ml),
+    mr: Metric.hwpToPt(mr),
+    headerPt: Metric.hwpToPt(header > 0 ? header : mt),
+    footerPt: Metric.hwpToPt(footer > 0 ? footer : mb),
     orient: pw > ph ? "landscape" : "portrait",
   };
+}
+
+function extractSectionDims(sec: any): PageDims | null {
+  try {
+    const secPr = sec?.["hp:secPr"]?.[0] ?? sec?.["hp:SECPR"]?.[0];
+    return secPr ? parseSecPrDims(secPr) : null;
+  } catch {
+    return null;
+  }
 }
 
 function extractSecPrDims(p: any): PageDims | null {
@@ -730,6 +808,7 @@ function decodeHeaderFooter(
 function decodePara(p: any, ctx: DecCtx): ParaNode {
   const pAttr = p?._attr ?? {};
   const paraPrIdRef = Number(pAttr.paraPrIDRef ?? -1);
+  const styleIdRef = Number(pAttr.styleIDRef ?? pAttr.styleIdRef ?? pAttr.styleID ?? pAttr.styleId);
 
   // Resolve paraPr from IDRef or inline
   let align: string | undefined;
@@ -749,7 +828,8 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   }
 
   const inlineAttr = inlineParaPr?._attr ?? {};
-  const props: ParaProps = { align: safeAlign(align) };
+  const props: ParaProps = { align: safeAlign(align === "JUSTIFY" ? "LEFT" : align) };
+  if (Number.isFinite(styleIdRef) && styleIdRef >= 0) props.hwpStyleId = styleIdRef;
 
   // Apply spacing/indent/lineHeight from paraPr definition
   if (paraPrDef) {
@@ -837,7 +917,7 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
 
     // Only push text span when there's actual content and no image already pushed for this run
     if (content !== "" || (runPics.length === 0 && pageNums.length === 0)) {
-      const spanProps = resolveCharPr(run, ctx);
+      const spanProps = content === "" ? {} : resolveCharPr(run, ctx);
       kids.push(buildSpan(content, spanProps));
     }
   }
@@ -892,9 +972,14 @@ function resolveCharPr(run: any, ctx: DecCtx): TextProps {
     s: sVal && sVal !== "NONE" && sVal !== "3D" ? true : undefined,
     font: fontName ? safeFont(fontName) : undefined,
     pt: heightVal ? Metric.hHeightToPt(Number(heightVal)) : undefined,
-    color: safeHex(ca.TextColor ?? ca.textColor),
+    color: normalizeHwpxTextColor(ca.TextColor ?? ca.textColor),
     bg: safeHex(ca.BgColor ?? ca.bgColor),
   };
+}
+
+function normalizeHwpxTextColor(raw: string | number | null | undefined): string | undefined {
+  const color = safeHex(raw);
+  return color === "000000" ? undefined : color;
 }
 
 // ─── Image decoding ────────────────────────────────────────
@@ -954,13 +1039,27 @@ function decodePic(pic: any, ctx: DecCtx): ImgNode | null {
 }
 
 function extractHwpxLayout(posAttr: any, pic: any): ImgLayout {
+  const textWrap: string =
+    pic?._attr?.textWrap ?? pic?.pic?.[0]?._attr?.textWrap ?? "TOP_AND_BOTTOM";
+  const layout = extractHwpxObjectLayout(posAttr, textWrap);
+  applyHwpxOutMargin(layout, pic);
+  return layout;
+}
+
+function extractHwpxTableLayout(tbl: any): ImgLayout | undefined {
+  const posAttr = tbl?.["hp:pos"]?.[0]?._attr ?? tbl?.pos?.[0]?._attr ?? {};
+  const textWrap: string = tbl?._attr?.textWrap ?? "TOP_AND_BOTTOM";
+  const layout = extractHwpxObjectLayout(posAttr, textWrap);
+  if (layout.wrap === "inline") return undefined;
+  applyHwpxOutMargin(layout, tbl);
+  return layout;
+}
+
+function extractHwpxObjectLayout(posAttr: any, textWrap: string): ImgLayout {
   const treatAsChar =
     posAttr.treatAsChar === "1" || posAttr.treatAsChar === "true";
   if (treatAsChar) return { wrap: "inline" };
 
-  // textWrap → wrap (direct attribute of hp:pic element)
-  const textWrap: string =
-    pic?._attr?.textWrap ?? pic?.pic?.[0]?._attr?.textWrap ?? "TOP_AND_BOTTOM";
   // OWPML §7.5.8.1 textWrap → ImgWrap 매핑
   // TOP_AND_BOTTOM: 텍스트가 이미지 위아래로만 흐름 → DOCX wrapTopAndBottom (float anchor)
   const wrapMap: Record<string, ImgWrap> = {
@@ -974,6 +1073,7 @@ function extractHwpxLayout(posAttr: any, pic: any): ImgLayout {
     LARGEST_ONLY: "tight",
     BEHIND_TEXT: "behind",
     FRONT_TEXT: "front",
+    IN_FRONT_OF_TEXT: "front",
   };
   const wrap: ImgWrap = wrapMap[textWrap] ?? "square";
 
@@ -1017,6 +1117,24 @@ function extractHwpxLayout(posAttr: any, pic: any): ImgLayout {
   return { wrap, horzAlign, vertAlign, horzRelTo, vertRelTo, xPt, yPt };
 }
 
+function applyHwpxOutMargin(layout: ImgLayout, obj: any): void {
+  const outMargin = obj?.["hp:outMargin"]?.[0]?._attr ?? obj?.outMargin?.[0]?._attr;
+  if (!outMargin) return;
+  const assign = (
+    attr: string,
+    key: "distT" | "distB" | "distL" | "distR",
+  ) => {
+    const raw = outMargin[attr];
+    if (raw === undefined) return;
+    const value = Number(raw);
+    if (Number.isFinite(value) && value >= 0) layout[key] = Metric.hwpToPt(value);
+  };
+  assign("top", "distT");
+  assign("bottom", "distB");
+  assign("left", "distL");
+  assign("right", "distR");
+}
+
 // ─── Table decoding ────────────────────────────────────────
 
 function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
@@ -1027,6 +1145,8 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
 
   const gridProps: GridProps = { headerRow: headerRow || undefined };
   if (borderFill?.stroke) gridProps.defaultStroke = borderFill.stroke;
+  const layout = extractHwpxTableLayout(tbl);
+  if (layout) gridProps.layout = layout;
 
   // 표 정렬 — <hp:pos horzAlign="..."> 에서 읽음 (OWPML CAbstractShapeObjectType)
   const posAttr = tbl?.["hp:pos"]?.[0]?._attr ?? {};

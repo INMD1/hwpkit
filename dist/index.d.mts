@@ -42,7 +42,6 @@ interface ParaProps {
     indentPt?: number;
     indentRightPt?: number;
     firstLineIndentPt?: number;
-    leftMargin?: number;
     spaceBefore?: number;
     spaceAfter?: number;
     lineHeight?: number;

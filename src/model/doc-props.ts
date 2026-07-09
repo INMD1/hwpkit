@@ -45,7 +45,6 @@ export interface TextProps {
   indentPt?: number;             // 문단 왼쪽 전체 들여쓰기 (pt) — OWPML hc:left
   indentRightPt?: number;        // 문단 오른쪽 전체 들여쓰기 (pt) — OWPML hc:right
   firstLineIndentPt?: number;    // 첫 줄 들여쓰기 (pt, 음수=내어쓰기) — OWPML hc:indent
-  leftMargin?: number;           // 문단 왼쪽 여백 (HWP leftMargin, pt)
   spaceBefore?: number;
   spaceAfter?: number;
   lineHeight?: number;           // 줄 간격 배율 (예: 1.5 = 150%)
@@ -94,6 +93,7 @@ export interface GridProps {
   look?: TableLook;
   headerRow?: boolean;
   align?: Align;          // 표 정렬: 'left' | 'center' | 'right' | 'justify'
+  layout?: ImgLayout;     // 표 배치/위치 정보 (없으면 inline 흐름 표)
 }
 
 export interface PageDims {

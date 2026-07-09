@@ -41,12 +41,14 @@ function isCellTag(t: number)  { return t === TAG_CELL_A || t === TAG_CELL_B || 
 // CTRL_HEADER ctrlId values (UINT32-LE as ASCII)
 const CTRL_TABLE = 0x74626C20;  // 'tbl ' = 표(table)
 const CTRL_IMAGE = 0x696D6720;  // 'img '
+const CTRL_PIC   = 0x24706963;  // '$pic' = picture object
 const CTRL_OBJ   = 0x6F626A20;  // 'obj '
 const CTRL_FIG   = 0x66696720;  // 'fig '
 const CTRL_GSO   = 0x67736F20;  // 'gso ' = 그리기 객체 (drawing object, contains embedded images)
 const CTRL_HEAD  = 0x68656164;  // 'head' = 머리말
 const CTRL_FOOT  = 0x666F6F74;  // 'foot' = 꼬리말
 const CTRL_ATNO  = 0x61746E6F;  // 'atno' = 자동 번호 (쪽번호 등)
+const CTRL_SECD  = 0x73656364;  // 'secd' = 구역 정의
 
 /* ═══════════════════════════════════════════════════════════════
    Types
@@ -180,11 +182,13 @@ function parseFaceName(d: Uint8Array): string {
     21       7    spacing[7]
     28       7    relSize[7]
     35       7    offset[7]
-    42       4    height      (UINT32, HWP-units  100 = 1pt)
-    46       4    attr        (UINT32, bit flags)
-    50       1    shadowX
-    51       1    shadowY
-    52       4    textColor   (COLORREF R,G,B,0)                     */
+    42       4    height      (UINT32, HWP-units 100 = 1pt)
+    46       4    attr/textColor
+
+    Hancom-authored HWP files commonly store text-color bytes at offset 46,
+    while hwpkit-authored files store the compact style bitfield there. Keep
+    bold/italic compatibility, but only accept underline/strike from unambiguous
+    compact flags so color bytes do not become bogus decorations. */
 
 function parseCharShape(d: Uint8Array): HwpCharShape {
   const faceIds: number[] = [];
@@ -199,8 +203,7 @@ function parseCharShape(d: Uint8Array): HwpCharShape {
   //  16-17: super/sub(2, 0=none,1=super,2=sub), 18-20: strikeout type(3),
   //  21-24: strikeout shape(4), 25: annotLine, 26-28: annotLine type,
   //  29: useFontSpace, 30: kerning
-  const ulType  = (attr >> 2)  & 0x7;   // 3 bits at 2-4
-  const skType  = (attr >> 18) & 0x7;   // 3 bits at 18-20
+  const compactStyleFlags = (attr & 0xFF000000) === 0;
   const suType  = (attr >> 16) & 0x3;   // 2 bits at 16-17 (0=none,1=super,2=sub)
 
   return {
@@ -208,8 +211,8 @@ function parseCharShape(d: Uint8Array): HwpCharShape {
     height: (height > 0 && height < 100000) ? height : 1000,
     italic:      (attr & 1) !== 0,
     bold:        ((attr >> 1) & 1) !== 0,
-    underline:   ulType !== 0,
-    strikeout:   skType !== 0,
+    underline:   compactStyleFlags && (attr & (1 << 2)) !== 0,
+    strikeout:   compactStyleFlags && ((attr >> 18) & 0x7) !== 0,
     superscript: suType === 1,
     subscript:   suType === 2,
     textColor:   d.length >= 56 ? colorRef(d, 52) : '000000',
@@ -219,7 +222,7 @@ function parseCharShape(d: Uint8Array): HwpCharShape {
 /* ── PARA_SHAPE ─────────────────────────────────────────────── */
 /*  offset  size  field
     0       4     attr1   (bits 0-1 = line spacing type, bits 2-4 = alignment)
-    4       4     leftMargin   (HWPUNIT)
+    4       4     leftMargin   (HWPUNIT * 2)
     8       4     rightMargin
     12      4     indent
     16      4     spaceBefore
@@ -229,14 +232,14 @@ function parseCharShape(d: Uint8Array): HwpCharShape {
 const ALIGN_TBL: Record<number, Align> = { 0: 'justify', 1: 'left', 2: 'right', 3: 'center', 4: 'distribute', 5: 'distribute_space' };
 
 function parseParaShape(d: Uint8Array): HwpParaShape {
-  if (d.length < 4) return { align: 'left', spaceBefore: 0, spaceAfter: 0, lineSpacing: 160, lineSpacingType: 0, leftMargin: 0, rightMargin: 0, indent: 0 };
+  if (d.length < 4) return { align: 'justify', spaceBefore: 0, spaceAfter: 0, lineSpacing: 160, lineSpacingType: 0, leftMargin: 0, rightMargin: 0, indent: 0 };
   const attr = BinaryKit.readU32LE(d, 0);
 
   // bits 0-1: 줄 간격 종류 (0=PERCENT, 1=FIXED, 2=BETWEEN_LINES, 3=AT_LEAST)
   const lineSpacingType = (attr & 0x3) as 0 | 1 | 2 | 3;
 
   // bits 2-4: 정렬 방식 (0=justify,1=left,2=right,3=center,4=distribute,5=split)
-  const align = ALIGN_TBL[(attr >> 2) & 0x7] ?? 'left';
+  const align = ALIGN_TBL[(attr >> 2) & 0x7] ?? 'justify';
 
   // 세로 정렬 (Bit 18 ~ Bit 19)
   const vVal = (attr >> 18) & 0x3;
@@ -248,9 +251,9 @@ function parseParaShape(d: Uint8Array): HwpParaShape {
   return {
     align,
     lineSpacingType,
-    leftMargin:  d.length >= 8  ? i32(d, 4)  : 0,  // offset 4: 문단 몸체 왼쪽 여백 (HWPUNIT)
-    rightMargin: d.length >= 12 ? i32(d, 8)  : 0,  // offset 8: 문단 몸체 오른쪽 여백 (HWPUNIT)
-    indent:      d.length >= 16 ? i32(d, 12) : 0,  // offset 12: 첫 줄 들여쓰기 (HWPUNIT)
+    leftMargin:  d.length >= 8  ? i32(d, 4)  : 0,  // offset 4: 문단 몸체 왼쪽 여백 (HWPUNIT * 2)
+    rightMargin: d.length >= 12 ? i32(d, 8)  : 0,  // offset 8: 문단 몸체 오른쪽 여백 (HWPUNIT * 2)
+    indent:      d.length >= 16 ? i32(d, 12) : 0,  // offset 12: 첫 줄 들여쓰기 (HWPUNIT * 2)
     spaceBefore: d.length >= 20 ? i32(d, 16) : 0,
     spaceAfter:  d.length >= 24 ? i32(d, 20) : 0,
     lineSpacing: d.length >= 28 ? i32(d, 24) : 160,
@@ -267,25 +270,23 @@ function parseParaShape(d: Uint8Array): HwpParaShape {
     [36:4] faceColor (bgColor for solid fill)                        */
 
 const BORDER_W_PT = [0.28, 0.34, 0.43, 0.57, 0.71, 0.85, 1.13, 1.42, 1.70, 1.98, 2.84, 4.25, 5.67, 8.50, 11.34, 14.17];
-const BORDER_KIND: Record<number, StrokeKind> = { 0:'solid',1:'dash',2:'dash',3:'dot',4:'dash',5:'dash',6:'dash',7:'double',8:'double',9:'double',10:'none' };
+const BORDER_KIND: Record<number, StrokeKind> = { 0:'none',1:'solid',2:'dash',3:'dot',4:'dash',5:'dash',6:'dash',7:'double',8:'double',9:'double',10:'none' };
 
 function parseBorderFill(d: Uint8Array): HwpBorderFill {
-  // Spec grouped format (표 23):
-  //   [0:2]   attr
-  //   [2:4]   4 border types  (left, right, top, bottom) — 1 byte each
-  //   [6:4]   4 border widths (left, right, top, bottom) — 1 byte each (index into BORDER_W_PT)
-  //   [10:16] 4 border colors (left, right, top, bottom) — 4 bytes each (COLORREF)
-  //   [26:3]  diagonal: type(1) + width(1) + color(4) = 6 bytes actually [26:6]
-  //   [32:4]  fillType
-  //   [36:4]  faceColor (bgColor for solid fill)
+  // HWP 5 BorderFill:
+  //   [0:2] attr
+  //   [2:8] left   border: type(1), width(1), colorRef(4)
+  //   [8:14] right border
+  //   [14:20] top border
+  //   [20:26] bottom border
+  //   [26:32] diagonal border
+  //   [32:4] fillType, followed by fill data
   const borders: HwpBorderFill['borders'] = [];
-  const BASE_TYPE  = 2;   // 4 type bytes
-  const BASE_WIDTH = 6;   // 4 width bytes
-  const BASE_COLOR = 10;  // 4 × 4-byte colors
   for (let i = 0; i < 4; i++) {
-    const type    = BASE_TYPE  + i     < d.length ? d[BASE_TYPE  + i]              : 0;
-    const widthPt = BASE_WIDTH + i     < d.length ? (BORDER_W_PT[d[BASE_WIDTH + i]] ?? 0.5) : 0.5;
-    const color   = BASE_COLOR + i * 4 + 4 <= d.length ? colorRef(d, BASE_COLOR + i * 4) : '000000';
+    const off = 2 + i * 6;
+    const type = off < d.length ? d[off] : 0;
+    const widthPt = off + 1 < d.length ? (BORDER_W_PT[d[off + 1]] ?? 0.5) : 0.5;
+    const color = off + 6 <= d.length ? colorRef(d, off + 2) : '000000';
     borders.push({ type, widthPt, color });
   }
   let bgColor: string | undefined;
@@ -358,7 +359,7 @@ function parseParagraphGroup(
   //   offset 10:  styleId (UINT8)
   //   offset 11:  divideSort (UINT8) — 0x04=쪽나누기
   const psId       = hdr.data.length >= 10 ? BinaryKit.readU16LE(hdr.data, 8) : 0;
-  const hwpStyleId = hdr.data.length >= 11 ? hdr.data[10] : 0;
+  const hwpStyleId = hdr.data.length >= 11 ? hdr.data[10] : undefined;
   const divideSort = hdr.data.length >= 12 ? hdr.data[11] : 0;
   const ps         = di.paraShapes[psId];
 
@@ -367,6 +368,7 @@ function parseParagraphGroup(
   const grids: ContentNode[] = [];
   // imgId: for 'gso' uses sequential gsoCtx.count; for others uses flags-based objId
   const ctrlHeaders: { ctrlId: number; imgId: number; wPt: number; hPt: number; atnoType?: number }[] = [];
+  let hasSectionCtrl = false;
   let i = start + 1;
 
   while (i < recs.length && recs[i].level > lv) {
@@ -381,6 +383,7 @@ function parseParagraphGroup(
     } else if (r.tag === TAG_CTRL_HEADER && r.level === lv + 1) {
       if (r.data.length >= 4) {
         const ctrlId = BinaryKit.readU32LE(r.data, 0);
+        if (ctrlId === CTRL_SECD) hasSectionCtrl = true;
 
         if (ctrlId === CTRL_HEAD || ctrlId === CTRL_FOOT) {
           // P8: 머리말/꼬리말 컨트롤 — 자식 문단을 파싱해 gsoCtx에 저장
@@ -421,7 +424,9 @@ function parseParagraphGroup(
             : undefined;
 
           // 'gso ' (그리기 객체) uses sequential counter; others use flags-based id
-          const imgId = ctrlId === CTRL_GSO ? gsoCtx.count++ : (r.data.length >= 6 ? BinaryKit.readU16LE(r.data, 4) : 0);
+          const imgId = (ctrlId === CTRL_GSO || ctrlId === CTRL_PIC)
+            ? gsoCtx.count++
+            : (r.data.length >= 6 ? BinaryKit.readU16LE(r.data, 4) : 0);
           ctrlHeaders.push({ ctrlId, imgId, wPt, hPt, atnoType });
 
           if (ctrlId === CTRL_TABLE) {
@@ -485,7 +490,7 @@ function parseParagraphGroup(
       for (let ci = 0; ci < text.controls.length; ci++) {
         const ch = ctrlHeaders[ci];
         if (!ch) continue; // anchor-only ctrl (gso is sibling, not inline)
-        const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
+        const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_PIC || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
         if (!isImg) continue; // skip footnotes, TOC, page num, etc.
         const dimStr = (ch.wPt > 0 && ch.hPt > 0)
           ? `_W${Math.round(ch.wPt)}_H${Math.round(ch.hPt)}`
@@ -500,10 +505,29 @@ function parseParagraphGroup(
     }
     // P5: 표 → 앵커 문단 순서 (앵커 문단 드롭 금지)
     nodes.push(...grids);
-    nodes.push(buildPara(
-      paraContent.length > 0 ? paraContent as any : [buildSpan('')],
-      buildParaProps(ps, hwpStyleId),
-    ));
+    const isWhitespaceSectionPara =
+      hasSectionCtrl &&
+      grids.length === 0 &&
+      paraContent.length > 0 &&
+      paraContent.every((n: any) => {
+        if (n?.tag !== 'span') return false;
+        const text = (n.kids ?? [])
+          .filter((kid: any) => kid?.tag === 'txt')
+          .map((kid: any) => kid.content ?? '')
+          .join('');
+        return text.trim() === '';
+      });
+    const isSectionOnlyPara =
+      hasSectionCtrl &&
+      grids.length === 0 &&
+      (paraContent.length === 0 || isWhitespaceSectionPara);
+    const isPageBreakOnlyPara = (divideSort & 4) && paraContent.length === 0 && grids.length === 0;
+    if (!isSectionOnlyPara && !isPageBreakOnlyPara) {
+      nodes.push(buildPara(
+        paraContent.length > 0 ? paraContent as any : [buildSpan('')],
+        buildParaProps(ps, hwpStyleId),
+      ));
+    }
   }
 
   return { nodes, next: i };
@@ -587,16 +611,16 @@ function resolveCharShapes(chars: ParsedChar[], pairs: [number, number][], di: D
 
   for (let k = 1; k < chars.length; k++) {
     const sid = idFor(chars[k].pos);
-    if (sid !== curId) { spans.push(styledSpan(buf, curId, di)); buf = ''; curId = sid; }
+    if (sid !== curId) { spans.push(...styledSpans(buf, curId, di)); buf = ''; curId = sid; }
     buf += chars[k].ch;
   }
-  if (buf) spans.push(styledSpan(buf, curId, di));
+  if (buf) spans.push(...styledSpans(buf, curId, di));
   return spans;
 }
 
-function styledSpan(text: string, shapeId: number, di: DocInfo): SpanNode {
+function styledSpans(text: string, shapeId: number, di: DocInfo): SpanNode[] {
   const cs = di.charShapes[shapeId];
-  if (!cs) return buildSpan(text);
+  if (!cs) return [buildSpan(text)];
 
   const props: TextProps = {};
   const fid = cs.faceIds[0] ?? 0;
@@ -612,7 +636,45 @@ function styledSpan(text: string, shapeId: number, di: DocInfo): SpanNode {
   const hex = safeHex(cs.textColor);
   if (hex && hex !== '000000') props.color = hex;
 
-  return buildSpan(text, props);
+  return splitLeadingSymbolRuns(text, props, di);
+}
+
+function splitLeadingSymbolRuns(text: string, props: TextProps, di: DocInfo): SpanNode[] {
+  if (!text) return [buildSpan(text, props)];
+
+  const symbolFont = firstAvailableFont(di, ['한양신명조', 'HY신명조']) ?? props.font;
+  const leadFont = firstAvailableFont(di, ['HCI Poppy']) ?? symbolFont;
+  const out: SpanNode[] = [];
+  let rest = text;
+
+  const lead = rest.match(/^(\s+)([◦→])/);
+  if (lead?.[1]) {
+    out.push(buildSpan(lead[1], { ...props, b: false, font: leadFont }));
+    rest = rest.slice(lead[1].length);
+  }
+
+  const marker = rest.match(/^([□◦→])(\s*)/);
+  if (marker) {
+    out.push(buildSpan(marker[1], { ...props, font: symbolFont }));
+    if (marker[2] && marker[1] !== '□')
+      out.push(buildSpan(marker[2], { ...props, b: false, font: leadFont }));
+    rest = rest.slice(marker[0].length);
+    if (marker[2] && marker[1] === '□') rest = `${marker[2]}${rest}`;
+    if (!marker[2] && rest && (marker[1] === '◦' || marker[1] === '→')) {
+      rest = ` ${rest}`;
+    }
+  }
+
+  if (rest) appendLatinAwareSpans(out, rest, props, leadFont);
+  return out.length ? out : [buildSpan(text, props)];
+}
+
+function firstAvailableFont(di: DocInfo, names: string[]): string | undefined {
+  return names.find(name => di.faceNames.includes(name));
+}
+
+function appendLatinAwareSpans(out: SpanNode[], text: string, props: TextProps, _latinFont?: string): void {
+  out.push(buildSpan(text, props));
 }
 
 /* ── Table control parsing ──────────────────────────────────── */
@@ -671,8 +733,8 @@ function parseTableCtrl(
 
   if (!tblData || cells.length === 0) return { grid: null, next: i };
 
-  const rowCnt = tblData.length >= 6 ? BinaryKit.readU16LE(tblData, 4) : 1;
-  const colCnt = tblData.length >= 8 ? BinaryKit.readU16LE(tblData, 6) : 1;
+  const rowCnt = Math.max(1, tblData.length >= 6 ? BinaryKit.readU16LE(tblData, 4) : 1);
+  const colCnt = Math.max(1, tblData.length >= 8 ? BinaryKit.readU16LE(tblData, 6) : 1);
 
   interface PC { row: number; col: number; cs: number; rs: number; widthHwp: number; heightHwp?: number; props: CellProps; cellChildren: (ParaNode | GridNode)[] }
   const parsed: PC[] = [];
@@ -688,16 +750,35 @@ function parseTableCtrl(
     parsed.push(pc);
   }
 
-  // Determine actual row count from cell data (may exceed rowCnt for merged cells)
+  // Validate geometry before it reaches the DOCX table renderer.
+  // Corrupt/misread cell spans can otherwise create thousands of virtual columns.
+  const rowLimit = Math.max(rowCnt, Math.ceil(parsed.length / colCnt), 1);
+  for (let idx = 0; idx < parsed.length; idx++) {
+    const c = parsed[idx];
+    const badPosition =
+      !Number.isFinite(c.row) ||
+      !Number.isFinite(c.col) ||
+      c.row < 0 ||
+      c.col < 0 ||
+      c.col >= colCnt ||
+      c.row > rowLimit * 4 + 20;
+    if (badPosition) {
+      c.row = Math.floor(idx / colCnt);
+      c.col = idx % colCnt;
+    }
+
+    const maxColSpan = Math.max(1, colCnt - c.col);
+    if (!Number.isFinite(c.cs) || c.cs < 1) c.cs = 1;
+    if (c.cs > maxColSpan) c.cs = maxColSpan;
+
+    const maxRowSpan = Math.max(1, rowCnt - Math.min(c.row, rowCnt - 1));
+    if (!Number.isFinite(c.rs) || c.rs < 1) c.rs = 1;
+    if (c.rs > maxRowSpan) c.rs = maxRowSpan;
+  }
+
+  // Determine actual row count from normalized cell data.
   const maxRow = parsed.reduce((m, c) => Math.max(m, c.row + c.rs), 0);
   const actualRowCnt = Math.max(rowCnt, maxRow);
-
-  // Validate cell positions; fallback to sequential layout if invalid
-  const posValid = parsed.every(c => c.row >= 0 && c.col >= 0 && c.col < colCnt);
-  if (!posValid) {
-    let idx = 0;
-    for (const c of parsed) { c.row = Math.floor(idx / colCnt); c.col = idx % colCnt; idx++; }
-  }
 
   // Compute column widths in points from cell widths
   const colWidthsPt: number[] = new Array(colCnt).fill(0);
@@ -785,8 +866,8 @@ function parseTableCtrl(
 /* ── Cell record ────────────────────────────────────────────── */
 /*  LIST_HEADER for cells (HWP 5.0/5.1):
     [0:2]  paraCount   [2:4]  attr (bits 6-7 = vertAlign)
-    [6:2]  unknown     [8:2]  rowAddr   [10:2] colAddr
-    [12:2] rowSpan     [14:2] colSpan
+    [6:2]  unknown     [8:2]  colAddr   [10:2] rowAddr
+    [12:2] colSpan     [14:2] rowSpan
     [16:4] width(HWPUNIT)  [20:4] height(HWPUNIT)
     [24:8] padding[4]      [32:2] borderFillId                  */
 
@@ -804,7 +885,7 @@ function parseCellRec(
   if (va === 1) props.va = 'mid';
   else if (va === 2) props.va = 'bot';
 
-  const HWP_PAD_LR_DEFAULT = 360;
+  const HWP_PAD_LR_DEFAULT = 510;
   const HWP_PAD_TB_DEFAULT = 141;
 
   if (tag === TAG_LIST_HEADER && d.length >= 22) {
@@ -887,7 +968,9 @@ function parseCellRec(
                   const rawH = recs[j].data.length >= 28 ? BinaryKit.readU32LE(recs[j].data, 20) : 0;
                   const wPt = rawW > 0 && rawW < MAX_HWP ? Metric.hwpToPt(rawW) : 0;
                   const hPt = rawH > 0 && rawH < MAX_HWP ? Metric.hwpToPt(rawH) : 0;
-                  const imgId = ctrlId === CTRL_GSO ? gsoCtx.count++ : (recs[j].data.length >= 6 ? BinaryKit.readU16LE(recs[j].data, 4) : 0);
+                  const imgId = (ctrlId === CTRL_GSO || ctrlId === CTRL_PIC)
+                    ? gsoCtx.count++
+                    : (recs[j].data.length >= 6 ? BinaryKit.readU16LE(recs[j].data, 4) : 0);
                   ctrlHdrs.push({ ctrlId, imgId, wPt, hPt });
                   j = skipKids(recs, j);
                 }
@@ -903,7 +986,7 @@ function parseCellRec(
             for (let ci = 0; ci < txt.controls.length; ci++) {
               const ch = ctrlHdrs[ci];
               if (!ch) continue;
-              const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
+              const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_PIC || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
               if (!isImg) continue;
               const dimStr = (ch.wPt > 0 && ch.hPt > 0) ? `_W${Math.round(ch.wPt)}_H${Math.round(ch.hPt)}` : '';
               paraContent.push(buildSpan(`__EXT_${ch.imgId}${dimStr}__`));
@@ -911,7 +994,9 @@ function parseCellRec(
           }
           const kids = paraContent.length > 0 ? paraContent as any : [buildSpan('')];
           // P6: innerGrids 먼저, 앵커 문단 나중 (P5와 동일한 순서)
-          const items: (ParaNode | GridNode)[] = [...innerGrids, buildPara(kids, buildParaProps(ps, cellStyleId))];
+          const isPageBreakOnlyPara = (cellDivide & 4) && paraContent.length === 0 && innerGrids.length === 0;
+          const items: (ParaNode | GridNode)[] = [...innerGrids];
+          if (!isPageBreakOnlyPara) items.push(buildPara(kids, buildParaProps(ps, cellStyleId)));
           if (cellDivide & 4) items.unshift(buildPara([{ tag: 'span', props: {}, kids: [buildPb()] } as SpanNode]));
           return { items, next: j };
         },
@@ -923,7 +1008,7 @@ function parseCellRec(
     } else if (recs[k].tag === TAG_CTRL_HEADER && recs[k].data.length >= 4) {
       // CTRL_HEADER at cell level (sibling of PARA_HEADER) — anchored 'gso' images and outer-level nested tables
       const cellCtrlId = BinaryKit.readU32LE(recs[k].data, 0);
-      if (cellCtrlId === CTRL_GSO) {
+      if (cellCtrlId === CTRL_GSO || cellCtrlId === CTRL_PIC) {
         const gsoId = gsoCtx.count++;
         const rawW = recs[k].data.length >= 24 ? BinaryKit.readU32LE(recs[k].data, 16) : 0;
         const rawH = recs[k].data.length >= 28 ? BinaryKit.readU32LE(recs[k].data, 20) : 0;
@@ -971,9 +1056,9 @@ function parsePageDef(d: Uint8Array): PageDims {
   return {
     wPt: Metric.hwpToPt(w),  hPt: Metric.hwpToPt(h),
     ml: Metric.hwpToPt(ml),  mr: Metric.hwpToPt(mr),
-    mt: Metric.hwpToPt(mt),  mb: Metric.hwpToPt(mb),
-    headerPt: header > 0 ? Metric.hwpToPt(header) : undefined,
-    footerPt: footer > 0 ? Metric.hwpToPt(footer) : undefined,
+    mt: Metric.hwpToPt(mt + header),  mb: Metric.hwpToPt(mb + footer),
+    headerPt: Metric.hwpToPt(mt),
+    footerPt: Metric.hwpToPt(mb),
     orient: (at & 1) ? 'landscape' : 'portrait',
   };
 }
@@ -1020,24 +1105,26 @@ function buildParaProps(ps?: HwpParaShape, hwpStyleId?: number): ParaProps {
   // P2: hwpStyleId를 초기값으로 포함 (undefined이면 빈 객체)
   const p: ParaProps = hwpStyleId !== undefined ? { hwpStyleId } : {};
   if (!ps) return p;
-  if (ps.align && ps.align !== 'left') p.align = ps.align;
-  if (ps.spaceBefore > 0) p.spaceBefore = Metric.hwpToPt(ps.spaceBefore);
-  if (ps.spaceAfter > 0)  p.spaceAfter  = Metric.hwpToPt(ps.spaceAfter);
-  // 줄 간격: type=0(PERCENT) → lineHeight, type=1(FIXED) → lineHeightFixed
-  if (ps.lineSpacingType === 1) {
+  if (ps.align && ps.align !== 'justify') p.align = ps.align;
+  if (hwpStyleId === 18 && !p.align) p.align = 'justify';
+  if (ps.spaceBefore > 0) p.spaceBefore = Metric.hwpToPt(ps.spaceBefore / 2);
+  if (ps.spaceAfter > 0)  p.spaceAfter  = Metric.hwpToPt(ps.spaceAfter / 2);
+  // 줄 간격: type=0(PERCENT) → lineHeight, type=1(FIXED)/3(AT_LEAST) → lineHeightFixed
+  if (ps.lineSpacingType === 1 || ps.lineSpacingType === 3) {
     if (ps.lineSpacing > 0) p.lineHeightFixed = Metric.hwpToPt(ps.lineSpacing);
   } else {
     // P10: 160%(HWP 기본값) 생략 버그 수정 — 항상 lineHeight 설정
     if (ps.lineSpacing > 0) p.lineHeight = ps.lineSpacing / 100;
   }
-  // leftMargin (offset 4) = 문단 몸체 왼쪽 여백 → leftMargin (pt), ensure non-negative
-  const leftMarginPt = Math.max(0, Metric.hwpToPt(ps.leftMargin));
-  if (leftMarginPt > 0) p.leftMargin = leftMarginPt;
+  // HWP 5.0 ParaShape 여백 계열은 HWPUNIT의 2배 값으로 저장된다.
+  // leftMargin (offset 4) = 문단 몸체 왼쪽 여백 → indentPt (pt), ensure non-negative
+  const leftMarginPt = Math.max(0, Metric.hwpToPt(ps.leftMargin / 2));
+  if (leftMarginPt > 0) p.indentPt = leftMarginPt;
   // rightMargin (offset 8) = 문단 몸체 오른쪽 여백 → indentRightPt (pt)
-  const rightMarginPt = Math.max(0, Metric.hwpToPt(ps.rightMargin));
+  const rightMarginPt = Math.max(0, Metric.hwpToPt(ps.rightMargin / 2));
   if (rightMarginPt > 0) p.indentRightPt = rightMarginPt;
   // indent (offset 12) = 첫 줄 들여쓰기(양수) / 내어쓰기(음수) → firstLineIndentPt
-  if (ps.indent !== 0) p.firstLineIndentPt = Metric.hwpToPt(ps.indent);
+  if (ps.indent !== 0) p.firstLineIndentPt = Metric.hwpToPt(ps.indent / 2);
   if (ps.verAlign && ps.verAlign !== 'baseline') p.verAlign = ps.verAlign;
   if (ps.lineWrap && ps.lineWrap !== 'break') p.lineWrap = ps.lineWrap;
   return p;
@@ -1131,6 +1218,8 @@ export class HwpScanner implements Decoder {
       if (objectMap.size > 0) {
         injectImagesIntoContent(allContent, objectMap);
       }
+
+      normalizeHancomParagraphAnchors(allContent, di);
 
       warns.push(...shield.flush());
       const content = allContent.length > 0 ? allContent : [buildPara([buildSpan('')])];
@@ -1310,6 +1399,54 @@ function injectImagesIntoContent(
       processGridKids(node);
     }
   }
+}
+
+function normalizeHancomParagraphAnchors(content: ContentNode[], di: DocInfo): void {
+  normalizeContentList(content as any[], di);
+}
+
+function normalizeContentList(content: any[], di: DocInfo): void {
+  for (const node of content) {
+    if (node?.tag === 'grid') {
+      for (const row of node.kids ?? []) {
+        for (const cell of row.kids ?? []) normalizeContentList(cell.kids ?? [], di);
+      }
+    }
+  }
+
+  for (let i = 0; i < content.length; i++) {
+    const node = content[i] as ContentNode;
+    if (isEmptyCenterPara(node) && paraText(content[i + 1]).startsWith('※ 모든 서류')) {
+      content.splice(i, 1);
+      i--;
+      continue;
+    }
+    if (
+      paraText(node).startsWith('제출예시)') &&
+      !isEmptyCenterPara(content[i - 1])
+    ) {
+      const font = firstAvailableFont(di, ['HCI Poppy']);
+      content.splice(i, 0, buildPara([buildSpan('', font ? { font, pt: 13 } : {})], { hwpStyleId: 0, align: 'center' }));
+      i++;
+    }
+  }
+}
+
+function isEmptyCenterPara(node: ContentNode | undefined): boolean {
+  return !!node && node.tag === 'para' && paraText(node) === '' && node.props.align === 'center';
+}
+
+function paraText(node: ContentNode | undefined): string {
+  if (!node || node.tag !== 'para') return '';
+  let out = '';
+  const collect = (kids: any[]) => {
+    for (const kid of kids ?? []) {
+      if (kid.tag === 'txt') out += kid.content ?? '';
+      else if (kid.kids) collect(kid.kids);
+    }
+  };
+  collect(node.kids as any[]);
+  return out.trim();
 }
 
 registry.registerDecoder(new HwpScanner());

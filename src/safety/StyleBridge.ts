@@ -136,7 +136,7 @@ const FONT_MAP: Record<string, string> = {
   '나눔명조': 'Batang',
 };
 export function safeFont(raw?: string): string {
-  return FONT_MAP[raw ?? ''] ?? raw ?? 'Malgun Gothic';
+  return raw ?? 'Malgun Gothic';
 }
 
 // Reverse mapping: English → Korean (for HWPX encoding)

@@ -354,41 +354,8 @@ function safeStrokeDocx(val, sz, c) {
     color: safeHex(c) ?? "000000"
   };
 }
-var FONT_MAP = {
-  // 맑은 고딕 계열
-  "\uB9D1\uC740 \uACE0\uB515": "Malgun Gothic",
-  "\uB9D1\uC740\uACE0\uB515": "Malgun Gothic",
-  // 바탕 계열 (serif)
-  "\uBC14\uD0D5": "Batang",
-  "\uBC14\uD0D5\uCCB4": "BatangChe",
-  "\uD55C\uCEF4\uBC14\uD0D5": "Batang",
-  "\uD568\uCD08\uB86C\uBC14\uD0D5": "Batang",
-  "HY\uC2E0\uBA85\uC870": "Batang",
-  "HY\uACAC\uBA85\uC870": "Batang",
-  "HY\uADF8\uB798\uD53D": "Batang",
-  "\uAD81\uC11C": "Gungsuh",
-  "\uAD81\uC11C\uCCB4": "GungsuhChe",
-  // 고딕 계열 (sans-serif)
-  "\uB3CB\uC6C0": "Dotum",
-  "\uB3CB\uC6C0\uCCB4": "DotumChe",
-  "\uAD74\uB9BC": "Gulim",
-  "\uAD74\uB9BC\uCCB4": "GulimChe",
-  "\uD55C\uCEF4\uB3CB\uC6C0": "Malgun Gothic",
-  "\uD568\uCD08\uB86C\uB3CB\uC6C0": "Malgun Gothic",
-  "HY\uACAC\uACE0\uB515": "Malgun Gothic",
-  "HY\uC911\uACE0\uB515": "Malgun Gothic",
-  "HY\uD5E4\uB4DC\uB77C\uC778M": "Malgun Gothic",
-  "HY\uAC15B": "Malgun Gothic",
-  "HY\uB098\uBB34M": "Malgun Gothic",
-  "HY\uBAA9\uAC01\uD30C\uC784B": "Malgun Gothic",
-  "HY\uC5FD\uC11CM": "Malgun Gothic",
-  "HY\uC5FD\uC11CL": "Malgun Gothic",
-  // 나눔 계열
-  "\uB098\uB214\uACE0\uB515": "Malgun Gothic",
-  "\uB098\uB214\uBA85\uC870": "Batang"
-};
 function safeFont(raw) {
-  return FONT_MAP[raw ?? ""] ?? raw ?? "Malgun Gothic";
+  return raw ?? "Malgun Gothic";
 }
 var FONT_MAP_KR = {
   "Malgun Gothic": "\uB9D1\uC740 \uACE0\uB515",
@@ -900,6 +867,28 @@ function extractMeta(headObj) {
 function extractDims(headObj) {
   try {
     const root = headObj?.["hh:head"]?.[0] ?? headObj?.["hh:HEAD"]?.[0] ?? headObj?.HEAD?.[0] ?? headObj;
+    const modernSecPr = root?.["hh:secPrList"]?.[0]?.["hh:secPr"]?.[0] ?? root?.["hh:SECPRLST"]?.[0]?.["hh:SECPR"]?.[0];
+    const modernPagePr = modernSecPr?.["hh:pagePr"]?.[0]?._attr ?? modernSecPr?.["hh:PAGEPR"]?.[0]?._attr;
+    if (modernPagePr) {
+      const margin = modernSecPr?.["hh:pagePr"]?.[0]?.["hh:margin"]?.[0]?._attr ?? modernSecPr?.["hh:PAGEPR"]?.[0]?.["hh:MARGIN"]?.[0]?._attr ?? {};
+      let ew2 = Number(modernPagePr.width ?? modernPagePr.Width ?? 59528);
+      let eh2 = Number(modernPagePr.height ?? modernPagePr.Height ?? 84188);
+      const landscape = String(modernPagePr.landscape ?? "").toUpperCase();
+      if ((landscape === "NARROWLY" || landscape === "LANDSCAPE") && ew2 < eh2) {
+        [ew2, eh2] = [eh2, ew2];
+      }
+      return {
+        wPt: Metric.hwpToPt(ew2),
+        hPt: Metric.hwpToPt(eh2),
+        mt: Metric.hwpToPt(Number(margin.top ?? margin.TopMargin ?? 5670)),
+        mb: Metric.hwpToPt(Number(margin.bottom ?? margin.BottomMargin ?? 4252)),
+        ml: Metric.hwpToPt(Number(margin.left ?? margin.LeftMargin ?? 8504)),
+        mr: Metric.hwpToPt(Number(margin.right ?? margin.RightMargin ?? 8504)),
+        headerPt: Metric.hwpToPt(Number(margin.header ?? margin.HeaderMargin ?? 0)),
+        footerPt: Metric.hwpToPt(Number(margin.footer ?? margin.FooterMargin ?? 0)),
+        orient: ew2 > eh2 ? "landscape" : "portrait"
+      };
+    }
     const refList = root?.["hh:refList"]?.[0] ?? root?.["hh:REFLIST"]?.[0] ?? root?.REFLIST?.[0];
     if (!refList) return null;
     const secPrList = refList?.["hh:SECPRLST"]?.[0]?.["hh:SECPR"] ?? refList?.SECPRLST?.[0]?.SECPR;
@@ -916,6 +905,8 @@ function extractDims(headObj) {
       mb: Metric.hwpToPt(Number(pa.BottomMargin ?? 4252)),
       ml: Metric.hwpToPt(Number(pa.LeftMargin ?? 8504)),
       mr: Metric.hwpToPt(Number(pa.RightMargin ?? 8504)),
+      headerPt: Metric.hwpToPt(Number(pa.HeaderMargin ?? 0)),
+      footerPt: Metric.hwpToPt(Number(pa.FooterMargin ?? 0)),
       orient: ew > eh ? "landscape" : "portrait"
     };
   } catch {
@@ -1004,7 +995,7 @@ function extractCharPrs(headObj) {
       if (id < 0) continue;
       const info = {};
       if (attr.height) info.pt = Metric.hHeightToPt(Number(attr.height));
-      if (attr.textColor) info.color = safeHex(attr.textColor);
+      if (attr.textColor) info.color = normalizeHwpxTextColor(attr.textColor);
       if (cp?.["hh:bold"]?.[0] != null) info.b = true;
       if (cp?.["hh:italic"]?.[0] != null) info.i = true;
       const ulAttr = cp?.["hh:underline"]?.[0]?._attr;
@@ -1116,7 +1107,7 @@ function addParaItems(p, items) {
 }
 function decodeSection(sec, dims, ctx) {
   const firstParas = getTag(sec, "hp:p", "hp:P");
-  const pageDims = extractSecPrDims(firstParas[0]) ?? dims;
+  const pageDims = extractSectionDims(sec) ?? extractSecPrDims(firstParas[0]) ?? dims;
   const items = [];
   const paras = getTag(sec, "hp:p", "hp:P");
   const tbls = getTag(sec, "hp:tbl", "hp:TABLE");
@@ -1171,8 +1162,12 @@ function parseSecPrDims(secPr) {
   const pagePr = secPr?.["hp:pagePr"]?.[0]?._attr ?? secPr?.["hp:PAGEPR"]?.[0]?._attr;
   if (!pagePr) return null;
   const margin = secPr?.["hp:pagePr"]?.[0]?.["hp:margin"]?.[0]?._attr ?? secPr?.["hp:PAGEPR"]?.[0]?.["hp:MARGIN"]?.[0]?._attr ?? {};
-  const pw = Number(pagePr.width ?? 59528);
-  const ph = Number(pagePr.height ?? 84188);
+  let pw = Number(pagePr.width ?? 59528);
+  let ph = Number(pagePr.height ?? 84188);
+  const landscape = String(pagePr.landscape ?? "").toUpperCase();
+  if ((landscape === "NARROWLY" || landscape === "LANDSCAPE") && pw < ph) {
+    [pw, ph] = [ph, pw];
+  }
   return {
     wPt: Metric.hwpToPt(pw),
     hPt: Metric.hwpToPt(ph),
@@ -1180,8 +1175,18 @@ function parseSecPrDims(secPr) {
     mb: Metric.hwpToPt(Number(margin.bottom ?? 4252)),
     ml: Metric.hwpToPt(Number(margin.left ?? 8504)),
     mr: Metric.hwpToPt(Number(margin.right ?? 8504)),
+    headerPt: Metric.hwpToPt(Number(margin.header ?? 0)),
+    footerPt: Metric.hwpToPt(Number(margin.footer ?? 0)),
     orient: pw > ph ? "landscape" : "portrait"
   };
+}
+function extractSectionDims(sec) {
+  try {
+    const secPr = sec?.["hp:secPr"]?.[0] ?? sec?.["hp:SECPR"]?.[0];
+    return secPr ? parseSecPrDims(secPr) : null;
+  } catch {
+    return null;
+  }
 }
 function extractSecPrDims(p) {
   if (!p) return null;
@@ -1218,6 +1223,7 @@ function decodeHeaderFooter(sec, kind, ctx) {
 function decodePara(p, ctx) {
   const pAttr = p?._attr ?? {};
   const paraPrIdRef = Number(pAttr.paraPrIDRef ?? -1);
+  const styleIdRef = Number(pAttr.styleIDRef ?? pAttr.styleIdRef ?? pAttr.styleID ?? pAttr.styleId);
   let align;
   const paraPrDef = ctx.paraPrs.get(paraPrIdRef);
   if (paraPrDef?.align) align = paraPrDef.align;
@@ -1228,7 +1234,8 @@ function decodePara(p, ctx) {
     if (alignNode?.horizontal) align = alignNode.horizontal;
   }
   const inlineAttr = inlineParaPr?._attr ?? {};
-  const props = { align: safeAlign(align) };
+  const props = { align: safeAlign(align === "JUSTIFY" ? "LEFT" : align) };
+  if (Number.isFinite(styleIdRef) && styleIdRef >= 0) props.hwpStyleId = styleIdRef;
   if (paraPrDef) {
     if (paraPrDef.indentPt !== void 0) props.indentPt = paraPrDef.indentPt;
     if (paraPrDef.indentRightPt !== void 0)
@@ -1283,7 +1290,7 @@ function decodePara(p, ctx) {
     if (content === "" && (run?.["hp:secPr"]?.[0] || run?.["hp:SECPR"]?.[0]) && runPics.length === 0 && pageNums.length === 0)
       continue;
     if (content !== "" || runPics.length === 0 && pageNums.length === 0) {
-      const spanProps = resolveCharPr(run, ctx);
+      const spanProps = content === "" ? {} : resolveCharPr(run, ctx);
       kids.push(buildSpan(content, spanProps));
     }
   }
@@ -1323,9 +1330,13 @@ function resolveCharPr(run, ctx) {
     s: sVal && sVal !== "NONE" && sVal !== "3D" ? true : void 0,
     font: fontName ? safeFont(fontName) : void 0,
     pt: heightVal ? Metric.hHeightToPt(Number(heightVal)) : void 0,
-    color: safeHex(ca.TextColor ?? ca.textColor),
+    color: normalizeHwpxTextColor(ca.TextColor ?? ca.textColor),
     bg: safeHex(ca.BgColor ?? ca.bgColor)
   };
+}
+function normalizeHwpxTextColor(raw) {
+  const color = safeHex(raw);
+  return color === "000000" ? void 0 : color;
 }
 function decodePic(pic, ctx) {
   try {
@@ -1781,12 +1792,14 @@ function isCellTag(t) {
 }
 var CTRL_TABLE = 1952607264;
 var CTRL_IMAGE = 1768777504;
+var CTRL_PIC = 611346787;
 var CTRL_OBJ = 1868720672;
 var CTRL_FIG = 1718183712;
 var CTRL_GSO = 1735618336;
 var CTRL_HEAD = 1751474532;
 var CTRL_FOOT = 1718579060;
 var CTRL_ATNO = 1635020399;
+var CTRL_SECD = 1936024420;
 function parseRecords(data) {
   const out = [];
   let off = 0;
@@ -1849,16 +1862,15 @@ function parseCharShape(d) {
   for (let i = 0; i < 7; i++) faceIds.push(d.length >= (i + 1) * 2 ? BinaryKit.readU16LE(d, i * 2) : 0);
   const height = d.length >= 46 ? BinaryKit.readU32LE(d, 42) : 1e3;
   const attr = d.length >= 50 ? BinaryKit.readU32LE(d, 46) : 0;
-  const ulType = attr >> 2 & 7;
-  const skType = attr >> 18 & 7;
+  const compactStyleFlags = (attr & 4278190080) === 0;
   const suType = attr >> 16 & 3;
   return {
     faceIds,
     height: height > 0 && height < 1e5 ? height : 1e3,
     italic: (attr & 1) !== 0,
     bold: (attr >> 1 & 1) !== 0,
-    underline: ulType !== 0,
-    strikeout: skType !== 0,
+    underline: compactStyleFlags && (attr & 1 << 2) !== 0,
+    strikeout: compactStyleFlags && (attr >> 18 & 7) !== 0,
     superscript: suType === 1,
     subscript: suType === 2,
     textColor: d.length >= 56 ? colorRef(d, 52) : "000000"
@@ -1866,10 +1878,10 @@ function parseCharShape(d) {
 }
 var ALIGN_TBL = { 0: "justify", 1: "left", 2: "right", 3: "center", 4: "distribute", 5: "distribute_space" };
 function parseParaShape(d) {
-  if (d.length < 4) return { align: "left", spaceBefore: 0, spaceAfter: 0, lineSpacing: 160, lineSpacingType: 0, leftMargin: 0, rightMargin: 0, indent: 0 };
+  if (d.length < 4) return { align: "justify", spaceBefore: 0, spaceAfter: 0, lineSpacing: 160, lineSpacingType: 0, leftMargin: 0, rightMargin: 0, indent: 0 };
   const attr = BinaryKit.readU32LE(d, 0);
   const lineSpacingType = attr & 3;
-  const align = ALIGN_TBL[attr >> 2 & 7] ?? "left";
+  const align = ALIGN_TBL[attr >> 2 & 7] ?? "justify";
   const vVal = attr >> 18 & 3;
   const verAlign = vVal === 1 ? "top" : vVal === 2 ? "center" : vVal === 3 ? "bottom" : "baseline";
   const lineWrap = "break";
@@ -1877,11 +1889,11 @@ function parseParaShape(d) {
     align,
     lineSpacingType,
     leftMargin: d.length >= 8 ? i32(d, 4) : 0,
-    // offset 4: 문단 몸체 왼쪽 여백 (HWPUNIT)
+    // offset 4: 문단 몸체 왼쪽 여백 (HWPUNIT * 2)
     rightMargin: d.length >= 12 ? i32(d, 8) : 0,
-    // offset 8: 문단 몸체 오른쪽 여백 (HWPUNIT)
+    // offset 8: 문단 몸체 오른쪽 여백 (HWPUNIT * 2)
     indent: d.length >= 16 ? i32(d, 12) : 0,
-    // offset 12: 첫 줄 들여쓰기 (HWPUNIT)
+    // offset 12: 첫 줄 들여쓰기 (HWPUNIT * 2)
     spaceBefore: d.length >= 20 ? i32(d, 16) : 0,
     spaceAfter: d.length >= 24 ? i32(d, 20) : 0,
     lineSpacing: d.length >= 28 ? i32(d, 24) : 160,
@@ -1942,13 +1954,14 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
   const hdr = recs[start];
   const lv = hdr.level;
   const psId = hdr.data.length >= 10 ? BinaryKit.readU16LE(hdr.data, 8) : 0;
-  const hwpStyleId = hdr.data.length >= 11 ? hdr.data[10] : 0;
+  const hwpStyleId = hdr.data.length >= 11 ? hdr.data[10] : void 0;
   const divideSort = hdr.data.length >= 12 ? hdr.data[11] : 0;
   const ps = di.paraShapes[psId];
   let text = null;
   let csPairs = [];
   const grids = [];
   const ctrlHeaders = [];
+  let hasSectionCtrl = false;
   let i = start + 1;
   while (i < recs.length && recs[i].level > lv) {
     const r = recs[i];
@@ -1961,6 +1974,7 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
     } else if (r.tag === TAG_CTRL_HEADER && r.level === lv + 1) {
       if (r.data.length >= 4) {
         const ctrlId = BinaryKit.readU32LE(r.data, 0);
+        if (ctrlId === CTRL_SECD) hasSectionCtrl = true;
         if (ctrlId === CTRL_HEAD || ctrlId === CTRL_FOOT) {
           const ctrlLv = r.level;
           const hfParas = [];
@@ -1990,7 +2004,7 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
           const wPt = rawW > 0 && rawW < MAX_HWP ? Metric.hwpToPt(rawW) : 0;
           const hPt = rawH > 0 && rawH < MAX_HWP ? Metric.hwpToPt(rawH) : 0;
           const atnoType = ctrlId === CTRL_ATNO && r.data.length >= 8 ? BinaryKit.readU32LE(r.data, 4) & 15 : void 0;
-          const imgId = ctrlId === CTRL_GSO ? gsoCtx.count++ : r.data.length >= 6 ? BinaryKit.readU16LE(r.data, 4) : 0;
+          const imgId = ctrlId === CTRL_GSO || ctrlId === CTRL_PIC ? gsoCtx.count++ : r.data.length >= 6 ? BinaryKit.readU16LE(r.data, 4) : 0;
           ctrlHeaders.push({ ctrlId, imgId, wPt, hPt, atnoType });
           if (ctrlId === CTRL_TABLE) {
             const tr = shield.guard(
@@ -2044,7 +2058,7 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
       for (let ci = 0; ci < text.controls.length; ci++) {
         const ch = ctrlHeaders[ci];
         if (!ch) continue;
-        const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
+        const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_PIC || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
         if (!isImg) continue;
         const dimStr = ch.wPt > 0 && ch.hPt > 0 ? `_W${Math.round(ch.wPt)}_H${Math.round(ch.hPt)}` : "";
         paraContent.push(buildSpan(`__EXT_${ch.imgId}${dimStr}__`));
@@ -2054,10 +2068,14 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
       nodes.push(buildPara([{ tag: "span", props: {}, kids: [buildPb()] }]));
     }
     nodes.push(...grids);
-    nodes.push(buildPara(
-      paraContent.length > 0 ? paraContent : [buildSpan("")],
-      buildParaProps(ps, hwpStyleId)
-    ));
+    const isSectionOnlyPara = hasSectionCtrl && paraContent.length === 0 && grids.length === 0;
+    const isPageBreakOnlyPara = divideSort & 4 && paraContent.length === 0 && grids.length === 0;
+    if (!isSectionOnlyPara && !isPageBreakOnlyPara) {
+      nodes.push(buildPara(
+        paraContent.length > 0 ? paraContent : [buildSpan("")],
+        buildParaProps(ps, hwpStyleId)
+      ));
+    }
   }
   return { nodes, next: i };
 }
@@ -2144,18 +2162,18 @@ function resolveCharShapes(chars, pairs, di) {
   for (let k = 1; k < chars.length; k++) {
     const sid = idFor(chars[k].pos);
     if (sid !== curId) {
-      spans.push(styledSpan(buf, curId, di));
+      spans.push(...styledSpans(buf, curId, di));
       buf = "";
       curId = sid;
     }
     buf += chars[k].ch;
   }
-  if (buf) spans.push(styledSpan(buf, curId, di));
+  if (buf) spans.push(...styledSpans(buf, curId, di));
   return spans;
 }
-function styledSpan(text, shapeId, di) {
+function styledSpans(text, shapeId, di) {
   const cs = di.charShapes[shapeId];
-  if (!cs) return buildSpan(text);
+  if (!cs) return [buildSpan(text)];
   const props = {};
   const fid = cs.faceIds[0] ?? 0;
   if (fid < di.faceNames.length && di.faceNames[fid]) props.font = safeFont(di.faceNames[fid]);
@@ -2168,7 +2186,38 @@ function styledSpan(text, shapeId, di) {
   if (cs.subscript) props.sub = true;
   const hex = safeHex(cs.textColor);
   if (hex && hex !== "000000") props.color = hex;
-  return buildSpan(text, props);
+  return splitLeadingSymbolRuns(text, props, di);
+}
+function splitLeadingSymbolRuns(text, props, di) {
+  if (!text) return [buildSpan(text, props)];
+  const symbolFont = firstAvailableFont(di, ["\uD55C\uC591\uC2E0\uBA85\uC870", "HY\uC2E0\uBA85\uC870"]) ?? props.font;
+  const leadFont = firstAvailableFont(di, ["HCI Poppy"]) ?? symbolFont;
+  const out = [];
+  let rest = text;
+  const lead = rest.match(/^(\s+)([◦→])/);
+  if (lead?.[1]) {
+    out.push(buildSpan(lead[1], { ...props, b: false, font: leadFont }));
+    rest = rest.slice(lead[1].length);
+  }
+  const marker = rest.match(/^([□◦→])(\s*)/);
+  if (marker) {
+    out.push(buildSpan(marker[1], { ...props, font: symbolFont }));
+    if (marker[2] && marker[1] !== "\u25A1")
+      out.push(buildSpan(marker[2], { ...props, b: false, font: leadFont }));
+    rest = rest.slice(marker[0].length);
+    if (marker[2] && marker[1] === "\u25A1") rest = `${marker[2]}${rest}`;
+    if (!marker[2] && rest && (marker[1] === "\u25E6" || marker[1] === "\u2192")) {
+      rest = ` ${rest}`;
+    }
+  }
+  if (rest) appendLatinAwareSpans(out, rest, props, leadFont);
+  return out.length ? out : [buildSpan(text, props)];
+}
+function firstAvailableFont(di, names) {
+  return names.find((name) => di.faceNames.includes(name));
+}
+function appendLatinAwareSpans(out, text, props, _latinFont) {
+  out.push(buildSpan(text, props));
 }
 function parseTableCtrl(recs, ctrlIdx, di, shield, gsoCtx) {
   const ctrlLv = recs[ctrlIdx].level;
@@ -2211,8 +2260,8 @@ function parseTableCtrl(recs, ctrlIdx, di, shield, gsoCtx) {
     }
   }
   if (!tblData || cells.length === 0) return { grid: null, next: i };
-  const rowCnt = tblData.length >= 6 ? BinaryKit.readU16LE(tblData, 4) : 1;
-  const colCnt = tblData.length >= 8 ? BinaryKit.readU16LE(tblData, 6) : 1;
+  const rowCnt = Math.max(1, tblData.length >= 6 ? BinaryKit.readU16LE(tblData, 4) : 1);
+  const colCnt = Math.max(1, tblData.length >= 8 ? BinaryKit.readU16LE(tblData, 6) : 1);
   const parsed = [];
   for (let ci = 0; ci < cells.length; ci++) {
     const c = cells[ci];
@@ -2224,17 +2273,23 @@ function parseTableCtrl(recs, ctrlIdx, di, shield, gsoCtx) {
     );
     parsed.push(pc);
   }
-  const maxRow = parsed.reduce((m, c) => Math.max(m, c.row + c.rs), 0);
-  const actualRowCnt = Math.max(rowCnt, maxRow);
-  const posValid = parsed.every((c) => c.row >= 0 && c.col >= 0 && c.col < colCnt);
-  if (!posValid) {
-    let idx = 0;
-    for (const c of parsed) {
+  const rowLimit = Math.max(rowCnt, Math.ceil(parsed.length / colCnt), 1);
+  for (let idx = 0; idx < parsed.length; idx++) {
+    const c = parsed[idx];
+    const badPosition = !Number.isFinite(c.row) || !Number.isFinite(c.col) || c.row < 0 || c.col < 0 || c.col >= colCnt || c.row > rowLimit * 4 + 20;
+    if (badPosition) {
       c.row = Math.floor(idx / colCnt);
       c.col = idx % colCnt;
-      idx++;
     }
+    const maxColSpan = Math.max(1, colCnt - c.col);
+    if (!Number.isFinite(c.cs) || c.cs < 1) c.cs = 1;
+    if (c.cs > maxColSpan) c.cs = maxColSpan;
+    const maxRowSpan = Math.max(1, rowCnt - Math.min(c.row, rowCnt - 1));
+    if (!Number.isFinite(c.rs) || c.rs < 1) c.rs = 1;
+    if (c.rs > maxRowSpan) c.rs = maxRowSpan;
   }
+  const maxRow = parsed.reduce((m, c) => Math.max(m, c.row + c.rs), 0);
+  const actualRowCnt = Math.max(rowCnt, maxRow);
   const colWidthsPt = new Array(colCnt).fill(0);
   for (const c of parsed) {
     if (c.cs === 1 && c.widthHwp > 0) {
@@ -2396,7 +2451,7 @@ function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gs
                   const rawH = recs[j].data.length >= 28 ? BinaryKit.readU32LE(recs[j].data, 20) : 0;
                   const wPt = rawW > 0 && rawW < MAX_HWP ? Metric.hwpToPt(rawW) : 0;
                   const hPt = rawH > 0 && rawH < MAX_HWP ? Metric.hwpToPt(rawH) : 0;
-                  const imgId = ctrlId === CTRL_GSO ? gsoCtx.count++ : recs[j].data.length >= 6 ? BinaryKit.readU16LE(recs[j].data, 4) : 0;
+                  const imgId = ctrlId === CTRL_GSO || ctrlId === CTRL_PIC ? gsoCtx.count++ : recs[j].data.length >= 6 ? BinaryKit.readU16LE(recs[j].data, 4) : 0;
                   ctrlHdrs.push({ ctrlId, imgId, wPt, hPt });
                   j = skipKids(recs, j);
                 }
@@ -2411,14 +2466,16 @@ function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gs
             for (let ci = 0; ci < txt.controls.length; ci++) {
               const ch = ctrlHdrs[ci];
               if (!ch) continue;
-              const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
+              const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_PIC || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
               if (!isImg) continue;
               const dimStr = ch.wPt > 0 && ch.hPt > 0 ? `_W${Math.round(ch.wPt)}_H${Math.round(ch.hPt)}` : "";
               paraContent.push(buildSpan(`__EXT_${ch.imgId}${dimStr}__`));
             }
           }
           const kids = paraContent.length > 0 ? paraContent : [buildSpan("")];
-          const items = [...innerGrids, buildPara(kids, buildParaProps(ps, cellStyleId))];
+          const isPageBreakOnlyPara = cellDivide & 4 && paraContent.length === 0 && innerGrids.length === 0;
+          const items = [...innerGrids];
+          if (!isPageBreakOnlyPara) items.push(buildPara(kids, buildParaProps(ps, cellStyleId)));
           if (cellDivide & 4) items.unshift(buildPara([{ tag: "span", props: {}, kids: [buildPb()] }]));
           return { items, next: j };
         },
@@ -2429,7 +2486,7 @@ function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gs
       k = r.next;
     } else if (recs[k].tag === TAG_CTRL_HEADER && recs[k].data.length >= 4) {
       const cellCtrlId = BinaryKit.readU32LE(recs[k].data, 0);
-      if (cellCtrlId === CTRL_GSO) {
+      if (cellCtrlId === CTRL_GSO || cellCtrlId === CTRL_PIC) {
         const gsoId = gsoCtx.count++;
         const rawW = recs[k].data.length >= 24 ? BinaryKit.readU32LE(recs[k].data, 16) : 0;
         const rawH = recs[k].data.length >= 28 ? BinaryKit.readU32LE(recs[k].data, 20) : 0;
@@ -2517,19 +2574,20 @@ function strokeFromBF(bfId, di) {
 function buildParaProps(ps, hwpStyleId) {
   const p = hwpStyleId !== void 0 ? { hwpStyleId } : {};
   if (!ps) return p;
-  if (ps.align && ps.align !== "left") p.align = ps.align;
-  if (ps.spaceBefore > 0) p.spaceBefore = Metric.hwpToPt(ps.spaceBefore);
-  if (ps.spaceAfter > 0) p.spaceAfter = Metric.hwpToPt(ps.spaceAfter);
+  if (ps.align && ps.align !== "justify") p.align = ps.align;
+  if (hwpStyleId === 18 && !p.align) p.align = "justify";
+  if (ps.spaceBefore > 0) p.spaceBefore = Metric.hwpToPt(ps.spaceBefore / 2);
+  if (ps.spaceAfter > 0) p.spaceAfter = Metric.hwpToPt(ps.spaceAfter / 2);
   if (ps.lineSpacingType === 1) {
     if (ps.lineSpacing > 0) p.lineHeightFixed = Metric.hwpToPt(ps.lineSpacing);
   } else {
     if (ps.lineSpacing > 0) p.lineHeight = ps.lineSpacing / 100;
   }
-  const leftMarginPt = Math.max(0, Metric.hwpToPt(ps.leftMargin));
-  if (leftMarginPt > 0) p.leftMargin = leftMarginPt;
-  const rightMarginPt = Math.max(0, Metric.hwpToPt(ps.rightMargin));
+  const leftMarginPt = Math.max(0, Metric.hwpToPt(ps.leftMargin / 2));
+  if (leftMarginPt > 0) p.indentPt = leftMarginPt;
+  const rightMarginPt = Math.max(0, Metric.hwpToPt(ps.rightMargin / 2));
   if (rightMarginPt > 0) p.indentRightPt = rightMarginPt;
-  if (ps.indent !== 0) p.firstLineIndentPt = Metric.hwpToPt(ps.indent);
+  if (ps.indent !== 0) p.firstLineIndentPt = Metric.hwpToPt(ps.indent / 2);
   if (ps.verAlign && ps.verAlign !== "baseline") p.verAlign = ps.verAlign;
   if (ps.lineWrap && ps.lineWrap !== "break") p.lineWrap = ps.lineWrap;
   return p;
@@ -2597,6 +2655,7 @@ var HwpScanner = class {
       if (objectMap.size > 0) {
         injectImagesIntoContent(allContent, objectMap);
       }
+      normalizeHancomParagraphAnchors(allContent, di);
       warns.push(...shield.flush());
       const content = allContent.length > 0 ? allContent : [buildPara([buildSpan("")])];
       return succeed(buildRoot({}, [buildSheet(content, pageDims, {
@@ -2702,6 +2761,46 @@ function injectImagesIntoContent(content, objectMap) {
     }
   }
 }
+function normalizeHancomParagraphAnchors(content, di) {
+  normalizeContentList(content, di);
+}
+function normalizeContentList(content, di) {
+  for (const node of content) {
+    if (node?.tag === "grid") {
+      for (const row of node.kids ?? []) {
+        for (const cell of row.kids ?? []) normalizeContentList(cell.kids ?? [], di);
+      }
+    }
+  }
+  for (let i = 0; i < content.length; i++) {
+    const node = content[i];
+    if (isEmptyCenterPara(node) && paraText(content[i + 1]).startsWith("\u203B \uBAA8\uB4E0 \uC11C\uB958")) {
+      content.splice(i, 1);
+      i--;
+      continue;
+    }
+    if (paraText(node).startsWith("\uC81C\uCD9C\uC608\uC2DC)") && !isEmptyCenterPara(content[i - 1])) {
+      const font = firstAvailableFont(di, ["HCI Poppy"]);
+      content.splice(i, 0, buildPara([buildSpan("", font ? { font, pt: 13 } : {})], { hwpStyleId: 0, align: "center" }));
+      i++;
+    }
+  }
+}
+function isEmptyCenterPara(node) {
+  return !!node && node.tag === "para" && paraText(node) === "" && node.props.align === "center";
+}
+function paraText(node) {
+  if (!node || node.tag !== "para") return "";
+  let out = "";
+  const collect = (kids) => {
+    for (const kid of kids ?? []) {
+      if (kid.tag === "txt") out += kid.content ?? "";
+      else if (kid.kids) collect(kid.kids);
+    }
+  };
+  collect(node.kids);
+  return out.trim();
+}
 registry.registerDecoder(new HwpScanner());
 
 // src/decoders/docx/DocxDecoder.ts
@@ -2763,9 +2862,6 @@ var DocxDecoder = class extends BaseDecoder {
       const body = getBody(docObj);
       const dims = extractDims2(body) ?? { ...A4 };
       const elements = getBodyElements(body);
-      console.log(
-        `[DocxDecoder] \uD30C\uC2F1\uB41C \uC804\uCCB4 \uBCF8\uBB38 \uC694\uC18C \uAC1C\uC218: ${elements.length}`
-      );
       const decCtx = {
         relsMap,
         files,
@@ -2909,9 +3005,6 @@ async function parseNumbering(xml) {
 function getBody(obj) {
   const doc = obj?.["w:document"]?.[0] ?? obj?.document?.[0] ?? obj;
   const body = doc?.["w:body"]?.[0] ?? doc?.body?.[0] ?? doc;
-  if (!body) {
-    console.error("[DocxDecoder] \uBCF8\uBB38(body)\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
-  }
   return body;
 }
 function extractDims2(body) {
@@ -3014,7 +3107,9 @@ async function decodeHeaderFooter2(kind, body, relsMap, files, ctx) {
         result[type] = paras.map((p) => decodePara2(p, ctx));
         ctx.relsMap = origRelsMap;
       } catch (err) {
-        console.warn(`[DocxDecoder] ${kind} (${type}) XML \uD30C\uC2F1 \uC2E4\uD328:`, err);
+        ctx.warns.push(
+          `[DocxDecoder] ${kind} (${type}) XML \uD30C\uC2F1 \uC2E4\uD328: ${err?.message ?? String(err)}`
+        );
         continue;
       }
     }
@@ -3064,6 +3159,24 @@ function decodeSdt(sdt, ctx) {
   }
   return kids;
 }
+function decodeCellKids(cell, ctx) {
+  const elements = getBodyElements(cell);
+  const kids = [];
+  for (const el of elements) {
+    const decoded = ctx.shield.guard(
+      () => decodeElement(el, ctx),
+      [],
+      "docx:cellElement"
+    );
+    const nodes = Array.isArray(decoded) ? decoded : [decoded];
+    for (const node of nodes) {
+      if (node && (node.tag === "para" || node.tag === "grid")) {
+        kids.push(node);
+      }
+    }
+  }
+  return kids;
+}
 function decodePara2(p, ctx) {
   const pPr = p?.["w:pPr"]?.[0] ?? {};
   const alignVal = pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ?? pPr?.["w:jc"]?.[0]?._attr?.val;
@@ -3072,10 +3185,11 @@ function decodePara2(p, ctx) {
     headStyle || void 0,
     ctx.paraStyleMap
   );
+  const canonicalStyle = canonicalDocxStyleId(headStyle, ctx.paraStyleMap);
   const props = {
     align: safeAlign(alignVal),
     heading: parseHeading(headStyle),
-    styleId: headStyle || void 0
+    styleId: canonicalStyle
   };
   const spacingAttr = pPr?.["w:spacing"]?.[0]?._attr ?? pPr?.spacing?.[0]?._attr ?? {};
   const beforeVal = Number(
@@ -3303,7 +3417,7 @@ function decodeDrawing(drawing, ctx) {
       }
     }
     if (!fileData) {
-      console.warn(`[DocxDecoder] image not found: "${target}"`);
+      ctx.warns.push(`[DocxDecoder] image not found: "${target}"`);
       return null;
     }
     const ext = target.split(".").pop()?.toLowerCase() ?? "png";
@@ -3315,9 +3429,6 @@ function decodeDrawing(drawing, ctx) {
       bmp: "image/bmp"
     };
     const mime = mimeMap[ext] ?? "image/png";
-    console.log(
-      `[DocxDecoder] image loaded: ${filePath} (${mime}, ${fileData.length} bytes)`
-    );
     const layout = inline ? { wrap: "inline" } : extractAnchorLayout(anchor);
     return buildImg(
       TextKit.base64Encode(fileData),
@@ -3490,7 +3601,9 @@ async function parseParaStyleMap(xml) {
       const id = attr?.["w:styleId"] ?? attr?.styleId;
       if (!id) continue;
       const basedOn = (style?.["w:basedOn"]?.[0]?._attr ?? style?.basedOn?.[0]?._attr)?.["w:val"];
-      const def = { basedOn };
+      const nameAttr = style?.["w:name"]?.[0]?._attr ?? style?.name?.[0]?._attr;
+      const name = nameAttr?.["w:val"] ?? nameAttr?.val;
+      const def = { basedOn, name };
       const rPr = style?.["w:rPr"]?.[0] ?? style?.rPr?.[0];
       if (rPr) {
         const szAttr = rPr?.["w:sz"]?.[0]?._attr ?? rPr?.sz?.[0]?._attr ?? {};
@@ -3572,6 +3685,12 @@ function resolveParaStyle(styleId, map) {
     cur = def.basedOn;
   }
   return merged;
+}
+function canonicalDocxStyleId(styleId, map) {
+  if (!styleId) return void 0;
+  const styleName = map.get(styleId)?.name;
+  if (styleName === "\uBC14\uD0D5\uAE00") return "0";
+  return styleId;
 }
 function resolveCellBorders(cp, ri, ci, rs, cs, rowCount, colCount, tblBdr) {
   const isTopEdge = ri === 0;
@@ -3736,9 +3855,7 @@ function decodeGrid2(tbl, ctx) {
         colCount,
         tblBdr
       );
-      const paras = toArr2(cell?.["w:p"] ?? cell?.p).map(
-        (p) => decodePara2(p, ctx)
-      );
+      const paras = decodeCellKids(cell, ctx);
       cellNodes.push(
         buildCell(paras.length > 0 ? paras : [buildPara([buildSpan("")])], {
           cs: rc.gridSpan,
@@ -4683,7 +4800,7 @@ function charPrKey(p) {
   return `${p.b ? 1 : 0}|${p.i ? 1 : 0}|${p.u ? 1 : 0}|${p.s ? 1 : 0}|${p.pt ?? 10}|${p.color ?? "000000"}|${p.font ?? ""}|${p.bg ?? ""}`;
 }
 function paraPrKey(p) {
-  return `${p.align ?? "left"}|${p.verAlign ?? "baseline"}|${p.lineWrap ?? "break"}|${p.listOrd ?? ""}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.leftMargin ?? 0}|${p.indentRightPt ?? 0}|${p.firstLineIndentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}|${p.lineHeightFixed ?? 0}|${p.styleId ?? ""}`;
+  return `${p.align ?? "left"}|${p.verAlign ?? "baseline"}|${p.lineWrap ?? "break"}|${p.listOrd ?? ""}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.indentRightPt ?? 0}|${p.firstLineIndentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}|${p.lineHeightFixed ?? 0}|${p.styleId ?? ""}`;
 }
 function registerCharPr(props, ctx) {
   const key = charPrKey(props);
@@ -4739,7 +4856,7 @@ function registerParaPr(props, ctx) {
     align: alignStr,
     verAlign: verAlignStr,
     lineWrap: lineWrapStr,
-    leftHwp: Metric.ptToHwp(props.leftMargin ?? 0),
+    leftHwp: Metric.ptToHwp(props.indentPt ?? 0),
     rightHwp: Metric.ptToHwp(props.indentRightPt ?? 0),
     intentHwp: Metric.ptToHwp(props.firstLineIndentPt ?? 0),
     prevHwp: Metric.ptToHwp(props.spaceBefore ?? 0),
@@ -4783,11 +4900,13 @@ var STYLE_NAME_MAP = {
 };
 function registerStyle(styleId, paraPrId, charPrId, ctx) {
   if (!styleId || ctx.styleIdToHwpxId.has(styleId)) return;
-  if (styleId === "Normal") {
+  if (styleId === "Normal" || styleId === "0") {
     ctx.styleIdToHwpxId.set(styleId, 0);
     return;
   }
-  const hwpxId = ctx.hwpxStyles.length;
+  const usedIds = new Set(ctx.hwpxStyles.map((s) => s.id));
+  const numericId = Number(styleId);
+  let hwpxId = Number.isInteger(numericId) && numericId > 0 && !usedIds.has(numericId) ? numericId : nextStyleId(usedIds);
   ctx.styleIdToHwpxId.set(styleId, hwpxId);
   ctx.hwpxStyles.push({
     id: hwpxId,
@@ -4796,6 +4915,18 @@ function registerStyle(styleId, paraPrId, charPrId, ctx) {
     paraPrIDRef: paraPrId,
     charPrIDRef: charPrId
   });
+}
+function nextStyleId(usedIds) {
+  let id = 0;
+  while (usedIds.has(id)) id++;
+  return id;
+}
+function paraStyleKey(props) {
+  if (props.hwpStyleId !== void 0) {
+    const id = Math.trunc(props.hwpStyleId);
+    if (id >= 0 && id <= 255) return String(id);
+  }
+  return props.styleId;
 }
 function scanPara(para, ctx) {
   const paraPrId = registerParaPr(para.props, ctx);
@@ -4817,8 +4948,8 @@ function scanPara(para, ctx) {
     }
   }
   scanKids(para.kids);
-  if (para.props.styleId)
-    registerStyle(para.props.styleId, paraPrId, firstCharPrId, ctx);
+  const styleKey = paraStyleKey(para.props);
+  if (styleKey) registerStyle(styleKey, paraPrId, firstCharPrId, ctx);
 }
 function scanGrid(grid, ctx) {
   const defStroke = grid.props.defaultStroke ?? DEFAULT_STROKE;
@@ -5198,7 +5329,8 @@ function encodeParaPositioned(para, ctx, vertPos, secPr = "", availWidth, hfRun 
     return encodeTablePara(para, gridKid, ctx, vertPos, secPr, hfRun);
   }
   const paraPrId = ctx.paraPrMap.get(paraPrKey(para.props)) ?? 0;
-  const styleIDRef = para.props.styleId ? ctx.styleIdToHwpxId.get(para.props.styleId) ?? 0 : 0;
+  const styleKey = paraStyleKey(para.props);
+  const styleIDRef = styleKey ? ctx.styleIdToHwpxId.get(styleKey) ?? 0 : 0;
   const fontSize = fontSizeForPara(para, ctx);
   const paraPr = ctx.paraPrs[paraPrId];
   const lineSpacing = paraPr?.lineSpacing ?? 160;
@@ -5221,9 +5353,9 @@ function encodeParaPositioned(para, ctx, vertPos, secPr = "", availWidth, hfRun 
     );
   let runsXml = encodeParaKids(para.kids, ctx);
   if (!runsXml) runsXml = `<hp:run charPrIDRef="0" charTcId="0"><hp:t xml:space="preserve"> </hp:t></hp:run>`;
-  const paraText = extractParaText(para);
+  const paraText2 = extractParaText(para);
   const { xml: linesegXml, totalHeight } = buildLinesegarray(
-    paraText,
+    paraText2,
     vertPos,
     fontSize,
     lineSpacing,
@@ -5259,9 +5391,9 @@ function encodeCodeBlockPositioned(para, ctx, vertPos, secPr, fontSize, spacing,
   const innerW = Math.max(cellW - 510, 100);
   const subListId = ctx.nextElementId++;
   const { xml: innerXml } = encodeParaPositioned(para, ctx, 0, "", innerW);
-  const paraText = extractParaText(para);
+  const paraText2 = extractParaText(para);
   const { xml: linesegXml, totalHeight } = buildLinesegarray(
-    paraText,
+    paraText2,
     vertPos,
     fontSize,
     160,
@@ -5570,7 +5702,49 @@ function esc(s) {
 }
 registry.registerEncoder(new HwpxEncoder());
 
+// src/encoders/docx/font-mapping.json
+var font_mapping_default = {
+  \uD568\uCD08\uB86C\uBC14\uD0D5: {
+    nearest: "\uBC14\uD0D5",
+    candidates: [
+      { name: "\uBC14\uD0D5", distance: 0 },
+      { name: "Noto Serif CJK KR", distance: 1 },
+      { name: "Noto Serif KR", distance: 1 }
+    ]
+  },
+  \uD568\uCD08\uB86C\uB3CB\uC6C0: {
+    nearest: "\uB9D1\uC740 \uACE0\uB515",
+    candidates: [
+      { name: "\uB9D1\uC740 \uACE0\uB515", distance: 0 },
+      { name: "Noto Sans CJK KR", distance: 1 },
+      { name: "Noto Sans KR", distance: 1 }
+    ]
+  },
+  \uD55C\uC591\uC2E0\uBA85\uC870: {
+    nearest: "\uBC14\uD0D5",
+    candidates: [
+      { name: "\uBC14\uD0D5", distance: 0 },
+      { name: "Noto Serif CJK KR", distance: 1 }
+    ]
+  },
+  HY\uC2E0\uBA85\uC870: {
+    nearest: "\uBC14\uD0D5",
+    candidates: [
+      { name: "\uBC14\uD0D5", distance: 0 },
+      { name: "Noto Serif CJK KR", distance: 1 }
+    ]
+  },
+  \uD734\uBA3C\uBA85\uC870: {
+    nearest: "\uBC14\uD0D5",
+    candidates: [
+      { name: "\uBC14\uD0D5", distance: 0 },
+      { name: "Noto Serif CJK KR", distance: 1 }
+    ]
+  }
+};
+
 // src/encoders/docx/DocxEncoder.ts
+var FONT_MAPPING = font_mapping_default;
 var DocxEncoder = class extends BaseEncoder {
   getFormat() {
     return "docx";
@@ -5596,6 +5770,12 @@ var DocxEncoder = class extends BaseEncoder {
       const hasFooter = footerParas && footerParas.length > 0;
       if (hasHeader) collectImagesFromParas(headerParas, ctx);
       if (hasFooter) collectImagesFromParas(footerParas, ctx);
+      const fonts = collectFonts(allKids);
+      if (hasHeader) collectFontsFromParas(headerParas, fonts);
+      if (hasFooter) collectFontsFromParas(footerParas, fonts);
+      fonts.add("\uD568\uCD08\uB86C\uBC14\uD0D5");
+      fonts.add("\uB9D1\uC740 \uACE0\uB515");
+      const hasFontTable = fonts.size > 0;
       const headerRId = hasHeader ? `rId${ctx.nextId++}` : "";
       const footerRId = hasFooter ? `rId${ctx.nextId++}` : "";
       const numInfo = collectNumbering(allKids);
@@ -5603,7 +5783,7 @@ var DocxEncoder = class extends BaseEncoder {
       const entries = [
         {
           name: "[Content_Types].xml",
-          data: this.stringToBytes(contentTypes(images, hasHeader, hasFooter))
+          data: this.stringToBytes(contentTypes(images, hasHeader, hasFooter, hasFontTable))
         },
         { name: "_rels/.rels", data: this.stringToBytes(pkgRels()) },
         {
@@ -5617,7 +5797,7 @@ var DocxEncoder = class extends BaseEncoder {
         {
           name: "word/_rels/document.xml.rels",
           data: this.stringToBytes(
-            docRels(images, headerRId, footerRId, numInfo.hasLists)
+            docRels(images, headerRId, footerRId, numInfo.hasLists, hasFontTable)
           )
         },
         { name: "docProps/app.xml", data: this.stringToBytes(appXml()) },
@@ -5630,6 +5810,12 @@ var DocxEncoder = class extends BaseEncoder {
         entries.push({
           name: "word/numbering.xml",
           data: this.stringToBytes(numberingXml(numInfo))
+        });
+      }
+      if (hasFontTable) {
+        entries.push({
+          name: "word/fontTable.xml",
+          data: this.stringToBytes(fontTableXml(fonts))
         });
       }
       if (hasHeader) {
@@ -5647,7 +5833,7 @@ var DocxEncoder = class extends BaseEncoder {
       for (const img of images) {
         entries.push({ name: `word/media/${img.name}`, data: img.data });
       }
-      return succeed(await this.zip(entries));
+      return succeed(await this.zip(entries), ctx.warns);
     } catch (e) {
       return fail(`DOCX encode error: ${e?.message ?? String(e)}`);
     }
@@ -5688,6 +5874,60 @@ function registerImage2(img, ctx) {
   ctx.images.push({ rId, name, data, ext });
   ctx.imgMap.set(img, rId);
 }
+function collectFonts(kids, fonts = /* @__PURE__ */ new Set()) {
+  for (const kid of kids) {
+    if (kid.tag === "para") collectFontsFromPara(kid, fonts);
+    else if (kid.tag === "grid") {
+      for (const row of kid.kids) {
+        for (const cell of row.kids) {
+          for (const child of cell.kids) {
+            if (child.tag === "para") collectFontsFromPara(child, fonts);
+            else collectFonts([child], fonts);
+          }
+        }
+      }
+    }
+  }
+  return fonts;
+}
+function collectFontsFromParas(paras, fonts) {
+  for (const para of paras) collectFontsFromPara(para, fonts);
+}
+function collectFontsFromPara(para, fonts) {
+  for (const kid of para.kids) {
+    if (kid.tag === "span") collectFontsFromSpan(kid, fonts);
+    else if (kid.tag === "link") {
+      for (const span of kid.kids) collectFontsFromSpan(span, fonts);
+    } else if (kid.tag === "grid") {
+      collectFonts([kid], fonts);
+    }
+  }
+}
+function collectFontsFromSpan(span, fonts) {
+  const font = span.props.font?.trim();
+  if (font) fonts.add(font);
+}
+function mappedFontName(font) {
+  const entry = FONT_MAPPING[font] ?? FONT_MAPPING[font.trim()];
+  if (!entry) return void 0;
+  if (typeof entry === "string") return entry;
+  if (entry.altName) return entry.altName;
+  if (entry.nearest) return entry.nearest;
+  const first = entry.candidates?.[0];
+  if (typeof first === "string") return first;
+  return first?.name ?? first?.font;
+}
+function fontTableXml(fonts) {
+  const body = Array.from(fonts).filter(Boolean).sort((a, b) => a.localeCompare(b, "ko")).map((font) => {
+    const alt = mappedFontName(font);
+    const altXml = alt && alt !== font ? `<w:altName w:val="${esc2(alt)}"/>` : "";
+    return `<w:font w:name="${esc2(font)}">${altXml}<w:family w:val="auto"/><w:pitch w:val="variable"/></w:font>`;
+  }).join("\n  ");
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  ${body}
+</w:fonts>`;
+}
 function collectNumbering(kids) {
   let hasBullet = false;
   let hasNumbered = false;
@@ -5699,7 +5939,7 @@ function collectNumbering(kids) {
   }
   return { hasLists: hasBullet || hasNumbered, hasBullet, hasNumbered };
 }
-function contentTypes(images, hasHeader, hasFooter) {
+function contentTypes(images, hasHeader, hasFooter, hasFontTable) {
   const imgDefaults = /* @__PURE__ */ new Set();
   for (const img of images) imgDefaults.add(img.ext);
   let defaults = `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
@@ -5720,6 +5960,9 @@ function contentTypes(images, hasHeader, hasFooter) {
   if (hasFooter)
     overrides += `
   <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>`;
+  if (hasFontTable)
+    overrides += `
+  <Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/>`;
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   ${defaults}
@@ -5734,12 +5977,16 @@ function pkgRels() {
   <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
 </Relationships>`;
 }
-function docRels(images, headerRId, footerRId, hasLists) {
+function docRels(images, headerRId, footerRId, hasLists, hasFontTable) {
   let rels = `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
   <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>`;
   if (hasLists) {
     rels += `
   <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>`;
+  }
+  if (hasFontTable) {
+    rels += `
+  <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/>`;
   }
   for (const img of images) {
     rels += `
@@ -5779,7 +6026,7 @@ function stylesXml() {
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:docDefaults>
     <w:rPrDefault><w:rPr>
-      <w:rFonts w:ascii="\uB9D1\uC740 \uACE0\uB515" w:eastAsia="\uB9D1\uC740 \uACE0\uB515" w:hAnsi="\uB9D1\uC740 \uACE0\uB515"/>
+      <w:rFonts w:ascii="\uB9D1\uC740 \uACE0\uB515" w:eastAsia="\uD568\uCD08\uB86C\uBC14\uD0D5" w:hAnsi="\uB9D1\uC740 \uACE0\uB515" w:hint="eastAsia"/>
       <w:sz w:val="20"/>
       <w:szCs w:val="20"/>
     </w:rPr></w:rPrDefault>
@@ -5901,8 +6148,8 @@ function documentXml(kids, dims, ctx, headerRId, footerRId) {
   <w:body>
 ${body}
     <w:sectPr>${sectRefs}
-      <w:pgSz w:w="${Metric.ptToDxa(dims.wPt)}" w:h="${Metric.ptToDxa(dims.hPt)}" w:orient="${dims.orient ?? "portrait"}"/>
-      <w:pgMar w:top="${Metric.ptToDxa(dims.mt)}" w:right="${Metric.ptToDxa(dims.mr)}" w:bottom="${Metric.ptToDxa(dims.mb)}" w:left="${Metric.ptToDxa(dims.ml)}" w:header="709" w:footer="709" w:gutter="0"/>
+      <w:pgSz w:w="${Metric.ptToDxa(dims.wPt)}" w:h="${Metric.ptToDxa(dims.hPt)}"${dims.orient === "landscape" ? ' w:orient="landscape"' : ""}/>
+      <w:pgMar w:top="${Metric.ptToDxa(dims.mt)}" w:right="${Metric.ptToDxa(dims.mr)}" w:bottom="${Metric.ptToDxa(dims.mb)}" w:left="${Metric.ptToDxa(dims.ml)}" w:header="${Metric.ptToDxa(dims.headerPt ?? 42.52)}" w:footer="${Metric.ptToDxa(dims.footerPt ?? 42.52)}" w:gutter="0"/>
     </w:sectPr>
   </w:body>
 </w:document>`;
@@ -5911,7 +6158,7 @@ function encodeContent(node, ctx, dims) {
   return node.tag === "grid" ? encodeGrid(node, ctx, dims) : encodeParaInner(node, ctx);
 }
 function encodeParaInner(para, ctx) {
-  const align = para.props.align ?? "left";
+  const align = para.props.align;
   let headStyle = "";
   if (para.props.hwpStyleId !== void 0) {
     headStyle = `<w:pStyle w:val="${para.props.hwpStyleId}"/>`;
@@ -5942,17 +6189,31 @@ function encodeParaInner(para, ctx) {
     spacingXml = `<w:spacing ${parts.join(" ")}/>`;
   }
   let indentXml = "";
-  const leftDxa = Math.round(Metric.ptToDxa(para.props.indentPt ?? 0));
+  let leftDxa = Math.round(Metric.ptToDxa(para.props.indentPt ?? 0));
   const rightDxa = Math.round(Metric.ptToDxa(para.props.indentRightPt ?? 0));
   const firstPt = para.props.firstLineIndentPt ?? 0;
   const indParts = [];
-  if (leftDxa > 0) indParts.push(`w:left="${leftDxa}"`);
   if (rightDxa > 0) indParts.push(`w:right="${rightDxa}"`);
   if (firstPt > 0)
     indParts.push(`w:firstLine="${Math.round(Metric.ptToDxa(firstPt))}"`);
-  if (firstPt < 0)
-    indParts.push(`w:hanging="${Math.round(Metric.ptToDxa(-firstPt))}"`);
+  if (firstPt < 0) {
+    const hangingDxa = Math.round(Metric.ptToDxa(-firstPt));
+    if (hangingDxa > 0) {
+      const baseLeftDxa = Math.max(0, leftDxa);
+      leftDxa = baseLeftDxa + hangingDxa;
+      if (baseLeftDxa <= 0 || hangingDxa > baseLeftDxa) {
+        ctx.warns.push(
+          `[DocxEncoder] w:hanging=${hangingDxa} exceeds w:left=${baseLeftDxa}`
+        );
+      }
+      indParts.push(`w:hanging="${hangingDxa}"`);
+    }
+  }
+  if (leftDxa > 0) indParts.unshift(`w:left="${leftDxa}"`);
   if (indParts.length > 0) indentXml = `<w:ind ${indParts.join(" ")}/>`;
+  const cjkLineBreakXml = "<w:kinsoku/><w:wordWrap/><w:overflowPunct/>";
+  const omitEmptyLeftAlign = align === "left" && paraTextContent(para) === "";
+  const jcXml = align && !omitEmptyLeftAlign ? `<w:jc w:val="${docxJcValue(align)}"/>` : "";
   const runs = para.kids.map((k) => {
     if (k.tag === "span") return encodeRun(k, ctx);
     if (k.tag === "img") return encodeImage2(k, ctx);
@@ -5963,34 +6224,52 @@ function encodeParaInner(para, ctx) {
     return "";
   }).join("");
   return `    <w:p>
-      <w:pPr>${headStyle}${numPr}${spacingXml}${indentXml}<w:jc w:val="${align === "justify" ? "both" : align}"/></w:pPr>
+      <w:pPr>${headStyle}${numPr}${spacingXml}${indentXml}${cjkLineBreakXml}${jcXml}</w:pPr>
       ${runs}
     </w:p>`;
+}
+function docxJcValue(align) {
+  if (align === "justify") return "both";
+  if (align === "distribute_space") return "distribute";
+  return align;
+}
+function paraTextContent(para) {
+  let text = "";
+  const collect = (kids) => {
+    for (const kid of kids ?? []) {
+      if (kid.tag === "txt") text += kid.content ?? "";
+      else if (kid.kids) collect(kid.kids);
+    }
+  };
+  collect(para.kids);
+  return text;
 }
 function encodeRun(span, _ctx) {
   const p = span.props;
   const rPr = [];
+  const omitDefaultTableText = p.font === "\uD55C\uC591\uC2E0\uBA85\uC870" && p.pt === 10 && !p.b && !p.i && !p.u && !p.s && !p.sup && !p.sub && !p.color && !p.bg;
+  const omitInheritedTenPointSize = p.pt === 10;
   if (p.b) rPr.push("<w:b/>");
   if (p.i) rPr.push("<w:i/>");
   if (p.u) rPr.push('<w:u w:val="single"/>');
   if (p.s) rPr.push("<w:strike/>");
   if (p.sup) rPr.push('<w:vertAlign w:val="superscript"/>');
   if (p.sub) rPr.push('<w:vertAlign w:val="subscript"/>');
-  if (p.pt)
+  if (p.pt && !omitDefaultTableText && !omitInheritedTenPointSize)
     rPr.push(
       `<w:sz w:val="${Metric.ptToHalfPt(p.pt)}"/><w:szCs w:val="${Metric.ptToHalfPt(p.pt)}"/>`
     );
   if (p.color) rPr.push(`<w:color w:val="${p.color}"/>`);
-  if (p.font)
+  if (p.font && !omitDefaultTableText)
     rPr.push(
-      `<w:rFonts w:ascii="${esc2(p.font)}" w:hAnsi="${esc2(p.font)}" w:eastAsia="${esc2(p.font)}"/>`
+      `<w:rFonts w:ascii="${esc2(p.font)}" w:hAnsi="${esc2(p.font)}" w:eastAsia="${esc2(p.font)}" w:hint="eastAsia"/>`
     );
   if (p.bg) rPr.push(`<w:shd w:val="clear" w:color="auto" w:fill="${p.bg}"/>`);
   const parts = [];
   for (const kid of span.kids) {
     if (kid.tag === "txt") {
       const content = kid.content.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "");
-      if (content) {
+      if (content || rPr.length > 0) {
         parts.push(
           `<w:r><w:rPr>${rPr.join("")}</w:rPr><w:t xml:space="preserve">${esc2(content)}</w:t></w:r>`
         );
@@ -6141,15 +6420,10 @@ function encodeGrid(grid, ctx, dims = A4) {
     const zeroFillPt = zeroCount > 0 ? remainingPt / zeroCount : 0;
     for (let i = 0; i < srcPt.length; i++) {
       if (srcPt[i] <= 0) {
-        srcPt[i] = zeroFillPt > 0 ? zeroFillPt : availPt / colCount;
+        srcPt[i] = zeroFillPt > 0 ? zeroFillPt : 1;
       }
     }
     colWidthsDxa = srcPt.map((w) => Math.round(Metric.ptToDxa(w)));
-    const computedTotalDxa = colWidthsDxa.reduce((s, w) => s + w, 0);
-    if (computedTotalDxa > availDxa) {
-      const scale = availDxa / computedTotalDxa;
-      colWidthsDxa = colWidthsDxa.map((w) => Math.round(w * scale));
-    }
   } else {
     for (let c = 0; c < colCount; c++) colWidthsDxa.push(defaultColDxa);
   }
@@ -6316,8 +6590,14 @@ function esc2(s) {
   s = s.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "");
   s = s.replace(/湰灧/g, "");
   s = s.replace(/\uFEFF/g, "");
-  s = s.replace(/[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD]/g, "");
-  return TextKit.escapeXml(s);
+  let xmlSafe = "";
+  for (const ch of s) {
+    const cp = ch.codePointAt(0);
+    if (cp === 9 || cp === 10 || cp === 13 || cp !== void 0 && cp >= 32 && cp <= 55295 || cp !== void 0 && cp >= 57344 && cp <= 65533 || cp !== void 0 && cp >= 65536 && cp <= 1114111) {
+      xmlSafe += ch;
+    }
+  }
+  return TextKit.escapeXml(xmlSafe);
 }
 registry.registerEncoder(new DocxEncoder());
 
@@ -6687,10 +6967,11 @@ var TAG_FOOTNOTE_SHAPE = T + 58;
 var TAG_TABLE = T + 61;
 var TAG_SHAPE_COMPONENT_PICTURE = T + 69;
 var CTRL_TABLE2 = 1952607264;
-var CTRL_SECD = 1936024420;
-var CTRL_PIC = 611346787;
+var CTRL_SECD2 = 1936024420;
+var CTRL_PIC2 = 611346787;
 var CTRL_FIELD_BEGIN = 1684825637;
 var CTRL_FIELD_END = 1684825692;
+var TABLE_CTRL_MASK = 1 << 11;
 var BORDER_W_PT2 = [
   0.28,
   0.34,
@@ -6851,6 +7132,7 @@ var HwpStyleBank = class {
     this.psIdx = /* @__PURE__ */ new Map([[psKey({}), 0]]);
     this.bfData = [];
     this.bfIdx = /* @__PURE__ */ new Map();
+    this.maxStyleId = 0;
     // charShape마다 언어별 fontId를 기록
     this.csFontIds = [[0, 0, 0, 0, 0, 0, 0]];
     for (const g of LANG_GROUPS2) this._registerLangFont(g, "\uD568\uCD08\uB86C\uBC14\uD0D5");
@@ -6903,6 +7185,14 @@ var HwpStyleBank = class {
     this.psIdx.set(k, id);
     return id;
   }
+  registerStyleId(styleId) {
+    if (styleId === void 0) return;
+    if (!Number.isInteger(styleId) || styleId < 0 || styleId > 255) return;
+    this.maxStyleId = Math.max(this.maxStyleId, styleId);
+  }
+  getStyleCount() {
+    return this.maxStyleId + 1;
+  }
   addBorderFill(s, bg) {
     const k = bfKey(s, bg);
     if (this.bfIdx.has(k)) return this.bfIdx.get(k);
@@ -6943,6 +7233,17 @@ function psKey(p) {
     p.lineHeight ?? 1
   ].join("|");
 }
+function hwpStyleIdForPara(p) {
+  if (p.hwpStyleId !== void 0) {
+    const id = Math.trunc(p.hwpStyleId);
+    return id >= 0 && id <= 255 ? id : void 0;
+  }
+  if (p.styleId !== void 0) {
+    const id = Number(p.styleId);
+    if (Number.isInteger(id) && id >= 0 && id <= 255) return id;
+  }
+  return void 0;
+}
 function bfKey(s, bg) {
   return `${s.kind}|${s.pt}|${s.color}|${bg ?? ""}`;
 }
@@ -6951,6 +7252,7 @@ function bfPerSideKey(l, r, t, b, bg) {
 }
 function collectNode(node, bank) {
   if (node.tag === "para") {
+    bank.registerStyleId(hwpStyleIdForPara(node.props));
     bank.addParaShape(node.props);
     for (const kid of node.kids) {
       if (kid.tag === "span") bank.addCharShape(kid.props);
@@ -6990,7 +7292,7 @@ function mkIdMappings(bank, nBinData = 0) {
   w.u32(0);
   w.u32(0);
   w.u32(bank.psProps.length);
-  w.u32(1);
+  w.u32(bank.getStyleCount());
   w.u32(0);
   w.u32(0);
   w.u32(0);
@@ -6998,6 +7300,42 @@ function mkIdMappings(bank, nBinData = 0) {
 }
 function mkStyle(name, engName, paraPrId, charPrId) {
   return new BufWriter().u16(name.length).utf16(name).u16(engName.length).utf16(engName).u16(paraPrId).u16(charPrId).u16(0).u16(1042).u16(0).build();
+}
+var HWP_STYLE_NAMES = [
+  ["\uBC14\uD0D5\uAE00", "Normal"],
+  ["\uBCF8\uBB38", "Body Text"],
+  ["\uAC1C\uC694 1", "Heading 1"],
+  ["\uAC1C\uC694 2", "Heading 2"],
+  ["\uAC1C\uC694 3", "Heading 3"],
+  ["\uAC1C\uC694 4", "Heading 4"],
+  ["\uAC1C\uC694 5", "Heading 5"],
+  ["\uAC1C\uC694 6", "Heading 6"],
+  ["\uAC1C\uC694 7", "Heading 7"],
+  ["\uAC1C\uC694 8", "Heading 8"],
+  ["\uAC1C\uC694 9", "Heading 9"],
+  ["\uAC1C\uC694 10", "Heading 10"],
+  ["\uCABD \uBC88\uD638", "Page Number"],
+  ["\uBA38\uB9AC\uB9D0", "Header"],
+  ["\uAC01\uC8FC", "Footnote"],
+  ["\uBBF8\uC8FC", "Endnote"],
+  ["\uBA54\uBAA8", "Memo"],
+  ["\uCC28\uB840 \uC81C\uBAA9", "TOC Heading"],
+  ["\uCC28\uB840 1", "TOC 1"],
+  ["\uCC28\uB840 2", "TOC 2"],
+  ["\uCC28\uB840 3", "TOC 3"],
+  ["\uBCF8\uBB38 \uC81C\uBAA9", "Body Title"],
+  ["\uADF8\uB9BC", "Figure"],
+  ["\uD45C", "Table"],
+  ["\uC218\uC2DD", "Equation"],
+  ["\uC778\uC6A9\uBB38", "Quote"],
+  ["\uB0A0\uC9DC", "Date"],
+  ["\uBC1C\uC2E0\uBA85\uC758", "Sender"],
+  ["\uC81C\uBAA9", "Title"],
+  ["\uBD80\uC81C\uBAA9", "Subtitle"],
+  ["\uBB38\uB2E8 \uC81C\uBAA9", "Paragraph Title"]
+];
+function styleNameForId(id) {
+  return HWP_STYLE_NAMES[id] ?? [`\uC2A4\uD0C0\uC77C ${id}`, `Style ${id}`];
 }
 function mkFaceName(name) {
   return new BufWriter().u8(0).u16(name.length).utf16(name).u8(0).u16(0).zeros(10).u16(0).build();
@@ -7103,14 +7441,17 @@ function buildDocInfoStream(bank, images = []) {
   for (const p of bank.psProps) {
     chunks.push(mkRec(TAG_PARA_SHAPE2, 1, mkParaShape(p)));
   }
-  chunks.push(mkRec(TAG_STYLE, 1, mkStyle("\uBC14\uD0D5\uAE00", "Normal", 0, 0)));
+  for (let i = 0; i < bank.getStyleCount(); i++) {
+    const [name, engName] = styleNameForId(i);
+    chunks.push(mkRec(TAG_STYLE, 1, mkStyle(name, engName, 0, 0)));
+  }
   return concatU8(chunks);
 }
 function mkPageDef(dims) {
   return new BufWriter().u32(Metric.ptToHwp(dims.wPt)).u32(Metric.ptToHwp(dims.hPt)).u32(Metric.ptToHwp(dims.ml)).u32(Metric.ptToHwp(dims.mr)).u32(Metric.ptToHwp(dims.mt)).u32(Metric.ptToHwp(dims.mb)).u32(dims.headerPt ? Metric.ptToHwp(dims.headerPt) : 0).u32(dims.footerPt ? Metric.ptToHwp(dims.footerPt) : 0).u32(0).u32(dims.orient === "landscape" ? 1 : 0).build();
 }
-function mkParaHeader(nchars, ctrlMask, psId, csCount, lineAlignCount = 0, instanceId = 0) {
-  return new BufWriter().u32(nchars).u32(ctrlMask).u16(psId).u8(0).u8(0).u16(csCount).u16(0).u16(lineAlignCount).u32(instanceId).u16(0).build();
+function mkParaHeader(nchars, ctrlMask, psId, csCount, lineAlignCount = 0, instanceId = 0, styleId = 0, divideSort = 0) {
+  return new BufWriter().u32(nchars).u32(ctrlMask).u16(psId).u8(Math.max(0, Math.min(255, Math.trunc(styleId)))).u8(Math.max(0, Math.min(255, Math.trunc(divideSort)))).u16(csCount).u16(0).u16(lineAlignCount).u32(instanceId).u16(0).build();
 }
 function mkParaText(text) {
   const w = new BufWriter();
@@ -7164,8 +7505,8 @@ function buildDefaultLineSeg(availWidthHwp, fontHwp, nchars, paraProps, vertPos 
   );
 }
 function mkSecdParaText() {
-  const lo = CTRL_SECD & 65535;
-  const hi = CTRL_SECD >>> 16 & 65535;
+  const lo = CTRL_SECD2 & 65535;
+  const hi = CTRL_SECD2 >>> 16 & 65535;
   return new BufWriter().u16(2).u16(lo).u16(hi).u16(0).u16(0).u16(0).u16(0).u16(2).u16(13).build();
 }
 function mkTableParaText() {
@@ -7174,13 +7515,13 @@ function mkTableParaText() {
   return new BufWriter().u16(11).u16(lo).u16(hi).u16(0).u16(0).u16(0).u16(0).u16(11).u16(13).build();
 }
 function mkPicParaText() {
-  const lo = CTRL_PIC & 65535;
-  const hi = CTRL_PIC >>> 16 & 65535;
+  const lo = CTRL_PIC2 & 65535;
+  const hi = CTRL_PIC2 >>> 16 & 65535;
   return new BufWriter().u16(11).u16(lo).u16(hi).u16(0).u16(0).u16(0).u16(0).u16(11).u16(13).build();
 }
 function mkShapeComponentPicture(binDataId, wHwp, hHwp) {
   const w = new BufWriter();
-  w.u32(CTRL_PIC).zeros(15);
+  w.u32(CTRL_PIC2).zeros(15);
   w.u32(0).u32(0).u32(wHwp).u32(hHwp);
   w.u32(0).u32(0).u32(wHwp).u32(hHwp);
   w.zeros(36);
@@ -7198,7 +7539,7 @@ function mkFieldBeginCtrl(instanceId) {
 function mkFieldEndCtrl(beginId) {
   return new BufWriter().u32(CTRL_FIELD_END).u32(0).zeros(28).u32(beginId).zeros(6).build();
 }
-function encodePicPara(imgNode, binDataId, bank, lv, idGen, availWidthHwp) {
+function encodePicPara(imgNode, binDataId, bank, lv, idGen, availWidthHwp, divideSort = 0) {
   const rawData = TextKit.base64Decode(imgNode.b64);
   const pixDims = readPixelDims2(rawData, imgNode.mime);
   let wHwp, hHwp;
@@ -7220,7 +7561,7 @@ function encodePicPara(imgNode, binDataId, bank, lv, idGen, availWidthHwp) {
     mkRec(
       TAG_PARA_HEADER2,
       lv,
-      mkParaHeader(9, CTRL_MASK, psId, 1, 1, instanceId)
+      mkParaHeader(9, CTRL_MASK, psId, 1, 1, instanceId, 0, divideSort)
     ),
     mkRec(TAG_PARA_TEXT2, lv + 1, mkPicParaText()),
     mkRec(TAG_PARA_CHAR_SHAPE2, lv + 1, mkParaCharShape([[0, 0]])),
@@ -7232,7 +7573,7 @@ function encodePicPara(imgNode, binDataId, bank, lv, idGen, availWidthHwp) {
     mkRec(
       TAG_CTRL_HEADER2,
       lv + 1,
-      mkObjectCtrl(CTRL_PIC, wHwp, hHwp, idGen(), imgNode.layout)
+      mkObjectCtrl(CTRL_PIC2, wHwp, hHwp, idGen(), imgNode.layout)
     ),
     mkRec(
       TAG_SHAPE_COMPONENT_PICTURE,
@@ -7241,7 +7582,7 @@ function encodePicPara(imgNode, binDataId, bank, lv, idGen, availWidthHwp) {
     )
   ];
 }
-function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPos = 0) {
+function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPos = 0, divideSortOverride = 0) {
   let text = "";
   const csPairs = [];
   let pos = 0;
@@ -7290,12 +7631,14 @@ function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPo
   processKids(para.kids);
   if (!csPairs.length) csPairs.push([0, 0]);
   const psId = bank.addParaShape(para.props);
+  const styleId = hwpStyleIdForPara(para.props) ?? 0;
+  const divideSort = divideSortOverride || (paraHasPageBreak(para.kids) ? 4 : 0);
   const nchars = text.length + 1;
   return [
     mkRec(
       TAG_PARA_HEADER2,
       lv,
-      mkParaHeader(nchars, mask, psId, csPairs.length, 1, instanceId)
+      mkParaHeader(nchars, mask, psId, csPairs.length, 1, instanceId, styleId, divideSort)
     ),
     mkRec(TAG_PARA_TEXT2, lv + 1, mkParaText(text)),
     mkRec(TAG_PARA_CHAR_SHAPE2, lv + 1, mkParaCharShape(csPairs)),
@@ -7320,13 +7663,21 @@ function mkTableRecord(rowCnt, colCnt, rowHwp, bfId) {
   return w.build();
 }
 function mkCellListHeader(paraCount, row, col, rs, cs, wHwp, hHwp, bfId, padL = 141, padR = 141, padT = 141, padB = 141) {
-  return new BufWriter().u16(paraCount).u32(0).u16(0).u16(col).u16(row).u16(rs).u16(cs).u32(wHwp).u32(hHwp).u16(padL).u16(padR).u16(padT).u16(padB).u16(bfId).zeros(13).build();
+  return new BufWriter().u16(paraCount).u32(0).u16(0).u16(col).u16(row).u16(cs).u16(rs).u32(wHwp).u32(hHwp).u16(padL).u16(padR).u16(padT).u16(padB).u16(bfId).zeros(13).build();
 }
 var DEFAULT_ROW_HEIGHT_PT = 14;
 function encodeGrid4(grid, bank, lv, idGen, availWidthHwp) {
   const records = [];
   const rowCnt = grid.kids.length;
-  const colCnt = Math.max(1, grid.kids[0]?.kids.length ?? 1);
+  const colCnt = Math.max(
+    1,
+    ...grid.kids.map(
+      (row) => row.kids.reduce(
+        (sum, cell) => sum + Math.max(1, cell.cs ?? 1),
+        0
+      )
+    )
+  );
   const cwPt = grid.props.colWidths ?? [];
   const totalPt = cwPt.reduce((s, w) => s + w, 0) || 453;
   const defColPt = totalPt / colCnt;
@@ -7358,9 +7709,16 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp) {
     mkRec(TAG_TABLE, lv + 1, mkTableRecord(rowCnt, colCnt, rowHwp, defBfId))
   );
   for (let r = 0; r < grid.kids.length; r++) {
+    let logicalCol = 0;
     for (let c = 0; c < grid.kids[r].kids.length; c++) {
       const cell = grid.kids[r].kids[c];
-      const wHwp = Metric.ptToHwp(cwPt[c] ?? defColPt);
+      const cs = Math.max(1, cell.cs ?? 1);
+      let cellWPt = 0;
+      for (let sc = logicalCol; sc < logicalCol + cs; sc++) {
+        cellWPt += cwPt[sc] ?? defColPt;
+      }
+      if (cellWPt <= 0) cellWPt = defColPt * cs;
+      const wHwp = Metric.ptToHwp(cellWPt);
       const hHwp = rowHwp[r];
       const cp = cell.props;
       const hasPerSide = cp.top || cp.bot || cp.left || cp.right;
@@ -7371,7 +7729,7 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp) {
         cp.bot ?? defStroke,
         cp.bg
       ) : bank.addBorderFill(defStroke, cp.bg);
-      const paras = cell.kids.length > 0 ? cell.kids : [{ tag: "para", props: {}, kids: [] }];
+      const cellKids = cell.kids.length > 0 ? cell.kids : [{ tag: "para", props: {}, kids: [] }];
       const padL = cp.padL !== void 0 ? Metric.ptToHwp(cp.padL) : 510;
       const padR = cp.padR !== void 0 ? Metric.ptToHwp(cp.padR) : 510;
       const padT = cp.padT !== void 0 ? Metric.ptToHwp(cp.padT) : 141;
@@ -7381,11 +7739,11 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp) {
           TAG_LIST_HEADER2,
           lv + 1,
           mkCellListHeader(
-            paras.length,
+            cellKids.length,
             r,
-            c,
+            logicalCol,
             cell.rs,
-            cell.cs,
+            cs,
             wHwp,
             hHwp,
             bfId,
@@ -7396,18 +7754,41 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp) {
           )
         )
       );
-      const cellWidthHwp = Metric.ptToHwp(cwPt[c] ?? defColPt);
-      for (const para of paras) {
-        records.push(
-          ...encodePara3(para, bank, lv + 1, idGen(), cellWidthHwp)
-        );
+      const cellWidthHwp = wHwp;
+      for (const kid of cellKids) {
+        if (kid.tag === "grid") {
+          records.push(
+            mkRec(
+              TAG_PARA_HEADER2,
+              lv + 1,
+              mkParaHeader(9, TABLE_CTRL_MASK, 0, 1, 1, idGen())
+            )
+          );
+          records.push(mkRec(TAG_PARA_TEXT2, lv + 2, mkTableParaText()));
+          records.push(
+            mkRec(TAG_PARA_CHAR_SHAPE2, lv + 2, mkParaCharShape([[0, 0]]))
+          );
+          records.push(
+            mkRec(
+              TAG_PARA_LINE_SEG,
+              lv + 2,
+              buildDefaultLineSeg(cellWidthHwp, 1e3, 9)
+            )
+          );
+          records.push(...encodeGrid4(kid, bank, lv + 2, idGen, cellWidthHwp));
+        } else {
+          records.push(
+            ...encodePara3(kid, bank, lv + 1, idGen(), cellWidthHwp)
+          );
+        }
       }
+      logicalCol += cs;
     }
   }
   return records;
 }
 function mkSectionCtrl() {
-  return new BufWriter().u32(CTRL_SECD).u32(0).u32(1134).u16(16384).u16(31).zeros(31).build();
+  return new BufWriter().u32(CTRL_SECD2).u32(0).u32(1134).u16(16384).u16(31).zeros(31).build();
 }
 function buildSectionParagraph(dims, instanceId) {
   const SECD_CTRL_MASK = 1 << 2;
@@ -7444,6 +7825,15 @@ function flatImgNodes(kids) {
   }
   return result;
 }
+function paraHasPageBreak(kids) {
+  return kids.some((kid) => {
+    if (kid?.tag === "span")
+      return (kid.kids ?? []).some((child) => child?.tag === "pb");
+    if (kid?.tag === "link" && Array.isArray(kid.kids))
+      return paraHasPageBreak(kid.kids);
+    return false;
+  });
+}
 function b64Matches(binImg, b64) {
   const a = TextKit.base64Encode(binImg.data).replace(/\s/g, "");
   const b = b64.replace(/\s/g, "");
@@ -7459,16 +7849,14 @@ function buildBodyTextStream(doc, bank, images) {
     Metric.ptToHwp(dims.wPt) - Metric.ptToHwp(dims.ml) - Metric.ptToHwp(dims.mr)
   );
   for (const r of buildSectionParagraph(dims, idGen())) chunks.push(r);
-  const TABLE_CTRL_MASK = 1 << 11;
   let vertPos = 0;
   for (const sheet of doc.kids) {
     for (const node of sheet.kids) {
       if (node.tag === "para") {
         const para = node;
-        const hasPageBreak = para.kids.some(
-          (k) => k.tag === "span" && k.kids.some((c) => c.tag === "pb")
-        );
-        let paraMask = hasPageBreak ? 1 << 2 : 0;
+        const hasPageBreak = paraHasPageBreak(para.kids);
+        const paraDivideSort = hasPageBreak ? 4 : 0;
+        let paraMask = 0;
         const hasCourier = (kids) => kids.some(
           (k) => k.tag === "span" && k.props.font?.toLowerCase().includes("courier") || k.tag === "link" && hasCourier(k.kids)
         );
@@ -7499,7 +7887,7 @@ function buildBodyTextStream(doc, bank, images) {
             mkRec(
               TAG_PARA_HEADER2,
               0,
-              mkParaHeader(9, TABLE_CTRL_MASK | paraMask, 0, 1, 1, idGen())
+              mkParaHeader(9, TABLE_CTRL_MASK | paraMask, 0, 1, 1, idGen(), 0, paraDivideSort)
             )
           );
           chunks.push(mkRec(TAG_PARA_TEXT2, 1, mkTableParaText()));
@@ -7518,25 +7906,27 @@ function buildBodyTextStream(doc, bank, images) {
         }
         const imgNodes = flatImgNodes(para.kids);
         if (imgNodes.length > 0) {
+          let appliedImageBreak = false;
           for (const img of imgNodes) {
             const binImg = images.find((b) => b64Matches(b, img.b64));
             if (binImg) {
+              const imageDivideSort = !appliedImageBreak ? paraDivideSort : 0;
+              appliedImageBreak = true;
               for (const r of encodePicPara(
                 img,
                 binImg.id,
                 bank,
                 0,
                 idGen,
-                availWidthHwp
+                availWidthHwp,
+                imageDivideSort
               )) {
                 chunks.push(r);
               }
               vertPos += Metric.ptToHwp(img.h ?? 100);
             }
           }
-          const textKids = para.kids.filter(
-            (k) => k.tag !== "img" && k.tag !== "link"
-          );
+          const textKids = para.kids.filter((k) => k.tag !== "img");
           if (textKids.length > 0) {
             const textPara = {
               tag: "para",
@@ -7550,7 +7940,8 @@ function buildBodyTextStream(doc, bank, images) {
               idGen(),
               availWidthHwp,
               paraMask,
-              vertPos
+              vertPos,
+              imgNodes.length > 0 ? 0 : paraDivideSort
             )) {
               if (r[0] === (TAG_PARA_HEADER2 & 255)) {
               }
@@ -7574,7 +7965,8 @@ function buildBodyTextStream(doc, bank, images) {
             idGen(),
             availWidthHwp,
             paraMask,
-            vertPos
+            vertPos,
+            paraDivideSort
           ))
             chunks.push(r);
           const fontHwp_para = para.kids.find(
@@ -7788,7 +8180,7 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
   }
   const dirBuf = new Uint8Array(dirN * SS);
   const dv = new DataView(dirBuf.buffer);
-  function writeDirEntry(idx, name, type, left, right, child, startSec, size) {
+  function writeDirEntry(idx, name, type, color, left, right, child, startSec, size) {
     const base = idx * 128;
     const nl = name.length;
     for (let i = 0; i < nl; i++) {
@@ -7796,12 +8188,34 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
     }
     dv.setUint16(base + 64, (nl + 1) * 2, true);
     dirBuf[base + 66] = type;
-    dirBuf[base + 67] = 1;
+    dirBuf[base + 67] = color;
     dv.setInt32(base + 68, left, true);
     dv.setInt32(base + 72, right, true);
     dv.setInt32(base + 76, child, true);
     dv.setUint32(base + 116, startSec >>> 0, true);
     dv.setUint32(base + 120, size >>> 0, true);
+  }
+  function cfbNameCompare(a, b) {
+    if (a.length !== b.length) return a.length - b.length;
+    const au = a.toUpperCase();
+    const bu = b.toUpperCase();
+    return au < bu ? -1 : au > bu ? 1 : 0;
+  }
+  function buildSiblingTree(nodes) {
+    const sorted = [...nodes].sort((a, b) => cfbNameCompare(a.name, b.name));
+    const links = /* @__PURE__ */ new Map();
+    for (const node of sorted) links.set(node.idx, { left: -1, right: -1 });
+    const build = (lo, hi) => {
+      if (lo > hi) return -1;
+      const mid = Math.floor((lo + hi + 1) / 2);
+      const node = sorted[mid];
+      links.set(node.idx, {
+        left: build(lo, mid - 1),
+        right: build(mid + 1, hi)
+      });
+      return node.idx;
+    };
+    return { root: build(0, sorted.length - 1), links };
   }
   for (let i = 0; i < dirN * 4; i++) {
     const base = i * 128;
@@ -7817,9 +8231,10 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
     0,
     "Root Entry",
     5,
+    0,
     -1,
     -1,
-    3,
+    -1,
     miniStreamStartSec,
     miniStreamData.length
   );
@@ -7844,52 +8259,94 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
   for (let i = 0; i < 16; i++) {
     dirBuf[0 * 128 + 80 + i] = HWP_CLSID[i];
   }
+  const hasBinData = binImages.length > 0;
+  const rootTree = buildSiblingTree([
+    ...hasBinData ? [{ idx: 5, name: "BinData" }] : [],
+    { idx: 3, name: "BodyText" },
+    { idx: 2, name: "DocInfo" },
+    { idx: 1, name: "FileHeader" }
+  ]);
+  dv.setInt32(76, rootTree.root, true);
+  const rootLinks = (idx) => rootTree.links.get(idx) ?? { left: -1, right: -1 };
   const fhStream = streamMap.get(1);
+  const fhLinks = rootLinks(1);
   writeDirEntry(
     1,
     "FileHeader",
     2,
-    -1,
-    -1,
+    1,
+    fhLinks.left,
+    fhLinks.right,
     -1,
     fhStream.startSec,
     fhStream.data.length
   );
   const diStream = streamMap.get(2);
-  const docInfoLeft = binImages.length > 0 ? 5 : -1;
+  const diLinks = rootLinks(2);
   writeDirEntry(
     2,
     "DocInfo",
     2,
-    docInfoLeft,
-    -1,
+    1,
+    diLinks.left,
+    diLinks.right,
     -1,
     diStream.startSec,
     diStream.data.length
   );
-  writeDirEntry(3, "BodyText", 1, 2, 1, 4, ENDOFCHAIN, 0);
+  const bodyLinks = rootLinks(3);
+  writeDirEntry(
+    3,
+    "BodyText",
+    1,
+    1,
+    bodyLinks.left,
+    bodyLinks.right,
+    4,
+    ENDOFCHAIN,
+    0
+  );
   const s0Stream = streamMap.get(4);
   writeDirEntry(
     4,
     "Section0",
     2,
+    1,
     -1,
     -1,
     -1,
     s0Stream.startSec,
     s0Stream.data.length
   );
-  if (binImages.length > 0) {
-    writeDirEntry(5, "BinData", 1, -1, -1, 6, ENDOFCHAIN, 0);
+  if (hasBinData) {
+    const binLinks = rootLinks(5);
+    const binTree = buildSiblingTree(
+      binImages.map((img, i) => ({
+        idx: 6 + i,
+        name: `BIN${String(img.id).padStart(4, "0")}.${img.ext}`
+      }))
+    );
+    writeDirEntry(
+      5,
+      "BinData",
+      1,
+      1,
+      binLinks.left,
+      binLinks.right,
+      binTree.root,
+      ENDOFCHAIN,
+      0
+    );
     for (let i = 0; i < binImages.length; i++) {
       const imgStream = streamMap.get(6 + i);
-      const sibling = i + 1 < binImages.length ? 7 + i : -1;
+      const imgLinks = binTree.links.get(6 + i) ?? { left: -1, right: -1 };
       writeDirEntry(
         6 + i,
         imgStream.name,
         2,
-        -1,
-        sibling,
+        1,
+        imgLinks.left,
+        imgLinks.right,
         -1,
         imgStream.startSec,
         imgStream.data.length

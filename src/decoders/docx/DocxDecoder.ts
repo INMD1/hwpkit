@@ -129,9 +129,6 @@ export class DocxDecoder extends BaseDecoder {
       const body = getBody(docObj);
       const dims = extractDims(body) ?? { ...A4 };
       const elements = getBodyElements(body);
-      console.log(
-        `[DocxDecoder] 파싱된 전체 본문 요소 개수: ${elements.length}`,
-      );
 
       const decCtx: DecCtx = {
         relsMap,
@@ -239,6 +236,7 @@ interface ParaStyleDef {
     firstLineIndentPt?: number;
   };
   basedOn?: string; // parent style id
+  name?: string;
 }
 
 type StylesMap = Map<string, TblStyleDef>; // styleId → table style defaults
@@ -365,9 +363,6 @@ function getBody(obj: any): any {
   const doc = obj?.["w:document"]?.[0] ?? obj?.document?.[0] ?? obj;
   const body = doc?.["w:body"]?.[0] ?? doc?.body?.[0] ?? doc;
 
-  if (!body) {
-    console.error("[DocxDecoder] 본문(body)을 찾을 수 없습니다.");
-  }
   return body;
 }
 
@@ -507,8 +502,10 @@ async function decodeHeaderFooter(
         const paras = toArr(root?.["w:p"] ?? root?.p);
         result[type] = paras.map((p: any) => decodePara(p, ctx));
         (ctx as any).relsMap = origRelsMap;
-      } catch (err) {
-        console.warn(`[DocxDecoder] ${kind} (${type}) XML 파싱 실패:`, err);
+      } catch (err: any) {
+        ctx.warns.push(
+          `[DocxDecoder] ${kind} (${type}) XML 파싱 실패: ${err?.message ?? String(err)}`,
+        );
         continue;
       }
     }
@@ -573,6 +570,27 @@ function decodeSdt(sdt: any, ctx: DecCtx): ContentNode[] {
   return kids;
 }
 
+function decodeCellKids(cell: any, ctx: DecCtx): (ParaNode | GridNode)[] {
+  const elements = getBodyElements(cell);
+  const kids: (ParaNode | GridNode)[] = [];
+
+  for (const el of elements) {
+    const decoded = ctx.shield.guard(
+      () => decodeElement(el, ctx),
+      [] as ContentNode[],
+      "docx:cellElement",
+    );
+    const nodes = Array.isArray(decoded) ? decoded : [decoded];
+    for (const node of nodes) {
+      if (node && (node.tag === "para" || node.tag === "grid")) {
+        kids.push(node);
+      }
+    }
+  }
+
+  return kids;
+}
+
 function decodePara(p: any, ctx: DecCtx): ParaNode {
   const pPr = p?.["w:pPr"]?.[0] ?? {};
   const alignVal =
@@ -587,11 +605,12 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
     headStyle || undefined,
     ctx.paraStyleMap,
   );
+  const canonicalStyle = canonicalDocxStyleId(headStyle, ctx.paraStyleMap);
 
   const props: ParaProps = {
     align: safeAlign(alignVal),
     heading: parseHeading(headStyle),
-    styleId: headStyle || undefined,
+    styleId: canonicalStyle,
   };
 
   // Spacing (before/after/line height) — inline pPr wins over style
@@ -889,7 +908,7 @@ function decodeDrawing(drawing: any, ctx: DecCtx): ImgNode | null {
     }
 
     if (!fileData) {
-      console.warn(`[DocxDecoder] image not found: "${target}"`);
+      ctx.warns.push(`[DocxDecoder] image not found: "${target}"`);
       return null;
     }
 
@@ -902,9 +921,6 @@ function decodeDrawing(drawing: any, ctx: DecCtx): ImgNode | null {
       bmp: "image/bmp",
     };
     const mime = mimeMap[ext] ?? "image/png";
-    console.log(
-      `[DocxDecoder] image loaded: ${filePath} (${mime}, ${fileData.length} bytes)`,
-    );
 
     // ── layout 추출 ──────────────────────────────────────────
     const layout: ImgLayout = inline
@@ -1153,7 +1169,9 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
       const basedOn = (style?.["w:basedOn"]?.[0]?._attr ??
         style?.basedOn?.[0]?._attr)?.["w:val"];
 
-      const def: ParaStyleDef = { basedOn };
+      const nameAttr = style?.["w:name"]?.[0]?._attr ?? style?.name?.[0]?._attr;
+      const name = nameAttr?.["w:val"] ?? nameAttr?.val;
+      const def: ParaStyleDef = { basedOn, name };
 
       // rPr from run properties
       const rPr = style?.["w:rPr"]?.[0] ?? style?.rPr?.[0];
@@ -1273,6 +1291,16 @@ function resolveParaStyle(
   return merged;
 }
 
+function canonicalDocxStyleId(
+  styleId: string | undefined,
+  map: ParaStyleMap,
+): string | undefined {
+  if (!styleId) return undefined;
+  const styleName = map.get(styleId)?.name;
+  if (styleName === "바탕글") return "0";
+  return styleId;
+}
+
 /** Resolve final CellProps borders using 3-level priority chain */
 function resolveCellBorders(
   cp: CellProps,
@@ -1337,6 +1365,8 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
   // defaultStroke for HWPX/HWP encoders: use insideH (inner horizontal border)
   const defaultStroke = tblBdr.insideH ?? tblBdr.top;
   const gridProps: GridProps = { look, defaultStroke };
+  const layout = decodeFloatingTableLayout(tblPr);
+  if (layout) gridProps.layout = layout;
 
   // Read column widths from w:tblGrid
   const tblGrid = tbl?.["w:tblGrid"]?.[0] ?? tbl?.tblGrid?.[0];
@@ -1518,9 +1548,7 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
         tblBdr,
       );
 
-      const paras = toArr(cell?.["w:p"] ?? cell?.p).map((p: any) =>
-        decodePara(p, ctx),
-      );
+      const paras = decodeCellKids(cell, ctx);
       cellNodes.push(
         buildCell(paras.length > 0 ? paras : [buildPara([buildSpan("")])], {
           cs: rc.gridSpan,
@@ -1532,6 +1560,63 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
     return buildRow(cellNodes, rowHeightPt);
   });
   return buildGrid(rowNodes, gridProps);
+}
+
+function decodeFloatingTableLayout(tblPr: any): ImgLayout | undefined {
+  const tblpPr = tblPr?.["w:tblpPr"]?.[0] ?? tblPr?.tblpPr?.[0];
+  const attr = tblpPr?._attr;
+  if (!attr) return undefined;
+
+  const get = (name: string): string | undefined =>
+    attr[`w:${name}`] ?? attr[name];
+  const horzRelMap: Record<string, ImgHorzRelTo> = {
+    margin: "margin",
+    page: "page",
+    text: "para",
+  };
+  const vertRelMap: Record<string, ImgVertRelTo> = {
+    margin: "margin",
+    page: "page",
+    text: "para",
+  };
+  const horzAlignMap: Record<string, ImgHorzAlign> = {
+    left: "left",
+    center: "center",
+    right: "right",
+  };
+  const vertAlignMap: Record<string, ImgVertAlign> = {
+    top: "top",
+    center: "center",
+    bottom: "bottom",
+  };
+
+  const numberDxa = (name: string): number | undefined => {
+    const raw = get(name);
+    if (raw === undefined) return undefined;
+    const value = Number(raw);
+    return Number.isFinite(value) ? Metric.dxaToPt(value) : undefined;
+  };
+
+  const layout: ImgLayout = {
+    wrap: "topAndBottom",
+    horzRelTo: horzRelMap[get("horzAnchor") ?? ""] ?? "para",
+    vertRelTo: vertRelMap[get("vertAnchor") ?? ""] ?? "para",
+    distL: numberDxa("leftFromText"),
+    distR: numberDxa("rightFromText"),
+    distT: numberDxa("topFromText"),
+    distB: numberDxa("bottomFromText"),
+  };
+
+  const xSpec = get("tblpXSpec");
+  const ySpec = get("tblpYSpec");
+  const x = numberDxa("tblpX");
+  const y = numberDxa("tblpY");
+  if (x !== undefined && !xSpec) layout.xPt = x;
+  else if (xSpec) layout.horzAlign = horzAlignMap[xSpec];
+  if (y !== undefined && !ySpec) layout.yPt = y;
+  else if (ySpec) layout.vertAlign = vertAlignMap[ySpec];
+
+  return layout;
 }
 
 function decodeGridSimple(tbl: any): GridNode {

@@ -28,6 +28,7 @@ import type {
   ParaProps,
   CellProps,
   Stroke,
+  ImgLayout,
 } from "../../model/doc-props";
 import { A4, DEFAULT_STROKE, normalizeDims } from "../../model/doc-props";
 import { succeed, fail } from "../../contract/result";
@@ -380,7 +381,7 @@ interface ParaPrDef {
   prevHwp: number;
   nextHwp: number;
   lineSpacing: number;
-  lineSpacingFixed?: number; // HWPUNIT, type=FIXED
+  lineSpacingFixed?: number; // HWPUNIT, emitted as AT_LEAST
   listType?: string;
   listLevel?: number;
   verAlign?: string;
@@ -409,7 +410,7 @@ function charPrKey(p: TextProps): string {
  * null/undefined는 0 으로 처리하여 일관성 유지
  */
 function paraPrKey(p: ParaProps): string {
-  return `${p.align ?? "left"}|${p.verAlign ?? "baseline"}|${p.lineWrap ?? "break"}|${p.listOrd ?? ""}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.leftMargin ?? 0}|${p.indentRightPt ?? 0}|${p.firstLineIndentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}|${p.lineHeightFixed ?? 0}|${p.styleId ?? ""}`;
+  return `${p.align ?? "left"}|${p.verAlign ?? "baseline"}|${p.lineWrap ?? "break"}|${p.listOrd ?? ""}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.indentRightPt ?? 0}|${p.firstLineIndentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}|${p.lineHeightFixed ?? 0}|${p.styleId ?? ""}`;
 }
 
 // ─── 인코딩 컨텍스트 ─────────────────────────────────────────
@@ -494,13 +495,17 @@ function registerParaPr(props: ParaProps, ctx: HwpxCtx): number {
     align: alignStr,
     verAlign: verAlignStr,
     lineWrap: lineWrapStr,
-    leftHwp: Metric.ptToHwp(props.leftMargin ?? 0),
+    leftHwp: Metric.ptToHwp(props.indentPt ?? 0),
     rightHwp: Metric.ptToHwp(props.indentRightPt ?? 0),
     intentHwp: Metric.ptToHwp(props.firstLineIndentPt ?? 0),
     prevHwp: Metric.ptToHwp(props.spaceBefore ?? 0),
     nextHwp: Metric.ptToHwp(props.spaceAfter ?? 0),
-    lineSpacing: props.lineHeightFixed ? 0 : (props.lineHeight ? Math.round(props.lineHeight * 100) : 160),
-    lineSpacingFixed: props.lineHeightFixed ? Metric.ptToHwp(props.lineHeightFixed) : undefined,
+    lineSpacing: props.lineHeightFixed
+      ? 0
+      : (props.lineHeight ? Math.round(props.lineHeight * 100) : 160),
+    lineSpacingFixed: props.lineHeightFixed
+      ? Math.max(Metric.ptToHwp(props.lineHeightFixed), Math.ceil(1000 * 1.15))
+      : undefined,
   };
   if (props.listOrd !== undefined) {
     def.listType = props.listOrd ? "DIGIT" : "BULLET";
@@ -551,11 +556,17 @@ function registerStyle(
   ctx: HwpxCtx,
 ): void {
   if (!styleId || ctx.styleIdToHwpxId.has(styleId)) return;
-  if (styleId === "Normal") {
+  if (styleId === "Normal" || styleId === "0") {
     ctx.styleIdToHwpxId.set(styleId, 0);
     return;
   }
-  const hwpxId = ctx.hwpxStyles.length;
+
+  const usedIds = new Set(ctx.hwpxStyles.map((s) => s.id));
+  const numericId = Number(styleId);
+  let hwpxId =
+    Number.isInteger(numericId) && numericId > 0 && !usedIds.has(numericId)
+      ? numericId
+      : nextStyleId(usedIds);
   ctx.styleIdToHwpxId.set(styleId, hwpxId);
   ctx.hwpxStyles.push({
     id: hwpxId,
@@ -564,6 +575,20 @@ function registerStyle(
     paraPrIDRef: paraPrId,
     charPrIDRef: charPrId,
   });
+}
+
+function nextStyleId(usedIds: Set<number>): number {
+  let id = 0;
+  while (usedIds.has(id)) id++;
+  return id;
+}
+
+function paraStyleKey(props: ParaNode["props"]): string | undefined {
+  if (props.hwpStyleId !== undefined) {
+    const id = Math.trunc(props.hwpStyleId);
+    if (id >= 0 && id <= 255) return String(id);
+  }
+  return props.styleId;
 }
 
 // ─── Pre-scan: 콘텐츠 순회하며 모든 ID 사전 등록 ─────────────
@@ -589,8 +614,8 @@ function scanPara(para: ParaNode, ctx: HwpxCtx): void {
     }
   }
   scanKids(para.kids);
-  if (para.props.styleId)
-    registerStyle(para.props.styleId, paraPrId, firstCharPrId, ctx);
+  const styleKey = paraStyleKey(para.props);
+  if (styleKey) registerStyle(styleKey, paraPrId, firstCharPrId, ctx);
 }
 
 function scanGrid(grid: GridNode, ctx: HwpxCtx): void {
@@ -966,7 +991,7 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
   for (const pp of ctx.paraPrs) {
     const ver = pp.verAlign ?? "BASELINE";
     const wrap = pp.lineWrap ?? "BREAK";
-    const lsType = pp.lineSpacingFixed !== undefined ? "FIXED" : "PERCENT";
+    const lsType = pp.lineSpacingFixed !== undefined ? "AT_LEAST" : "PERCENT";
     const lsValue = pp.lineSpacingFixed !== undefined ? pp.lineSpacingFixed : pp.lineSpacing;
     paraPrXml +=
       `<hh:paraPr id="${pp.id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="0" suppressLineNumbers="0" checked="0">` +
@@ -1216,9 +1241,13 @@ function buildLinesegarray(
   fontSize: number,
   lineSpacingPct: number,
   horzSize: number,
+  lineHeightHwp?: number,
 ): { xml: string; totalHeight: number } {
-  const vertsizeLine = Math.round((fontSize * lineSpacingPct) / 100);
-  const spacing = vertsizeLine - fontSize;
+  const vertsizeLine = Math.max(
+    fontSize,
+    lineHeightHwp ?? Math.round((fontSize * Math.max(100, lineSpacingPct)) / 100),
+  );
+  const spacing = Math.max(0, vertsizeLine - fontSize);
   const baseline = Math.round(fontSize * 0.83);
 
   if (text.length === 0) {
@@ -1319,13 +1348,21 @@ function extractParaText(para: ParaNode): string {
 }
 
 function fontSizeForPara(para: ParaNode, ctx: HwpxCtx): number {
-  for (const kid of para.kids) {
-    if (kid.tag === "span") {
-      const id = ctx.charPrMap.get(charPrKey(kid.props));
-      if (id !== undefined && ctx.charPrs[id]) return ctx.charPrs[id].height;
+  let maxSize = 1000; // 기본 10pt
+  const visit = (kids: any[]) => {
+    for (const kid of kids ?? []) {
+      if (kid.tag === "span") {
+        const id = ctx.charPrMap.get(charPrKey(kid.props));
+        if (id !== undefined && ctx.charPrs[id]) {
+          maxSize = Math.max(maxSize, ctx.charPrs[id].height);
+        }
+      } else if (kid.tag === "link") {
+        visit(kid.kids ?? []);
+      }
     }
-  }
-  return 1000; // 기본 10pt
+  };
+  visit(para.kids as any[]);
+  return maxSize;
 }
 
 // ─── 단락 인코딩 ─────────────────────────────────────────────
@@ -1345,14 +1382,16 @@ function encodeParaPositioned(
   }
 
   const paraPrId = ctx.paraPrMap.get(paraPrKey(para.props)) ?? 0;
-  const styleIDRef = para.props.styleId
-    ? (ctx.styleIdToHwpxId.get(para.props.styleId) ?? 0)
-    : 0;
+  const styleKey = paraStyleKey(para.props);
+  const styleIDRef = styleKey ? (ctx.styleIdToHwpxId.get(styleKey) ?? 0) : 0;
   const fontSize = fontSizeForPara(para, ctx);
   const paraPr = ctx.paraPrs[paraPrId];
   const lineSpacing = paraPr?.lineSpacing ?? 160;
-  const spacing = Math.max(0, Math.round(fontSize * (lineSpacing / 100 - 1)));
-  let vertSize = fontSize + spacing;
+  const lineHeightHwp = paraPr?.lineSpacingFixed !== undefined
+    ? Math.max(paraPr.lineSpacingFixed, Math.ceil(fontSize * 1.15))
+    : Math.max(fontSize, Math.round((fontSize * Math.max(100, lineSpacing)) / 100));
+  const spacing = Math.max(0, lineHeightHwp - fontSize);
+  let vertSize = lineHeightHwp;
   const horzSize = availWidth ?? ctx.availableWidth;
 
   // 코드 블록 감지 (Courier 폰트 또는 styleId "code")
@@ -1389,6 +1428,7 @@ function encodeParaPositioned(
     fontSize,
     lineSpacing,
     horzSize,
+    lineHeightHwp,
   );
 
   const hasPageBreak = para.kids.some(
@@ -1714,7 +1754,9 @@ function encodeGridPositioned(
   hfRun = "",
 ): { xml: string; nextVertPos: number; hasPageBreak: boolean } {
   const { xml: gridXml, height: tblHeight } = buildGridXml(grid, ctx);
-  const totalHeight = Math.max(1600, tblHeight);
+  const floats =
+    grid.props.layout !== undefined && grid.props.layout.wrap !== "inline";
+  const totalHeight = floats ? 1000 : Math.max(1600, tblHeight);
   const fontSize = 1000;
   const baseline = Math.round(fontSize * 0.83);
   const spacing = Math.max(0, totalHeight - fontSize);
@@ -1739,6 +1781,80 @@ function encodeGridPositioned(
 
   return { xml, nextVertPos: vertPos + totalHeight, hasPageBreak: false };
 }
+
+function buildGridLayoutAttrs(
+  layout: ImgLayout | undefined,
+  fallbackHorzAlign: string,
+): { textWrap: string; zOrder: number; noAdjust: string; posXml: string; outMarginXml: string } {
+  const floats = layout !== undefined && layout.wrap !== "inline";
+  const textWrapMap: Record<string, string> = {
+    inline: "TOP_AND_BOTTOM",
+    topAndBottom: "TOP_AND_BOTTOM",
+    square: "SQUARE",
+    tight: "BOTH_SIDES",
+    through: "BOTH_SIDES",
+    none: "TOP_AND_BOTTOM",
+    behind: "BEHIND_TEXT",
+    front: "FRONT_TEXT",
+  };
+  const horzRelMap: Record<string, string> = {
+    para: "PARA",
+    margin: "MARGIN",
+    page: "PAGE",
+    column: "COLUMN",
+  };
+  const vertRelMap: Record<string, string> = {
+    para: "PARA",
+    margin: "MARGIN",
+    page: "PAGE",
+    line: "LINE",
+  };
+  const horzAlignMap: Record<string, string> = {
+    left: "LEFT",
+    center: "CENTER",
+    right: "RIGHT",
+  };
+  const vertAlignMap: Record<string, string> = {
+    top: "TOP",
+    center: "CENTER",
+    bottom: "BOTTOM",
+  };
+
+  const horzAlign =
+    (layout?.horzAlign ? horzAlignMap[layout.horzAlign] : undefined) ??
+    fallbackHorzAlign;
+  const vertAlign =
+    (layout?.vertAlign ? vertAlignMap[layout.vertAlign] : undefined) ?? "TOP";
+  const horzRelTo =
+    (layout?.horzRelTo ? horzRelMap[layout.horzRelTo] : undefined) ?? "PARA";
+  const vertRelTo =
+    (layout?.vertRelTo ? vertRelMap[layout.vertRelTo] : undefined) ?? "PARA";
+  const horzOffset = layout?.xPt != null ? Metric.ptToHwp(layout.xPt) : 0;
+  const vertOffset = layout?.yPt != null ? Metric.ptToHwp(layout.yPt) : 0;
+
+  const posXml =
+    `<hp:pos treatAsChar="${floats ? "0" : "1"}" affectLSpacing="0" ` +
+    `flowWithText="${floats && (layout?.vertRelTo === "page" || layout?.horzRelTo === "page") ? "0" : "1"}" ` +
+    `allowOverlap="${floats ? "1" : "0"}" holdAnchorAndSO="0" ` +
+    `vertRelTo="${vertRelTo}" horzRelTo="${horzRelTo}" ` +
+    `vertAlign="${vertAlign}" horzAlign="${horzAlign}" ` +
+    `vertOffset="${vertOffset}" horzOffset="${horzOffset}"/>`;
+
+  const dist = (value: number | undefined) =>
+    value != null ? Math.max(0, Metric.ptToHwp(value)) : 138;
+  const outMarginXml =
+    `<hp:outMargin left="${dist(layout?.distL)}" right="${dist(layout?.distR)}" ` +
+    `top="${dist(layout?.distT)}" bottom="${dist(layout?.distB)}"/>`;
+
+  return {
+    textWrap: textWrapMap[layout?.wrap ?? "inline"] ?? "TOP_AND_BOTTOM",
+    zOrder: Math.round(layout?.zOrder ?? 0),
+    noAdjust: floats ? "1" : "0",
+    posXml,
+    outMarginXml,
+  };
+}
+
 function buildGridXml(
   grid: GridNode,
   ctx: HwpxCtx,
@@ -1803,21 +1919,36 @@ function buildGridXml(
   // 행 높이 계산
   const rowHeights: number[] = [];
   for (let ri = 0; ri < rowCount; ri++) {
+    let minRowH = 0;
+    for (let ci = 0; ci < colCount; ci++) {
+      const entry = tableMap[ri][ci];
+      if (entry?.type === "real") {
+        const cell = entry.cell!;
+        const cp = cell.props ?? {};
+        let cellW = 0;
+        for (let sc = ci; sc < ci + cell.cs && sc < colWidths.length; sc++)
+          cellW += colWidths[sc];
+        if (!cellW) cellW = Math.round(totalW / colCount) * cell.cs;
+        const padL = cp.padL !== undefined ? Metric.ptToHwp(cp.padL) : 141;
+        const padR = cp.padR !== undefined ? Metric.ptToHwp(cp.padR) : 141;
+        const innerW = Math.max(cellW - padL - padR, 100);
+        const span = Math.max(1, cell.rs ?? 1);
+        const h = estimateCellHeight(cell, ctx, innerW);
+        minRowH = Math.max(minRowH, Math.ceil(h / span));
+      }
+    }
+    const baseH =
+      grid.kids[ri].heightPt != null &&
+      (grid.kids[ri].heightPt as number) > 0
+        ? Metric.ptToHwp(grid.kids[ri].heightPt as number)
+        : Math.round(1000 * 1.6);
     if (
       grid.kids[ri].heightPt != null &&
       (grid.kids[ri].heightPt as number) > 0
     ) {
-      rowHeights.push(Metric.ptToHwp(grid.kids[ri].heightPt as number));
+      rowHeights.push(Math.max(baseH, minRowH));
     } else {
-      let maxH = 0;
-      for (let ci = 0; ci < colCount; ci++) {
-        const entry = tableMap[ri][ci];
-        if (entry?.type === "real") {
-          const h = estimateCellHeight(entry.cell!, ctx);
-          if (h > maxH) maxH = h;
-        }
-      }
-      rowHeights.push(maxH || Math.round(1000 * 1.6));
+      rowHeights.push(Math.max(baseH, minRowH));
     }
   }
   const totalH = rowHeights.reduce((s, h) => s + h, 0);
@@ -1892,13 +2023,14 @@ function buildGridXml(
     left: 'LEFT', right: 'RIGHT', center: 'CENTER', justify: 'JUSTIFY',
   };
   const horzAlign = alignMap[grid.props.align ?? 'left'] ?? 'LEFT';
+  const layoutAttrs = buildGridLayoutAttrs(grid.props.layout, horzAlign);
 
   const headerRow = grid.props.headerRow ? ' repeatHeader="1"' : "";
   const xml =
-    `<hp:tbl id="${ctx.nextElementId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE"${headerRow} rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="0">` +
+    `<hp:tbl id="${ctx.nextElementId++}" zOrder="${layoutAttrs.zOrder}" numberingType="TABLE" textWrap="${layoutAttrs.textWrap}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE"${headerRow} rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="${layoutAttrs.noAdjust}">` +
     `<hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="${totalH}" heightRelTo="ABSOLUTE" protect="0"/>` +
-    `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="${horzAlign}" vertOffset="0" horzOffset="0"/>` +
-    `<hp:outMargin left="138" right="138" top="138" bottom="138"/>` +
+    layoutAttrs.posXml +
+    layoutAttrs.outMarginXml +
     `<hp:inMargin left="0" right="0" top="0" bottom="0"/>` +
     rowsXml +
     `</hp:tbl>`;
@@ -1906,24 +2038,90 @@ function buildGridXml(
   return { xml, height: totalH };
 }
 
-function estimateCellHeight(cell: CellNode, ctx: HwpxCtx): number {
-  const topPad = 141;
-  const botPad = 141;
+function estimateLineCountForWidth(
+  text: string,
+  fontSize: number,
+  horzSize?: number,
+): number {
+  if (!text) return 1;
+  const maxWidth = Math.max(1, horzSize ?? 0);
+  if (!horzSize || horzSize <= 0) return text.split(/\r\n|\r|\n/).length;
+  let lines = 1;
+  let currentLineWidth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const charCode = text.charCodeAt(i);
+    if (charCode === 10 || charCode === 13) {
+      if (charCode === 13 && text.charCodeAt(i + 1) === 10) i++;
+      lines++;
+      currentLineWidth = 0;
+      continue;
+    }
+
+    let charW = fontSize * 0.55;
+    if (charCode >= 0xac00 && charCode <= 0xd7a3) charW = fontSize;
+    else if (charCode >= 0x3130 && charCode <= 0x318f) charW = fontSize;
+    else if (charCode >= 0x4e00 && charCode <= 0x9fff) charW = fontSize;
+    else if (charCode >= 65 && charCode <= 90) charW = fontSize * 0.65;
+    else if (charCode === 32) charW = fontSize * 0.32;
+    else if (charCode > 255) charW = fontSize;
+    else charW = fontSize * 0.42;
+
+    if (currentLineWidth > 0 && currentLineWidth + charW > maxWidth) {
+      lines++;
+      currentLineWidth = charW;
+    } else {
+      currentLineWidth += charW;
+    }
+  }
+  return Math.max(1, lines);
+}
+
+function estimateGridHeight(grid: GridNode, ctx: HwpxCtx): number {
+  let total = 0;
+  for (const row of grid.kids) {
+    const base =
+      row.heightPt != null && row.heightPt > 0
+        ? Metric.ptToHwp(row.heightPt)
+        : Math.round(1000 * 1.6);
+    let minRow = 0;
+    for (const cell of row.kids) {
+      const span = Math.max(1, cell.rs ?? 1);
+      minRow = Math.max(minRow, Math.ceil(estimateCellHeight(cell, ctx) / span));
+    }
+    total += Math.max(base, minRow);
+  }
+  return total;
+}
+
+function estimateCellHeight(
+  cell: CellNode,
+  ctx: HwpxCtx,
+  innerWidth?: number,
+): number {
+  const cp = cell.props ?? {};
+  const topPad = cp.padT !== undefined ? Metric.ptToHwp(cp.padT) : 141;
+  const botPad = cp.padB !== undefined ? Metric.ptToHwp(cp.padB) : 141;
   let h = 0;
   for (const kid of cell.kids) {
     if (kid.tag === 'grid') {
-      // 중첩 표 높이는 최소값으로 처리
-      h += 1600;
+      h += estimateGridHeight(kid, ctx);
       continue;
     }
     const para = kid;
     const fs = fontSizeForPara(para, ctx);
     const ppId = ctx.paraPrMap.get(paraPrKey(para.props));
     const pp = ppId !== undefined ? ctx.paraPrs[ppId] : null;
-    const ls = pp?.lineSpacing ?? 160;
+    const lineHeight = pp?.lineSpacingFixed !== undefined
+      ? Math.max(pp.lineSpacingFixed, Math.ceil(fs * 1.15))
+      : Math.max(fs, Math.round((fs * Math.max(100, pp?.lineSpacing ?? 160)) / 100));
+    const lineCount = estimateLineCountForWidth(
+      extractParaText(para),
+      fs,
+      innerWidth,
+    );
     const before = pp?.prevHwp ?? 0;
     const after = pp?.nextHwp ?? 0;
-    h += Math.round((fs * ls) / 100) + before + after;
+    h += lineHeight * lineCount + before + after;
   }
   if (!h) h = Math.round(1000 * 1.6);
   return h + topPad + botPad;

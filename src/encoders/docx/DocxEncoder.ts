@@ -8,7 +8,7 @@ import type {
   SheetNode,
 } from "../../model/doc-tree";
 import type { Outcome } from "../../contract/result";
-import type { PageDims, GridProps, CellProps } from "../../model/doc-props";
+import type { PageDims, GridProps, CellProps, ImgLayout } from "../../model/doc-props";
 import { A4, normalizeDims } from "../../model/doc-props";
 import { succeed, fail } from "../../contract/result";
 import { Metric } from "../../safety/StyleBridge";
@@ -16,6 +16,7 @@ import { ArchiveKit } from "../../toolkit/ArchiveKit";
 import { TextKit } from "../../toolkit/TextKit";
 import { registry } from "../../pipeline/registry";
 import { BaseEncoder } from "../../core/BaseEncoder";
+import rawFontMapping from "./font-mapping.json";
 
 interface ImageEntry {
   rId: string;
@@ -23,6 +24,16 @@ interface ImageEntry {
   data: Uint8Array;
   ext: string;
 }
+
+type FontMappingEntry =
+  | string
+  | {
+      nearest?: string;
+      altName?: string;
+      candidates?: Array<string | { name?: string; font?: string; distance?: number }>;
+    };
+
+const FONT_MAPPING = rawFontMapping as Record<string, FontMappingEntry>;
 
 export class DocxEncoder extends BaseEncoder {
   protected getFormat(): string {
@@ -53,14 +64,21 @@ export class DocxEncoder extends BaseEncoder {
       collectImages(allKids, ctx);
 
       // Header / footer (첫 번째 섹션 기준)
-      let headerParas = firstSheet?.headers?.default;
-      let footerParas = firstSheet?.footers?.default;
-      const hasHeader = headerParas && headerParas.length > 0;
-      const hasFooter = footerParas && footerParas.length > 0;
+      const headerContents: ContentNode[] = [...(firstSheet?.headers?.default ?? [])];
+      const footerContents: ContentNode[] = [...(firstSheet?.footers?.default ?? [])];
+      const hasHeader = headerContents.length > 0;
+      const hasFooter = footerContents.length > 0;
 
       // Collect images from header/footer
-      if (hasHeader) collectImagesFromParas(headerParas!, ctx);
-      if (hasFooter) collectImagesFromParas(footerParas!, ctx);
+      if (hasHeader) collectImages(headerContents, ctx);
+      if (hasFooter) collectImages(footerContents, ctx);
+
+      const fonts = collectFonts(allKids);
+      if (hasHeader) collectFonts(headerContents, fonts);
+      if (hasFooter) collectFonts(footerContents, fonts);
+      fonts.add("함초롬바탕");
+      fonts.add("맑은 고딕");
+      const hasFontTable = fonts.size > 0;
 
       const headerRId = hasHeader ? `rId${ctx.nextId++}` : "";
       const footerRId = hasFooter ? `rId${ctx.nextId++}` : "";
@@ -70,25 +88,30 @@ export class DocxEncoder extends BaseEncoder {
 
       // kids 참조를 allKids로 통일 (후속 코드 호환)
       const kids = allKids;
+      const mainDocumentXml = documentXml(kids, dims, ctx, headerRId, footerRId);
+      const headerXml = hasHeader
+        ? headerFooterXml("hdr", headerContents, ctx, dims)
+        : "";
+      const footerXml = hasFooter
+        ? headerFooterXml("ftr", footerContents, ctx, dims)
+        : "";
 
       const entries: { name: string; data: Uint8Array }[] = [
         {
           name: "[Content_Types].xml",
-          data: this.stringToBytes(contentTypes(images, hasHeader, hasFooter)),
+          data: this.stringToBytes(contentTypes(images, hasHeader, hasFooter, hasFontTable)),
         },
         { name: "_rels/.rels", data: this.stringToBytes(pkgRels()) },
         {
           name: "word/document.xml",
-          data: this.stringToBytes(
-            documentXml(kids, dims, ctx, headerRId, footerRId),
-          ),
+          data: this.stringToBytes(mainDocumentXml),
         },
         { name: "word/styles.xml", data: this.stringToBytes(stylesXml()) },
         { name: "word/settings.xml", data: this.stringToBytes(settingsXml()) },
         {
           name: "word/_rels/document.xml.rels",
           data: this.stringToBytes(
-            docRels(images, headerRId, footerRId, numInfo.hasLists),
+            docRels(images, headerRId, footerRId, numInfo.hasLists, hasFontTable),
           ),
         },
         { name: "docProps/app.xml", data: this.stringToBytes(appXml()) },
@@ -106,17 +129,24 @@ export class DocxEncoder extends BaseEncoder {
         });
       }
 
+      if (hasFontTable) {
+        entries.push({
+          name: "word/fontTable.xml",
+          data: this.stringToBytes(fontTableXml(fonts)),
+        });
+      }
+
       // Add header/footer files
       if (hasHeader) {
         entries.push({
           name: "word/header1.xml",
-          data: this.stringToBytes(headerFooterXml("hdr", headerParas!, ctx)),
+          data: this.stringToBytes(headerXml),
         });
       }
       if (hasFooter) {
         entries.push({
           name: "word/footer1.xml",
-          data: this.stringToBytes(headerFooterXml("ftr", footerParas!, ctx)),
+          data: this.stringToBytes(footerXml),
         });
       }
 
@@ -125,7 +155,7 @@ export class DocxEncoder extends BaseEncoder {
         entries.push({ name: `word/media/${img.name}`, data: img.data });
       }
 
-      return succeed(await this.zip(entries));
+      return succeed(await this.zip(entries), ctx.warns);
     } catch (e: any) {
       return fail(`DOCX encode error: ${e?.message ?? String(e)}`);
     }
@@ -184,6 +214,84 @@ function registerImage(img: ImgNode, ctx: EncCtx): void {
   ctx.imgMap.set(img, rId);
 }
 
+function registerSvgImage(svg: string, ctx: EncCtx): ImageEntry {
+  const entry: ImageEntry = {
+    rId: `rId${ctx.nextId++}`,
+    name: `image${ctx.nextImgNum++}.svg`,
+    data: TextKit.encode(svg),
+    ext: "svg",
+  };
+  ctx.images.push(entry);
+  return entry;
+}
+
+// ─── Font collection / fallback metadata ────────────────────
+
+function collectFonts(kids: ContentNode[], fonts: Set<string> = new Set()): Set<string> {
+  for (const kid of kids) {
+    if (kid.tag === "para") collectFontsFromPara(kid, fonts);
+    else if (kid.tag === "grid") {
+      for (const row of kid.kids) {
+        for (const cell of row.kids) {
+          for (const child of cell.kids) {
+            if (child.tag === "para") collectFontsFromPara(child, fonts);
+            else collectFonts([child], fonts);
+          }
+        }
+      }
+    }
+  }
+  return fonts;
+}
+
+function collectFontsFromParas(paras: ParaNode[], fonts: Set<string>): void {
+  for (const para of paras) collectFontsFromPara(para, fonts);
+}
+
+function collectFontsFromPara(para: ParaNode, fonts: Set<string>): void {
+  for (const kid of para.kids) {
+    if (kid.tag === "span") collectFontsFromSpan(kid, fonts);
+    else if (kid.tag === "link") {
+      for (const span of kid.kids) collectFontsFromSpan(span, fonts);
+    } else if (kid.tag === "grid") {
+      collectFonts([kid], fonts);
+    }
+  }
+}
+
+function collectFontsFromSpan(span: SpanNode, fonts: Set<string>): void {
+  const font = span.props.font?.trim();
+  if (font) fonts.add(font);
+}
+
+function mappedFontName(font: string): string | undefined {
+  const entry = FONT_MAPPING[font] ?? FONT_MAPPING[font.trim()];
+  if (!entry) return undefined;
+  if (typeof entry === "string") return entry;
+  if (entry.altName) return entry.altName;
+  if (entry.nearest) return entry.nearest;
+  const first = entry.candidates?.[0];
+  if (typeof first === "string") return first;
+  return first?.name ?? first?.font;
+}
+
+function fontTableXml(fonts: Set<string>): string {
+  const body = Array.from(fonts)
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b, "ko"))
+    .map((font) => {
+      const alt = mappedFontName(font);
+      const altXml = alt && alt !== font ? `<w:altName w:val="${esc(alt)}"/>` : "";
+      return `<w:font w:name="${esc(font)}">${altXml}<w:family w:val="auto"/><w:pitch w:val="variable"/></w:font>`;
+    })
+    .join("\n  ");
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  ${body}
+</w:fonts>`;
+}
+
 // ─── List/numbering collection ──────────────────────────────
 
 interface NumInfo {
@@ -210,6 +318,7 @@ function contentTypes(
   images: ImageEntry[],
   hasHeader?: boolean,
   hasFooter?: boolean,
+  hasFontTable?: boolean,
 ): string {
   const imgDefaults = new Set<string>();
   for (const img of images) imgDefaults.add(img.ext);
@@ -225,7 +334,9 @@ function contentTypes(
           ? "image/jpeg"
           : ext === "gif"
             ? "image/gif"
-            : "image/bmp";
+            : ext === "svg"
+              ? "image/svg+xml"
+              : "image/bmp";
     defaults += `\n  <Default Extension="${ext}" ContentType="${ct}"/>`;
   }
 
@@ -239,6 +350,8 @@ function contentTypes(
     overrides += `\n  <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>`;
   if (hasFooter)
     overrides += `\n  <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>`;
+  if (hasFontTable)
+    overrides += `\n  <Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/>`;
 
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -261,6 +374,7 @@ function docRels(
   headerRId?: string,
   footerRId?: string,
   hasLists?: boolean,
+  hasFontTable?: boolean,
 ): string {
   let rels = `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
   <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>`;
@@ -268,6 +382,10 @@ function docRels(
   // Numbering relationship — only when lists exist
   if (hasLists) {
     rels += `\n  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>`;
+  }
+
+  if (hasFontTable) {
+    rels += `\n  <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/>`;
   }
 
   for (const img of images) {
@@ -310,7 +428,7 @@ function stylesXml(): string {
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:docDefaults>
     <w:rPrDefault><w:rPr>
-      <w:rFonts w:ascii="맑은 고딕" w:eastAsia="맑은 고딕" w:hAnsi="맑은 고딕"/>
+      <w:rFonts w:ascii="맑은 고딕" w:eastAsia="함초롬바탕" w:hAnsi="맑은 고딕" w:hint="eastAsia"/>
       <w:sz w:val="20"/>
       <w:szCs w:val="20"/>
     </w:rPr></w:rPrDefault>
@@ -429,11 +547,16 @@ function numberingXml(info: NumInfo): string {
 
 function headerFooterXml(
   type: "hdr" | "ftr",
-  paras: ParaNode[],
+  contents: ContentNode[],
   ctx: EncCtx,
+  dims: PageDims,
 ): string {
   const tag = type === "hdr" ? "w:hdr" : "w:ftr";
-  const body = paras.map((p) => encodeParaInner(p, ctx)).join("\n");
+  const bodyParts = contents.map((node) => encodeContent(node, ctx, dims));
+  if (contents[contents.length - 1]?.tag === "grid") {
+    bodyParts.push('<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>');
+  }
+  const body = bodyParts.join("\n");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <${tag} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
 ${body}
@@ -462,8 +585,8 @@ function documentXml(
   <w:body>
 ${body}
     <w:sectPr>${sectRefs}
-      <w:pgSz w:w="${Metric.ptToDxa(dims.wPt)}" w:h="${Metric.ptToDxa(dims.hPt)}" w:orient="${dims.orient ?? "portrait"}"/>
-      <w:pgMar w:top="${Metric.ptToDxa(dims.mt)}" w:right="${Metric.ptToDxa(dims.mr)}" w:bottom="${Metric.ptToDxa(dims.mb)}" w:left="${Metric.ptToDxa(dims.ml)}" w:header="709" w:footer="709" w:gutter="0"/>
+      <w:pgSz w:w="${Metric.ptToDxa(dims.wPt)}" w:h="${Metric.ptToDxa(dims.hPt)}"${dims.orient === "landscape" ? ' w:orient="landscape"' : ""}/>
+      <w:pgMar w:top="${Metric.ptToDxa(dims.mt)}" w:right="${Metric.ptToDxa(dims.mr)}" w:bottom="${Metric.ptToDxa(dims.mb)}" w:left="${Metric.ptToDxa(dims.ml)}" w:header="${Metric.ptToDxa(dims.headerPt ?? 42.52)}" w:footer="${Metric.ptToDxa(dims.footerPt ?? 42.52)}" w:gutter="0"/>
     </w:sectPr>
   </w:body>
 </w:document>`;
@@ -476,11 +599,15 @@ function encodeContent(
 ): string {
   return node.tag === "grid"
     ? encodeGrid(node, ctx, dims)
-    : encodeParaInner(node, ctx);
+    : encodeParaInner(node, ctx, { compactEmptyBodyPara: true });
 }
 
-function encodeParaInner(para: ParaNode, ctx: EncCtx): string {
-  const align = para.props.align ?? "left";
+function encodeParaInner(
+  para: ParaNode,
+  ctx: EncCtx,
+  opts: { compactEmptyBodyPara?: boolean } = {},
+): string {
+  const align = para.props.align;
   // P3: hwpStyleId(숫자 ID) 우선, 없으면 heading 스타일, 둘 다 없으면 빈 문자열
   let headStyle = "";
   if (para.props.hwpStyleId !== undefined) {
@@ -513,32 +640,60 @@ function encodeParaInner(para: ParaNode, ctx: EncCtx): string {
     if (spaceAfter !== undefined)
       parts.push(`w:after="${Math.max(0, Metric.ptToDxa(spaceAfter))}"`);
     if (lineHeightFixed !== undefined) {
-      // FIXED: lineRule="exact", line값은 dxa (1pt = 20dxa)
+      // Fixed line heights from HWP/HWPX can be smaller than the run font.
+      // Emit a safe minimum as "atLeast" so Word/LibreOffice do not overlap text.
+      const fixedPt = safeFixedLineHeightPt(para, lineHeightFixed);
       parts.push(
-        `w:line="${Math.max(1, Metric.ptToDxa(lineHeightFixed))}" w:lineRule="exact"`,
+        `w:line="${Math.max(1, Metric.ptToDxa(fixedPt))}" w:lineRule="atLeast"`,
       );
     } else if (lineHeight !== undefined) {
-      parts.push(`w:line="${Math.round(lineHeight * 240)}" w:lineRule="auto"`);
+      const ratio = docxLineHeightRatio(lineHeight);
+      parts.push(
+        `w:line="${Math.round(ratio * 240)}" w:lineRule="auto"`,
+      );
     }
     spacingXml = `<w:spacing ${parts.join(" ")}/>`;
+  }
+  if (
+    opts.compactEmptyBodyPara &&
+    paraTextContent(para) === "" &&
+    !paraHasNonTextContent(para)
+  ) {
+    spacingXml =
+      '<w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/>';
   }
 
   // Indentation — ECMA-376 §17.3.1.12 ind
   // w:left = 전체 왼쪽 여백(dxa), w:right = 전체 오른쪽 여백(dxa)
   // w:firstLine = 첫 줄 추가 들여쓰기(dxa, 양수), w:hanging = 내어쓰기(dxa, 양수값으로 표현)
   let indentXml = "";
-  const leftDxa = Math.round(Metric.ptToDxa(para.props.indentPt ?? 0));
+  let leftDxa = Math.round(Metric.ptToDxa(para.props.indentPt ?? 0));
   const rightDxa = Math.round(Metric.ptToDxa(para.props.indentRightPt ?? 0));
   const firstPt = para.props.firstLineIndentPt ?? 0;
 
   const indParts: string[] = [];
-  if (leftDxa > 0) indParts.push(`w:left="${leftDxa}"`);
   if (rightDxa > 0) indParts.push(`w:right="${rightDxa}"`);
   if (firstPt > 0)
     indParts.push(`w:firstLine="${Math.round(Metric.ptToDxa(firstPt))}"`);
-  if (firstPt < 0)
-    indParts.push(`w:hanging="${Math.round(Metric.ptToDxa(-firstPt))}"`);
+  if (firstPt < 0) {
+    const hangingDxa = Math.round(Metric.ptToDxa(-firstPt));
+    if (hangingDxa > 0) {
+      const baseLeftDxa = Math.max(0, leftDxa);
+      leftDxa = baseLeftDxa + hangingDxa;
+      if (baseLeftDxa <= 0 || hangingDxa > baseLeftDxa) {
+        ctx.warns.push(
+          `[DocxEncoder] w:hanging=${hangingDxa} exceeds w:left=${baseLeftDxa}`,
+        );
+      }
+      indParts.push(`w:hanging="${hangingDxa}"`);
+    }
+  }
+  if (leftDxa > 0) indParts.unshift(`w:left="${leftDxa}"`);
   if (indParts.length > 0) indentXml = `<w:ind ${indParts.join(" ")}/>`;
+
+  const cjkLineBreakXml = "<w:kinsoku/><w:wordWrap/><w:overflowPunct/>";
+  const omitEmptyLeftAlign = align === "left" && paraTextContent(para) === "";
+  const jcXml = align && !omitEmptyLeftAlign ? `<w:jc w:val="${docxJcValue(align)}"/>` : "";
 
   const runs = para.kids
     .map((k) => {
@@ -554,28 +709,174 @@ function encodeParaInner(para: ParaNode, ctx: EncCtx): string {
     .join("");
 
   return `    <w:p>
-      <w:pPr>${headStyle}${numPr}${spacingXml}${indentXml}<w:jc w:val="${align === "justify" ? "both" : align}"/></w:pPr>
+      <w:pPr>${headStyle}${numPr}${spacingXml}${indentXml}${cjkLineBreakXml}${jcXml}</w:pPr>
       ${runs}
     </w:p>`;
+}
+
+function docxJcValue(align: NonNullable<ParaNode["props"]["align"]>): string {
+  if (align === "justify") return "both";
+  if (align === "distribute_space") return "distribute";
+  return align;
+}
+
+function paraTextContent(para: ParaNode): string {
+  let text = "";
+  const collect = (kids: any[]) => {
+    for (const kid of kids ?? []) {
+      if (kid.tag === "txt") text += kid.content ?? "";
+      else if (kid.kids) collect(kid.kids);
+    }
+  };
+  collect(para.kids as any[]);
+  return text;
+}
+
+function paraHasNonTextContent(para: ParaNode): boolean {
+  let found = false;
+  const visit = (kids: any[]) => {
+    for (const kid of kids ?? []) {
+      if (
+        kid.tag === "img" ||
+        kid.tag === "br" ||
+        kid.tag === "pb" ||
+        kid.tag === "pagenum"
+      ) {
+        found = true;
+        return;
+      }
+      if (kid.kids) visit(kid.kids);
+      if (found) return;
+    }
+  };
+  visit(para.kids as any[]);
+  return found;
+}
+
+function maxFontPtInPara(para: ParaNode): number {
+  let maxPt = 10;
+  const visit = (kids: any[]) => {
+    for (const kid of kids ?? []) {
+      if (kid.tag === "span" && typeof kid.props?.pt === "number") {
+        maxPt = Math.max(maxPt, kid.props.pt);
+      }
+      if (kid.kids) visit(kid.kids);
+    }
+  };
+  visit(para.kids as any[]);
+  return maxPt;
+}
+
+function safeFixedLineHeightPt(para: ParaNode, fixedPt: number): number {
+  const fontPt = maxFontPtInPara(para);
+  return Math.max(fixedPt, fontPt * 1.15);
+}
+
+function minParaHeightPt(para: ParaNode): number {
+  const fontPt = maxFontPtInPara(para);
+  const before = Math.max(0, para.props.spaceBefore ?? 0);
+  const after = Math.max(0, para.props.spaceAfter ?? 0);
+  const lineCount = paraLineCount(para);
+  let linePt: number;
+  if (para.props.lineHeightFixed !== undefined) {
+    linePt = safeFixedLineHeightPt(para, para.props.lineHeightFixed);
+  } else {
+    const ratio = docxLineHeightRatio(para.props.lineHeight ?? 1.15);
+    linePt = fontPt * ratio;
+  }
+  return linePt * lineCount + before + after;
+}
+
+function docxLineHeightRatio(lineHeight: number): number {
+  const ratio = Math.max(1, lineHeight);
+  if (ratio < 1.6) return ratio;
+  return Math.max(1.3, ratio * (14 / 17));
+}
+
+function paraLineCount(para: ParaNode): number {
+  let lines = 1;
+  const visit = (kids: any[]) => {
+    for (const kid of kids ?? []) {
+      if (kid.tag === "span") {
+        for (const child of kid.kids ?? []) {
+          if (child.tag === "br") lines++;
+          else if (child.tag === "txt") {
+            lines += String(child.content ?? "").split(/\r\n|\r|\n/).length - 1;
+          }
+        }
+      }
+      if (kid.kids) visit(kid.kids);
+    }
+  };
+  visit(para.kids as any[]);
+  return Math.max(1, lines);
+}
+
+function minGridHeightPt(grid: GridNode): number {
+  return (grid.kids ?? []).reduce((sum: number, row: any) => {
+    const base = row.heightPt != null && row.heightPt > 0 ? row.heightPt : 14;
+    let minRow = 0;
+    for (const cell of row.kids ?? []) {
+      const span = Math.max(1, cell.rs ?? 1);
+      minRow = Math.max(minRow, minCellHeightPt(cell) / span);
+    }
+    return sum + Math.max(base, minRow);
+  }, 0);
+}
+
+function minCellHeightPt(cell: any): number {
+  const cp = cell.props ?? {};
+  const padT = cp.padT ?? 1.4;
+  const padB = cp.padB ?? 1.4;
+  if (!cellHasVisibleContent(cell)) return padT + padB;
+  let content = 0;
+  for (const kid of cell.kids ?? []) {
+    if (kid.tag === "para") content += minParaHeightPt(kid);
+    else if (kid.tag === "grid") content += minGridHeightPt(kid);
+  }
+  return Math.max(content, 10) + padT + padB;
+}
+
+function cellHasVisibleContent(cell: any): boolean {
+  for (const kid of cell.kids ?? []) {
+    if (kid.tag === "grid") return true;
+    if (kid.tag === "para") {
+      if (paraTextContent(kid).trim() !== "") return true;
+      if (paraHasNonTextContent(kid)) return true;
+    }
+  }
+  return false;
 }
 
 function encodeRun(span: SpanNode, _ctx: EncCtx): string {
   const p = span.props;
   const rPr: string[] = [];
+  const omitDefaultTableText =
+    p.font === "한양신명조" &&
+    p.pt === 10 &&
+    !p.b &&
+    !p.i &&
+    !p.u &&
+    !p.s &&
+    !p.sup &&
+    !p.sub &&
+    !p.color &&
+    !p.bg;
+  const omitInheritedTenPointSize = p.pt === 10;
   if (p.b) rPr.push("<w:b/>");
   if (p.i) rPr.push("<w:i/>");
   if (p.u) rPr.push('<w:u w:val="single"/>');
   if (p.s) rPr.push("<w:strike/>");
   if (p.sup) rPr.push('<w:vertAlign w:val="superscript"/>');
   if (p.sub) rPr.push('<w:vertAlign w:val="subscript"/>');
-  if (p.pt)
+  if (p.pt && !omitDefaultTableText && !omitInheritedTenPointSize)
     rPr.push(
       `<w:sz w:val="${Metric.ptToHalfPt(p.pt)}"/><w:szCs w:val="${Metric.ptToHalfPt(p.pt)}"/>`,
     );
   if (p.color) rPr.push(`<w:color w:val="${p.color}"/>`);
-  if (p.font)
+  if (p.font && !omitDefaultTableText)
     rPr.push(
-      `<w:rFonts w:ascii="${esc(p.font)}" w:hAnsi="${esc(p.font)}" w:eastAsia="${esc(p.font)}"/>`,
+      `<w:rFonts w:ascii="${esc(p.font)}" w:hAnsi="${esc(p.font)}" w:eastAsia="${esc(p.font)}" w:hint="eastAsia"/>`,
     );
   if (p.bg) rPr.push(`<w:shd w:val="clear" w:color="auto" w:fill="${p.bg}"/>`);
 
@@ -585,7 +886,7 @@ function encodeRun(span: SpanNode, _ctx: EncCtx): string {
     if (kid.tag === "txt") {
       // __EXT_N__ or __EXT_N_W<w>_H<h>__ 자리표시자 제거
       const content = kid.content.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "");
-      if (content) {
+      if (content || rPr.length > 0) {
         parts.push(
           `<w:r><w:rPr>${rPr.join("")}</w:rPr><w:t xml:space="preserve">${esc(content)}</w:t></w:r>`,
         );
@@ -714,7 +1015,272 @@ const WRAP_DOCX: Record<string, string> = {
   front: "<wp:wrapNone/>",
 };
 
+function shouldEncodeGridAsSvgFallback(grid: GridNode, dims: PageDims): boolean {
+  const layout = grid.props.layout;
+  if (!layout || layout.wrap === "inline") return false;
+  if (layout.vertRelTo !== "page" || layout.vertAlign !== "bottom") return false;
+
+  const widthPt = gridWidthPt(grid, dims);
+  const bodyWidthPt = Math.max(1, dims.wPt - dims.ml - dims.mr);
+  return grid.kids.length >= 4 || widthPt >= bodyWidthPt * 0.55;
+}
+
+function encodeGridAsSvgPicture(
+  grid: GridNode,
+  ctx: EncCtx,
+  dims: PageDims,
+): string {
+  const widthPt = gridWidthPt(grid, dims);
+  const heightPt = svgFallbackHeightPt(grid);
+  const svg = renderGridSvg(grid, widthPt, heightPt);
+  const entry = registerSvgImage(svg, ctx);
+  const cx = Metric.ptToEmu(widthPt);
+  const cy = Metric.ptToEmu(heightPt);
+  const docPrId = ctx.nextId++;
+  const layout = grid.props.layout!;
+  const bottomGapPt = Math.min(44, Math.max(32, dims.mb * 0.9));
+  const pictureLayout: ImgLayout = {
+    ...layout,
+    wrap: "none",
+    horzRelTo: layout.horzRelTo === "para" ? "page" : (layout.horzRelTo ?? "page"),
+    vertRelTo: "page",
+    horzAlign: layout.horzAlign ?? "center",
+    vertAlign: "bottom",
+    yPt: layout.yPt ?? Math.max(0, dims.hPt - heightPt - bottomGapPt),
+  };
+  const graphic =
+    `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+    `<pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="${escAttr(entry.name)}"/><pic:cNvPicPr/></pic:nvPicPr>` +
+    `<pic:blipFill><a:blip r:embed="${entry.rId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+    `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>` +
+    `</pic:pic></a:graphicData></a:graphic>`;
+
+  return (
+    `    <w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr>` +
+    `<w:r><w:drawing>${encodeAnchor({} as ImgNode, cx, cy, "Positioned table", docPrId, graphic, pictureLayout)}</w:drawing></w:r>` +
+    `</w:p>`
+  );
+}
+
+function gridWidthPt(grid: GridNode, dims: PageDims): number {
+  const widths = grid.props.colWidths ?? [];
+  const total = widths.reduce((sum, w) => sum + Math.max(0, w), 0);
+  if (total > 0) return total;
+  return Math.max(1, dims.wPt - dims.ml - dims.mr);
+}
+
+function svgFallbackHeightPt(grid: GridNode): number {
+  const rowSum = grid.kids.reduce((sum, row) => sum + Math.max(0, row.heightPt ?? 0), 0);
+  const source = rowSum > 0 ? rowSum : minGridHeightPt(grid);
+  return Math.min(220, Math.max(140, source * 0.88));
+}
+
+function renderGridSvg(grid: GridNode, widthPt: number, heightPt: number): string {
+  const colCount = gridColumnCount(grid);
+  const sourceCols = [...(grid.props.colWidths ?? [])];
+  while (sourceCols.length < colCount) sourceCols.push(0);
+  sourceCols.length = colCount;
+  const known = sourceCols.filter((w) => w > 0).reduce((s, w) => s + w, 0);
+  const unknown = sourceCols.filter((w) => w <= 0).length;
+  const fill = unknown > 0 ? Math.max(1, (widthPt - known) / unknown) : 0;
+  const colWidths = sourceCols.map((w) => (w > 0 ? w : fill));
+  const colScale = widthPt / Math.max(1, colWidths.reduce((s, w) => s + w, 0));
+  for (let i = 0; i < colWidths.length; i++) colWidths[i] *= colScale;
+
+  const sourceRows = grid.kids.map((row) =>
+    Math.max(row.heightPt ?? 0, row.kids.length > 0 ? 10 : 0),
+  );
+  const rowTotal = Math.max(1, sourceRows.reduce((s, h) => s + h, 0));
+  const drawableHeightPt = Math.max(1, heightPt - 34);
+  const rowHeights = sourceRows.map((h) => (h / rowTotal) * drawableHeightPt);
+
+  const colX = cumulativePositions(colWidths);
+  const rowY = cumulativePositions(rowHeights);
+  const occupied: boolean[][] = Array.from({ length: grid.kids.length }, () => []);
+  const defs: string[] = [];
+  const body: string[] = [];
+  let clipId = 0;
+
+  for (let ri = 0; ri < grid.kids.length; ri++) {
+    let ci = 0;
+    for (const cell of grid.kids[ri].kids) {
+      while (occupied[ri]?.[ci]) ci++;
+      const cs = Math.max(1, cell.cs ?? 1);
+      const rs = Math.max(1, cell.rs ?? 1);
+      for (let rr = 0; rr < rs; rr++) {
+        for (let cc = 0; cc < cs; cc++) {
+          if (!occupied[ri + rr]) occupied[ri + rr] = [];
+          occupied[ri + rr][ci + cc] = true;
+        }
+      }
+
+      const x = colX[ci] ?? 0;
+      const y = rowY[ri] ?? 0;
+      const w = sumSlice(colWidths, ci, cs);
+      const h = sumSlice(rowHeights, ri, rs);
+      const cp = cell.props ?? {};
+      if (cp.bg) {
+        body.push(`<rect x="${fmt(x)}" y="${fmt(y)}" width="${fmt(w)}" height="${fmt(h)}" fill="#${escAttr(cp.bg)}"/>`);
+      }
+      drawSvgBorder(body, x, y, w, h, "top", cp.top ?? grid.props.defaultStroke);
+      drawSvgBorder(body, x, y, w, h, "bottom", cp.bot ?? grid.props.defaultStroke);
+      drawSvgBorder(body, x, y, w, h, "left", cp.left ?? grid.props.defaultStroke);
+      drawSvgBorder(body, x, y, w, h, "right", cp.right ?? grid.props.defaultStroke);
+
+      const lines = cellTextLines(cell);
+      if (lines.length > 0 && w > 1 && h > 1) {
+        const id = `c${clipId++}`;
+        defs.push(`<clipPath id="${id}"><rect x="${fmt(x + 0.5)}" y="${fmt(y + 0.5)}" width="${fmt(Math.max(0, w - 1))}" height="${fmt(Math.max(0, h - 1))}"/></clipPath>`);
+        body.push(renderSvgCellText(cell, lines, x, y, w, h, id));
+      }
+      ci += cs;
+    }
+  }
+
+  const defsXml = defs.length ? `<defs>${defs.join("")}</defs>` : "";
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${fmt(widthPt)}pt" height="${fmt(heightPt)}pt" viewBox="0 0 ${fmt(widthPt)} ${fmt(heightPt)}">` +
+    defsXml +
+    body.join("") +
+    `</svg>`
+  );
+}
+
+function gridColumnCount(grid: GridNode): number {
+  let max = grid.props.colWidths?.length ?? 0;
+  for (const row of grid.kids) {
+    let count = 0;
+    for (const cell of row.kids) count += Math.max(1, cell.cs ?? 1);
+    max = Math.max(max, count);
+  }
+  return Math.max(1, max);
+}
+
+function cumulativePositions(values: number[]): number[] {
+  const positions: number[] = [];
+  let acc = 0;
+  for (const value of values) {
+    positions.push(acc);
+    acc += value;
+  }
+  return positions;
+}
+
+function sumSlice(values: number[], start: number, count: number): number {
+  let sum = 0;
+  for (let i = start; i < start + count && i < values.length; i++) sum += values[i];
+  return sum;
+}
+
+function drawSvgBorder(
+  out: string[],
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  side: "top" | "bottom" | "left" | "right",
+  stroke?: { kind: string; pt: number; color: string },
+): void {
+  if (!stroke || stroke.kind === "none" || stroke.pt <= 0) return;
+  const color = escAttr((stroke.color ?? "000000").replace(/^#/, ""));
+  const sw = Math.max(0.4, stroke.pt);
+  const dash =
+    stroke.kind === "dash"
+      ? ` stroke-dasharray="${fmt(sw * 6)} ${fmt(sw * 3)}"`
+      : stroke.kind === "dot"
+        ? ` stroke-dasharray="${fmt(sw)} ${fmt(sw * 3)}"`
+        : "";
+  const attrs = `stroke="#${color}" stroke-width="${fmt(sw)}"${dash} fill="none"`;
+  if (side === "top") out.push(`<line x1="${fmt(x)}" y1="${fmt(y)}" x2="${fmt(x + w)}" y2="${fmt(y)}" ${attrs}/>`);
+  else if (side === "bottom") out.push(`<line x1="${fmt(x)}" y1="${fmt(y + h)}" x2="${fmt(x + w)}" y2="${fmt(y + h)}" ${attrs}/>`);
+  else if (side === "left") out.push(`<line x1="${fmt(x)}" y1="${fmt(y)}" x2="${fmt(x)}" y2="${fmt(y + h)}" ${attrs}/>`);
+  else out.push(`<line x1="${fmt(x + w)}" y1="${fmt(y)}" x2="${fmt(x + w)}" y2="${fmt(y + h)}" ${attrs}/>`);
+}
+
+function renderSvgCellText(
+  cell: any,
+  lines: string[],
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  clipId: string,
+): string {
+  const fontPt = Math.max(4.8, Math.min(7.2, maxFontPtInCell(cell) * 0.75));
+  const step = fontPt * 1.18;
+  const totalTextH = lines.length * step;
+  const startY = y + Math.max(fontPt, (h - totalTextH) / 2 + fontPt * 0.85);
+  const pad = Math.min(3, Math.max(1.2, w * 0.04));
+  const align = firstParaAlign(cell);
+  const anchor = align === "center" ? "middle" : align === "right" ? "end" : "start";
+  const tx = align === "center" ? x + w / 2 : align === "right" ? x + w - pad : x + pad;
+  const text = lines
+    .map((line, i) =>
+      `<text x="${fmt(tx)}" y="${fmt(startY + i * step)}" font-family="Malgun Gothic, Apple SD Gothic Neo, sans-serif" font-size="${fmt(fontPt)}" text-anchor="${anchor}" fill="#000000">${TextKit.escapeXml(line)}</text>`,
+    )
+    .join("");
+  return `<g clip-path="url(#${clipId})">${text}</g>`;
+}
+
+function cellTextLines(cell: any): string[] {
+  const lines: string[] = [];
+  for (const kid of cell.kids ?? []) {
+    if (kid.tag !== "para") continue;
+    const text = paraPlainText(kid).trim();
+    if (text) lines.push(...text.split(/\r\n|\r|\n/).map((s) => s.trim()).filter(Boolean));
+  }
+  return lines;
+}
+
+function paraPlainText(para: ParaNode): string {
+  let text = "";
+  const visit = (kids: any[]) => {
+    for (const kid of kids ?? []) {
+      if (kid.tag === "txt") text += kid.content ?? "";
+      else if (kid.tag === "br") text += "\n";
+      if (kid.kids) visit(kid.kids);
+    }
+  };
+  visit(para.kids as any[]);
+  return text;
+}
+
+function maxFontPtInCell(cell: any): number {
+  let max = 9;
+  const visit = (kids: any[]) => {
+    for (const kid of kids ?? []) {
+      if (kid.tag === "span" && typeof kid.props?.pt === "number") max = Math.max(max, kid.props.pt);
+      if (kid.kids) visit(kid.kids);
+    }
+  };
+  for (const kid of cell.kids ?? []) {
+    if (kid.tag === "para") visit(kid.kids as any[]);
+  }
+  return max;
+}
+
+function firstParaAlign(cell: any): string {
+  for (const kid of cell.kids ?? []) {
+    if (kid.tag === "para" && kid.props?.align) return kid.props.align;
+  }
+  return cell.props?.align ?? "left";
+}
+
+function fmt(value: number): string {
+  return Number.isFinite(value)
+    ? value.toFixed(2).replace(/\.?0+$/, "")
+    : "0";
+}
+
+function escAttr(value: string): string {
+  return TextKit.escapeXml(value);
+}
+
 function encodeGrid(grid: GridNode, ctx: EncCtx, dims: PageDims = A4): string {
+  if (shouldEncodeGridAsSvgFallback(grid, dims)) {
+    return encodeGridAsSvgPicture(grid, ctx, dims);
+  }
+
   const gp = grid.props;
   const look = gp.look;
 
@@ -804,16 +1370,11 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims: PageDims = A4): string {
 
     for (let i = 0; i < srcPt.length; i++) {
       if (srcPt[i] <= 0) {
-        srcPt[i] = zeroFillPt > 0 ? zeroFillPt : availPt / colCount;
+        srcPt[i] = zeroFillPt > 0 ? zeroFillPt : 1;
       }
     }
 
     colWidthsDxa = srcPt.map((w) => Math.round(Metric.ptToDxa(w)));
-    const computedTotalDxa = colWidthsDxa.reduce((s, w) => s + w, 0);
-    if (computedTotalDxa > availDxa) {
-      const scale = availDxa / computedTotalDxa;
-      colWidthsDxa = colWidthsDxa.map((w) => Math.round(w * scale));
-    }
   } else {
     for (let c = 0; c < colCount; c++) colWidthsDxa.push(defaultColDxa);
   }
@@ -945,9 +1506,18 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims: PageDims = A4): string {
       }
       // 원본 행 정보에서 높이 가져오기 (tableMap 과 grid.kids 는 같은 인덱스)
       const originalRow = grid.kids[ri];
+      let minRowHeightPt = 0;
+      for (const entry of rowMap) {
+        if (entry.type !== "real" || !entry.cell) continue;
+        const rs = Math.max(1, entry.cell.rs ?? 1);
+        minRowHeightPt = Math.max(minRowHeightPt, minCellHeightPt(entry.cell) / rs);
+      }
       if (originalRow?.heightPt != null && originalRow.heightPt > 0) {
-        const hDxa = Math.round(Metric.ptToDxa(originalRow.heightPt));
-        trPrParts.push(`<w:trHeight w:val="${hDxa}" w:hRule="atLeast"/>`);
+        const rowHeightPt = Math.max(originalRow.heightPt, minRowHeightPt);
+        const hDxa = Math.round(Metric.ptToDxa(rowHeightPt));
+        const hRule =
+          !gp.layout && minRowHeightPt <= originalRow.heightPt + 1 ? "exact" : "atLeast";
+        trPrParts.push(`<w:trHeight w:val="${hDxa}" w:hRule="${hRule}"/>`);
       }
       const trPr =
         trPrParts.length > 0 ? `<w:trPr>${trPrParts.join("")}</w:trPr>` : "";
@@ -960,8 +1530,8 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims: PageDims = A4): string {
   let tblBorders = "";
   const strokeKindMap: Record<string, string> = {
     solid: "single",
-    dash: "dash",
-    dot: "dot",
+    dash: "dashed",
+    dot: "dotted",
     double: "double",
     none: "none",
     dotDash: "dotDash",
@@ -981,7 +1551,8 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims: PageDims = A4): string {
         '<w:tblBorders><w:top w:val="none"/><w:left w:val="none"/><w:bottom w:val="none"/><w:right w:val="none"/><w:insideH w:val="none"/><w:insideV w:val="none"/></w:tblBorders>';
     } else {
       // DOCX sz는 1/8pt 단위. 최소 굵기 2(0.25pt) 보장
-      const sz = Math.max(2, Math.round(s.pt * 8));
+      const minSz = val === "dashed" || val === "dotted" ? 4 : 2;
+      const sz = Math.max(minSz, Math.round(s.pt * 8));
       // 색상 '#' 제거 및 빈 값일 경우 auto 처리
       const clr = s.color ? s.color.replace("#", "") : "auto";
       const bdr = `w:val="${val}" w:sz="${sz}" w:space="0" w:color="${clr}"`;
@@ -999,19 +1570,68 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims: PageDims = A4): string {
   const tblJc = gp.align
     ? `<w:jc w:val="${tblAlignMap[gp.align] ?? "start"}"/>`
     : "";
+  const tblPosition = encodeFloatingTablePr(gp.layout);
 
   return `    <w:tbl>
-      <w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="${Math.round(totalDxa)}" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="${firstRow}" w:lastRow="${lastRow}" w:firstColumn="${firstCol}" w:lastColumn="${lastCol}" w:noHBand="${noHBand}" w:noVBand="${noVBand}"/>${tblBorders}${tblJc}<w:tblCellMar><w:top w:w="28" w:type="dxa"/><w:left w:w="72" w:type="dxa"/><w:bottom w:w="28" w:type="dxa"/><w:right w:w="72" w:type="dxa"/></w:tblCellMar></w:tblPr>
+      <w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="${Math.round(totalDxa)}" w:type="dxa"/>${tblPosition}<w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="${firstRow}" w:lastRow="${lastRow}" w:firstColumn="${firstCol}" w:lastColumn="${lastCol}" w:noHBand="${noHBand}" w:noVBand="${noVBand}"/>${tblBorders}${tblJc}<w:tblCellMar><w:top w:w="28" w:type="dxa"/><w:left w:w="102" w:type="dxa"/><w:bottom w:w="28" w:type="dxa"/><w:right w:w="102" w:type="dxa"/></w:tblCellMar></w:tblPr>
       <w:tblGrid>${gridCols}</w:tblGrid>
 ${rows}
     </w:tbl>`;
 }
+
+function encodeFloatingTablePr(layout?: ImgLayout): string {
+  if (!layout || layout.wrap === "inline") return "";
+
+  const horzAnchorMap: Record<string, string> = {
+    margin: "margin",
+    page: "page",
+    column: "text",
+    para: "text",
+  };
+  const vertAnchorMap: Record<string, string> = {
+    margin: "margin",
+    page: "page",
+    line: "text",
+    para: "text",
+  };
+  const alignMap: Record<string, string> = {
+    left: "left",
+    center: "center",
+    right: "right",
+    top: "top",
+    bottom: "bottom",
+  };
+
+  const attrs: string[] = [
+    `w:leftFromText="${Math.max(0, Metric.ptToDxa(layout.distL ?? 0))}"`,
+    `w:rightFromText="${Math.max(0, Metric.ptToDxa(layout.distR ?? 0))}"`,
+    `w:topFromText="${Math.max(0, Metric.ptToDxa(layout.distT ?? 0))}"`,
+    `w:bottomFromText="${Math.max(0, Metric.ptToDxa(layout.distB ?? 0))}"`,
+    `w:vertAnchor="${vertAnchorMap[layout.vertRelTo ?? "para"] ?? "text"}"`,
+    `w:horzAnchor="${horzAnchorMap[layout.horzRelTo ?? "para"] ?? "text"}"`,
+  ];
+
+  if (layout.xPt != null) {
+    attrs.push(`w:tblpX="${Metric.ptToDxa(layout.xPt)}"`);
+  } else {
+    attrs.push(`w:tblpXSpec="${alignMap[layout.horzAlign ?? "left"] ?? "left"}"`);
+  }
+
+  if (layout.yPt != null) {
+    attrs.push(`w:tblpY="${Metric.ptToDxa(layout.yPt)}"`);
+  } else {
+    attrs.push(`w:tblpYSpec="${alignMap[layout.vertAlign ?? "top"] ?? "top"}"`);
+  }
+
+  return `<w:tblpPr ${attrs.join(" ")}/><w:tblOverlap w:val="overlap"/>`;
+}
+
 function encodeCellBorders(cp: CellProps): string {
   if (!cp.top && !cp.bot && !cp.left && !cp.right) return "";
   const strokeKindMap: Record<string, string> = {
     solid: "single",
-    dash: "dash",
-    dot: "dot",
+    dash: "dashed",
+    dot: "dotted",
     double: "double",
     none: "none",
     dotDash: "dotDash",
@@ -1031,8 +1651,9 @@ function encodeCellBorders(cp: CellProps): string {
       return `<w:${tag} w:val="none" w:sz="0" w:space="0" w:color="auto"/>`;
     }
 
-    // 최소 굵기 sz=2 (0.25pt) 보장
-    const sz = Math.max(2, Math.round(s.pt * 8));
+    // 최소 굵기 보장. dash/dot은 LibreOffice PDF에서 0.25pt가 거의 사라져 보인다.
+    const minSz = val === "dashed" || val === "dotted" ? 4 : 2;
+    const sz = Math.max(minSz, Math.round(s.pt * 8));
     // 색상 '#' 제거 및 빈 값일 경우 auto 처리
     const clr = s.color ? s.color.replace("#", "") : "auto";
 
@@ -1051,10 +1672,25 @@ function esc(s: string): string {
   s = s.replace(/湰灧/g, "");
   s = s.replace(/\uFEFF/g, "");
 
-  // 3. DOCX(XML 1.0)에서 허용하지 않는 보이지 않는 제어문자 모두 제거
-  s = s.replace(/[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD]/g, "");
+  // 3. DOCX(XML 1.0)에서 허용하지 않는 보이지 않는 제어문자 모두 제거.
+  // JS 문자열의 보조 평면 문자는 surrogate pair라서 정규식 range로 필터링하면
+  // 한컴 특수문자(U+F080F 등)가 삭제된다. code point 단위로 판정한다.
+  let xmlSafe = "";
+  for (const ch of s) {
+    const cp = ch.codePointAt(0);
+    if (
+      cp === 0x09 ||
+      cp === 0x0a ||
+      cp === 0x0d ||
+      (cp !== undefined && cp >= 0x20 && cp <= 0xd7ff) ||
+      (cp !== undefined && cp >= 0xe000 && cp <= 0xfffd) ||
+      (cp !== undefined && cp >= 0x10000 && cp <= 0x10ffff)
+    ) {
+      xmlSafe += ch;
+    }
+  }
 
-  return TextKit.escapeXml(s);
+  return TextKit.escapeXml(xmlSafe);
 }
 
 registry.registerEncoder(new DocxEncoder());
