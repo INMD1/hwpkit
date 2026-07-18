@@ -50,17 +50,20 @@ const NS = [
   'xmlns:hm="http://www.hancom.co.kr/hwpml/2011/master-page"',
   'xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf"',
   'xmlns:dc="http://purl.org/dc/elements/1.1/"',
-  'xmlns:opf="http://www.idpf.org/2007/opf"',
+  'xmlns:opf="http://www.idpf.org/2007/opf/"',
   'xmlns:ooxmlchart="http://www.hancom.co.kr/hwpml/2016/ooxmlchart"',
   'xmlns:epub="http://www.idpf.org/2007/ops"',
   'xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"',
+  'xmlns:hwpunitchar="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar"',
 ].join(" ");
 
 // ─── LinesegArray Flags 상수 (HWPX 스펙) ─────────────────
-// 첫 번째 lineseg: 0x160000 = 1441792 (시작 줄, 고정 위치)
-// 이후 lineseg: 0x60000 = 393216 (일반 줄)
-const LINESEG_FLAGS_FIRST = 0x160000; // 1441792 - 첫 줄 (시작, 고정)
-const LINESEG_FLAGS_OTHER = 0x60000;  // 393216 - 이후 줄
+// HWP 5.0 §4.3.4: bits 17/18 mark the first/last segment of a line.
+// Bit 20 (0x100000) means indentation was applied; it does not mean "first line".
+const LINESEG_FLAGS = 0x60000;
+const LINESEG_FLAG_INDENT = 0x100000;
+const LINESEG_FLAG_PAGE_FIRST = 0x1;
+const LINESEG_FLAG_COLUMN_FIRST = 0x2;
 
 // ─── ANYTOHWP 영감: 언어별 폰트 레지스트리 ─────────────────
 // 7개 언어 그룹을 독립적으로 관리 — charPr fontRef의 정확한 ID 생성
@@ -113,24 +116,18 @@ class LangFontBank {
     );
   }
 
-  /** TextProps.font 문자열에서 적절한 HANGUL/LATIN 그룹에 등록 */
-  registerFont(rawFace: string): { hangulId: number; latinId: number } {
+  /** Register a face in every language bank and return bank-local IDs. */
+  registerFont(rawFace: string): Record<LangGroup, number> {
     const face = safeFontToKr(rawFace) || "함초롬바탕";
     const isKor = this.isKorean(face);
-    // 한글 폰트: HANGUL/HANJA/JAPANESE/OTHER/SYMBOL/USER에 등록
-    // 라틴 폰트: LATIN에 등록, 나머지는 기본값(0) 유지
-    const hangulId = this.register("HANGUL", isKor ? face : "함초롬바탕");
-    const latinId = this.register("LATIN", isKor ? "함초롬바탕" : face);
-    for (const g of [
-      "HANJA",
-      "JAPANESE",
-      "OTHER",
-      "SYMBOL",
-      "USER",
-    ] as LangGroup[]) {
-      this.register(g, isKor ? face : "함초롬바탕");
+    const ids = {} as Record<LangGroup, number>;
+    for (const group of LANG_GROUPS) {
+      const useFace = group === "LATIN"
+        ? (isKor ? "함초롬바탕" : face)
+        : (isKor ? face : "함초롬바탕");
+      ids[group] = this.register(group, useFace);
     }
-    return { hangulId, latinId };
+    return ids;
   }
 
   /** 언어 그룹별 폰트 목록 반환 */
@@ -370,6 +367,11 @@ interface CharPrDef {
   textColor: string; // "#RRGGBB"
   hangulId: number; // HANGUL 그룹 폰트 ID
   latinId: number; // LATIN 그룹 폰트 ID
+  hanjaId: number;
+  japaneseId: number;
+  otherId: number;
+  symbolId: number;
+  userId: number;
   bg?: string;
 }
 interface ParaPrDef {
@@ -438,7 +440,7 @@ function registerCharPr(props: TextProps, ctx: HwpxCtx): number {
   if (existing !== undefined) return existing;
 
   const rawFont = props.font ?? "함초롬바탕";
-  const { hangulId, latinId } = ctx.fontBank.registerFont(rawFont);
+  const fontIds = ctx.fontBank.registerFont(rawFont);
   const id = ctx.charPrs.length;
 
   ctx.charPrs.push({
@@ -449,8 +451,13 @@ function registerCharPr(props: TextProps, ctx: HwpxCtx): number {
     underline: props.u ? "BOTTOM" : "NONE",
     strikeout: props.s ? "SOLID" : "NONE",
     textColor: props.color ? `#${props.color}` : "#000000",
-    hangulId,
-    latinId,
+    hangulId: fontIds.HANGUL,
+    latinId: fontIds.LATIN,
+    hanjaId: fontIds.HANJA,
+    japaneseId: fontIds.JAPANESE,
+    otherId: fontIds.OTHER,
+    symbolId: fontIds.SYMBOL,
+    userId: fontIds.USER,
     bg: props.bg,
   });
   ctx.charPrMap.set(key, id);
@@ -581,6 +588,22 @@ function nextStyleId(usedIds: Set<number>): number {
   let id = 0;
   while (usedIds.has(id)) id++;
   return id;
+}
+
+function materializeContiguousStyles(styles: StyleEntry[]): StyleEntry[] {
+  const byId = new Map(styles.map((style) => [style.id, style]));
+  const maxId = Math.max(0, ...byId.keys());
+  const dense: StyleEntry[] = [];
+  for (let id = 0; id <= maxId; id++) {
+    dense.push(byId.get(id) ?? {
+      id,
+      name: `사용자 스타일 ${id}`,
+      engName: `User Style ${id}`,
+      paraPrIDRef: 0,
+      charPrIDRef: 0,
+    });
+  }
+  return dense;
 }
 
 function paraStyleKey(props: ParaNode["props"]): string | undefined {
@@ -724,6 +747,11 @@ export class HwpxEncoder extends BaseEncoder {
           mime: "application/xml",
         },
         {
+          name: "META-INF/container.rdf",
+          data: this.stringToBytes(CONTAINER_RDF),
+          mime: "application/rdf+xml",
+        },
+        {
           name: "Contents/content.hpf",
           data: this.stringToBytes(buildContentHpf(ctx, doc.meta)),
           mime: "application/hwpml-package+xml",
@@ -776,10 +804,9 @@ export class HwpxEncoder extends BaseEncoder {
 const VERSION_XML =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
   `<hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" ` +
-  `tagetApplication="WORDPROCESSOR" major="5" minor="0" micro="5" buildNumber="0" ` +
-  `os="1" xmlVersion="1.4" application="Hancom Office Hangul" appVersion="9, 6, 1, 10097"/>`;
+  `tagetApplication="WORDPROCESSOR" major="5" minor="1" micro="0" buildNumber="1" ` +
+  `os="1" xmlVersion="1.4" application="Hancom Office Hangul" appVersion="11, 0, 0, 8227 WIN32LEWindows_10"/>`;
 
-// container.rdf rootfile 항목 제거 — 실제 HWPX 파일 구조와 일치
 const CONTAINER_XML =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
   `<ocf:container xmlns:ocf="urn:oasis:names:tc:opendocument:xmlns:container" ` +
@@ -787,12 +814,22 @@ const CONTAINER_XML =
   `<ocf:rootfiles>` +
   `<ocf:rootfile full-path="Contents/content.hpf" media-type="application/hwpml-package+xml"/>` +
   `<ocf:rootfile full-path="Preview/PrvText.txt" media-type="text/plain"/>` +
+  `<ocf:rootfile full-path="META-INF/container.rdf" media-type="application/rdf+xml"/>` +
   `</ocf:rootfiles></ocf:container>`;
 
-// HWPX 파일은 container.rdf 대신 manifest.xml(빈 ODF 매니페스트) 사용
 const MANIFEST_XML =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
   `<odf:manifest xmlns:odf="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"/>`;
+
+const CONTAINER_RDF =
+  `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
+  `<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">` +
+  `<rdf:Description rdf:about=""><pkg:hasPart xmlns:pkg="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/header.xml"/></rdf:Description>` +
+  `<rdf:Description rdf:about="Contents/header.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#HeaderFile"/></rdf:Description>` +
+  `<rdf:Description rdf:about=""><pkg:hasPart xmlns:pkg="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/section0.xml"/></rdf:Description>` +
+  `<rdf:Description rdf:about="Contents/section0.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#SectionFile"/></rdf:Description>` +
+  `<rdf:Description rdf:about=""><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#Document"/></rdf:Description>` +
+  `</rdf:RDF>`;
 
 // ─── content.hpf ─────────────────────────────────────────────
 
@@ -838,7 +875,7 @@ function buildContentHpf(ctx: HwpxCtx, meta?: DocMeta): string {
     `<opf:meta name="trackchageConfig" content="text">0</opf:meta>` +
     `</opf:metadata>` +
     `<opf:manifest>${items}</opf:manifest>` +
-    `<opf:spine><opf:itemref idref="header"/><opf:itemref idref="section0"/></opf:spine>` +
+    `<opf:spine><opf:itemref idref="header" linear="yes"/><opf:itemref idref="section0" linear="yes"/></opf:spine>` +
     `</opf:package>`
   );
 }
@@ -868,11 +905,11 @@ function buildSettingsXml(): string {
 function buildNumberingsXml(): string {
   return (
     `<hh:numberings itemCnt="1">` +
-    `<hh:numbering id="1" start="1">` +
+    `<hh:numbering id="1" start="0">` +
     `<hh:paraHead start="1" level="1" align="LEFT" ` +
     `useInstWidth="1" autoIndent="0" widthAdjust="0" ` +
     `textOffsetType="PERCENT" textOffset="50" ` +
-    `numFormat="BULLET" charPrIDRef="0" checkable="0"/>` +
+    `numFormat="DIGIT" charPrIDRef="0" checkable="0">^1.</hh:paraHead>` +
     `</hh:numbering></hh:numberings>`
   );
 }
@@ -880,10 +917,9 @@ function buildNumberingsXml(): string {
 function buildBulletsXml(): string {
   return (
     `<hh:bullets itemCnt="1">` +
-    `<hh:bullet id="1" charPrIDRef="0" start="1" numFormat="BULLET">` +
-    `<hh:paraHead level="1" numChar="&#x2022;"/>` +
-    `<hh:paraHead level="2" numChar="&#x2022;"/>` +
-    `<hh:paraHead level="3" numChar="&#x2022;"/>` +
+    `<hh:bullet id="1" char="&#x2022;" useImage="0">` +
+    `<hh:paraHead level="0" align="LEFT" useInstWidth="0" autoIndent="1" widthAdjust="0" ` +
+    `textOffsetType="PERCENT" textOffset="50" numFormat="DIGIT" charPrIDRef="0" checkable="0"/>` +
     `</hh:bullet></hh:bullets>`
   );
 }
@@ -930,7 +966,7 @@ function buildHeaderSecPrListXml(dims: PageDims): string {
 
   return (
     `<hh:secPrList itemCnt="1">` +
-    `<hh:secPr id="0" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">` +
+    `<hh:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">` +
     `<hh:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/>` +
     `<hh:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/>` +
     `<hh:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/>` +
@@ -972,7 +1008,8 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
     charPrXml +=
       `<hh:charPr id="${cp.id}" height="${cp.height}" textColor="${cp.textColor}" ` +
       `shadeColor="${shadeColor}" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="1">` +
-      `<hh:fontRef hangul="${hid}" latin="${lid}" hanja="${hid}" japanese="${hid}" other="${lid}" symbol="${lid}" user="${lid}"/>` +
+      `<hh:fontRef hangul="${hid}" latin="${lid}" hanja="${cp.hanjaId}" japanese="${cp.japaneseId}" ` +
+      `other="${cp.otherId}" symbol="${cp.symbolId}" user="${cp.userId}"/>` +
       `<hh:ratio hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100"/>` +
       `<hh:spacing hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>` +
       `<hh:relSz hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100"/>` +
@@ -999,6 +1036,8 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
       `<hh:heading type="NONE" idRef="0" level="0"/>` +
       `<hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="${wrap}"/>` +
       `<hh:autoSpacing eAsianEng="0" eAsianNum="0"/>` +
+      `<hp:switch>` +
+      `<hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">` +
       `<hh:margin>` +
       `<hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/>` +
       `<hc:left value="${pp.leftHwp}" unit="HWPUNIT"/>` +
@@ -1007,6 +1046,18 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
       `<hc:next value="${pp.nextHwp}" unit="HWPUNIT"/>` +
       `</hh:margin>` +
       `<hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/>` +
+      `</hp:case>` +
+      `<hp:default>` +
+      `<hh:margin>` +
+      `<hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/>` +
+      `<hc:left value="${pp.leftHwp}" unit="HWPUNIT"/>` +
+      `<hc:right value="${pp.rightHwp}" unit="HWPUNIT"/>` +
+      `<hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/>` +
+      `<hc:next value="${pp.nextHwp}" unit="HWPUNIT"/>` +
+      `</hh:margin>` +
+      `<hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/>` +
+      `</hp:default>` +
+      `</hp:switch>` +
       `<hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/>` +
       `</hh:paraPr>`;
   }
@@ -1015,9 +1066,10 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
   const borderFillXml = ctx.borderFillBank.toXml();
 
   // 스타일 목록
+  const denseStyles = materializeContiguousStyles(ctx.hwpxStyles);
   const stylesXml =
-    `<hh:styles itemCnt="${ctx.hwpxStyles.length}">` +
-    ctx.hwpxStyles
+    `<hh:styles itemCnt="${denseStyles.length}">` +
+    denseStyles
       .map(
         (s) =>
           `<hh:style id="${s.id}" type="PARA" name="${esc(s.name)}" engName="${esc(s.engName)}" ` +
@@ -1028,7 +1080,7 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
 
   return (
     `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
-    `<hh:head ${NS} version="1.2" secCnt="1">` +
+    `<hh:head ${NS} version="1.4" secCnt="1">` +
     `<hh:beginNum page="1" footnote="1" endnote="1" pic="1" tbl="1" equation="1"/>` +
     `<hh:refList>` +
     fontFacesXml +
@@ -1040,7 +1092,6 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
     `<hh:paraProperties itemCnt="${ctx.paraPrs.length}">${paraPrXml}</hh:paraProperties>` +
     stylesXml +
     `</hh:refList>` +
-    buildHeaderSecPrListXml(dims) +
     `<hh:compatibleDocument targetProgram="HWP201X"><hh:layoutCompatibility/></hh:compatibleDocument>` +
     `<hh:docOption><hh:linkinfo path="" pageInherit="0" footnoteInherit="0"/></hh:docOption>` +
     `<hh:trackchageConfig flags="56"/>` +
@@ -1121,6 +1172,11 @@ function buildSectionXml(
   ctx: HwpxCtx,
 ): string {
   const secPrXml = buildSecPrXml(dims);
+  const sectionControlRunXml =
+    `<hp:run charPrIDRef="0" charTcId="0">` +
+    secPrXml +
+    `<hp:ctrl><hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/></hp:ctrl>` +
+    `</hp:run>`;
   const kids = sheet?.kids ?? [];
   const hfRunXml = sheet ? buildHeaderFooterRunXml(sheet, dims, ctx) : "";
 
@@ -1129,19 +1185,27 @@ function buildSectionXml(
     1000,
     Metric.ptToHwp(dims.wPt) - Metric.ptToHwp(dims.ml) - Metric.ptToHwp(dims.mr),
   );
+  const bodyHeight = Math.max(
+    1000,
+    Metric.ptToHwp(dims.hPt) - Metric.ptToHwp(dims.mt) - Metric.ptToHwp(dims.mb),
+  );
   ctx.availableWidth = availWidth;
 
   let contentXml = "";
   let vertPos = 0;
+  let pageFirst = true;
 
   for (let i = 0; i < kids.length; i++) {
     const kid = kids[i];
     const isFirst = i === 0;
-    // secPr은 hs:sec 하위에 직접 기입하므로 문단 내에는 기입하지 않습니다.
-    const curSecPr = "";
+    const curSecPr = isFirst ? sectionControlRunXml : "";
     const curHfRun = isFirst ? hfRunXml : "";
 
     if (kid.tag === "para") {
+      if (paraHasPageBreak(kid)) {
+        vertPos = 0;
+        pageFirst = true;
+      }
       const { xml, nextVertPos, hasPageBreak } = encodeParaPositioned(
         kid,
         ctx,
@@ -1149,9 +1213,16 @@ function buildSectionXml(
         curSecPr,
         availWidth,
         curHfRun,
+        pageFirst,
       );
       contentXml += xml;
-      vertPos = nextVertPos; // 페이지 브레이크 발생 시에도 누적 절대 좌표 유지
+      if (nextVertPos >= bodyHeight) {
+        vertPos = 0;
+        pageFirst = true;
+      } else {
+        vertPos = nextVertPos;
+        pageFirst = false;
+      }
     } else if (kid.tag === "grid") {
       const { xml, nextVertPos, hasPageBreak } = encodeGridPositioned(
         kid,
@@ -1159,9 +1230,16 @@ function buildSectionXml(
         vertPos,
         curSecPr,
         curHfRun,
+        pageFirst,
       );
       contentXml += xml;
-      vertPos = nextVertPos; // 페이지 브레이크 발생 시에도 누적 절대 좌표 유지
+      if (nextVertPos >= bodyHeight) {
+        vertPos = 0;
+        pageFirst = true;
+      } else {
+        vertPos = nextVertPos;
+        pageFirst = false;
+      }
     }
   }
 
@@ -1169,17 +1247,19 @@ function buildSectionXml(
     // 빈 문서 — 최소 단락 1개 필수
     const fs = 1000;
     const vs = 1600;
-    const { xml: linesegXml } = buildLinesegarray(" ", 0, fs, vs / (fs / 100), availWidth);
+    const { xml: linesegXml } = buildLinesegarray(
+      " ", 0, fs, vs / (fs / 100), availWidth, undefined, { pageFirst: true },
+    );
     contentXml =
       `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0" paraTcId="0">` +
+      sectionControlRunXml +
       hfRunXml +
       `<hp:run charPrIDRef="0" charTcId="0"><hp:t xml:space="preserve"> </hp:t></hp:run>` +
       linesegXml +
       `</hp:p>`;
   }
 
-  // hs:sec 바로 아래 직계 첫 자식으로 secPrXml 기입!
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hs:sec ${NS} xmlns:hwpunitchar="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">${secPrXml}${contentXml}</hs:sec>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hs:sec ${NS}>${contentXml}</hs:sec>`;
 }
 
 function buildSecPrXml(dims: PageDims): string {
@@ -1206,7 +1286,7 @@ function buildSecPrXml(dims: PageDims): string {
     `</hp:pageBorderFill>`;
 
   return (
-    `<hp:secPr id="0" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">` +
+    `<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">` +
     `<hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/>` +
     `<hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/>` +
     `<hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/>` +
@@ -1214,7 +1294,6 @@ function buildSecPrXml(dims: PageDims): string {
     `<hp:pagePr landscape="WIDELY" width="${wHwp}" height="${hHwp}" gutterType="LEFT_ONLY">` +
     `<hp:margin header="${headerZone}" footer="${footerZone}" gutter="0" left="${ml}" right="${mr}" top="${mt}" bottom="${mb}"/>` +
     `</hp:pagePr>` +
-    `<hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/>` +
     `<hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar="" supscript="1"/>` +
     `<hp:noteLine length="-1" type="SOLID" width="0.25 mm" color="#000000"/>` +
     `<hp:noteSpacing betweenNotes="283" belowLine="0" aboveLine="1000"/>` +
@@ -1235,6 +1314,15 @@ function buildSecPrXml(dims: PageDims): string {
 // ─── 줄 정보 XML (linesegarray) ──────────────────────────────
 // 가이드 준수: 실제 시각적 줄 단위로 lineseg 생성
 
+interface LinesegLayout {
+  textHeight?: number;
+  firstHorzPos?: number;
+  restHorzPos?: number;
+  rightMargin?: number;
+  indentFirst?: boolean;
+  pageFirst?: boolean;
+}
+
 function buildLinesegarray(
   text: string,
   vertPosStart: number,
@@ -1242,21 +1330,32 @@ function buildLinesegarray(
   lineSpacingPct: number,
   horzSize: number,
   lineHeightHwp?: number,
+  layout: LinesegLayout = {},
 ): { xml: string; totalHeight: number } {
-  const vertsizeLine = Math.max(
-    fontSize,
+  const textHeight = Math.max(fontSize, layout.textHeight ?? fontSize);
+  const lineAdvance = Math.max(
+    textHeight,
     lineHeightHwp ?? Math.round((fontSize * Math.max(100, lineSpacingPct)) / 100),
   );
-  const spacing = Math.max(0, vertsizeLine - fontSize);
-  const baseline = Math.round(fontSize * 0.83);
+  const spacing = Math.max(0, lineAdvance - textHeight);
+  const baseline = Math.round(textHeight * 0.85);
+  const firstHorzPos = Math.max(0, layout.firstHorzPos ?? 0);
+  const restHorzPos = Math.max(0, layout.restHorzPos ?? firstHorzPos);
+  const rightMargin = Math.max(0, layout.rightMargin ?? 0);
+  const lineHorzPos = (index: number) => index === 0 ? firstHorzPos : restHorzPos;
+  const lineHorzSize = (index: number) =>
+    Math.max(100, horzSize - lineHorzPos(index) - rightMargin);
 
   if (text.length === 0) {
     const xml = `<hp:linesegarray>` +
-      `<hp:lineseg textpos="0" vertpos="${vertPosStart}" vertsize="${vertsizeLine}" ` +
-      `textheight="${fontSize}" baseline="${baseline}" spacing="${spacing}" ` +
-      `horzpos="0" horzsize="${horzSize}" flags="${LINESEG_FLAGS_FIRST}"/>` +
+      `<hp:lineseg textpos="0" vertpos="${vertPosStart}" vertsize="${textHeight}" ` +
+      `textheight="${textHeight}" baseline="${baseline}" spacing="${spacing}" ` +
+      `horzpos="${firstHorzPos}" horzsize="${lineHorzSize(0)}" ` +
+      `flags="${LINESEG_FLAGS |
+        (layout.indentFirst ? LINESEG_FLAG_INDENT : 0) |
+        (layout.pageFirst ? LINESEG_FLAG_PAGE_FIRST | LINESEG_FLAG_COLUMN_FIRST : 0)}"/>` +
       `</hp:linesegarray>`;
-    return { xml, totalHeight: vertsizeLine };
+    return { xml, totalHeight: lineAdvance };
   }
 
   // 문자 단위 정밀 가로 폭 계산 및 자동 줄바꿈 알고리즘 (개행 문자 지원)
@@ -1270,6 +1369,7 @@ function buildLinesegarray(
     // 개행 문자 (\n 또는 \r) 감지 시, 현재 줄 세그먼트를 무조건 마감하고 새로운 줄 시작
     if (charCode === 10 || charCode === 13) {
       lines.push({ startPos: lineStartIdx, width: currentLineWidth });
+      if (charCode === 13 && text.charCodeAt(i + 1) === 10) i++;
       lineStartIdx = i + 1;
       currentLineWidth = 0;
       continue;
@@ -1293,7 +1393,7 @@ function buildLinesegarray(
       charW = fontSize * 0.42; // 기타 특수기호
     }
 
-    if (currentLineWidth + charW > horzSize && i > lineStartIdx) {
+    if (currentLineWidth + charW > lineHorzSize(lines.length) && i > lineStartIdx) {
       lines.push({ startPos: lineStartIdx, width: currentLineWidth });
       lineStartIdx = i;
       currentLineWidth = charW;
@@ -1307,21 +1407,25 @@ function buildLinesegarray(
   const linesegParts: string[] = [];
 
   for (let i = 0; i < lineCount; i++) {
-    const flags = i === 0 ? LINESEG_FLAGS_FIRST : LINESEG_FLAGS_OTHER;
+    const flags = LINESEG_FLAGS |
+      (i === 0 && layout.indentFirst ? LINESEG_FLAG_INDENT : 0) |
+      (i === 0 && layout.pageFirst
+        ? LINESEG_FLAG_PAGE_FIRST | LINESEG_FLAG_COLUMN_FIRST
+        : 0);
     const textpos = lines[i].startPos;
     linesegParts.push(
       `<hp:lineseg textpos="${textpos}" ` +
-      `vertpos="${vertPosStart + i * vertsizeLine}" ` +
-      `vertsize="${vertsizeLine}" textheight="${fontSize}" ` +
+      `vertpos="${vertPosStart + i * lineAdvance}" ` +
+      `vertsize="${textHeight}" textheight="${textHeight}" ` +
       `baseline="${baseline}" spacing="${spacing}" ` +
-      `horzpos="0" horzsize="${horzSize}" ` +
+      `horzpos="${lineHorzPos(i)}" horzsize="${lineHorzSize(i)}" ` +
       `flags="${flags}"/>`,
     );
   }
 
   return {
     xml: `<hp:linesegarray>${linesegParts.join("")}</hp:linesegarray>`,
-    totalHeight: lineCount * vertsizeLine,
+    totalHeight: lineCount * lineAdvance,
   };
 }
 
@@ -1347,6 +1451,18 @@ function extractParaText(para: ParaNode): string {
   return text;
 }
 
+function paraHasPageBreak(para: ParaNode): boolean {
+  const visit = (kids: ParaNode["kids"]): boolean =>
+    kids.some((kid) => {
+      if (kid.tag === "span") return kid.kids.some((child) => child.tag === "pb");
+      if (kid.tag === "link") {
+        return visit((kid as LinkNode).kids as ParaNode["kids"]);
+      }
+      return false;
+    });
+  return visit(para.kids);
+}
+
 function fontSizeForPara(para: ParaNode, ctx: HwpxCtx): number {
   let maxSize = 1000; // 기본 10pt
   const visit = (kids: any[]) => {
@@ -1365,6 +1481,16 @@ function fontSizeForPara(para: ParaNode, ctx: HwpxCtx): number {
   return maxSize;
 }
 
+function inlineObjectHeightForPara(para: ParaNode, ctx: HwpxCtx): number {
+  let maxHeight = 0;
+  for (const kid of para.kids) {
+    if (kid.tag !== "img" || (kid.layout && kid.layout.wrap !== "inline")) continue;
+    const dims = getImageDisplayDims(kid, ctx);
+    maxHeight = Math.max(maxHeight, dims.h);
+  }
+  return maxHeight;
+}
+
 // ─── 단락 인코딩 ─────────────────────────────────────────────
 
 function encodeParaPositioned(
@@ -1374,11 +1500,12 @@ function encodeParaPositioned(
   secPr = "",
   availWidth?: number,
   hfRun = "",
+  pageFirst = false,
 ): { xml: string; nextVertPos: number; hasPageBreak: boolean } {
   // ✅ 표(Grid)를 포함하는 단락인지 확인
   const gridKid = para.kids.find((k): k is GridNode => k.tag === "grid");
   if (gridKid) {
-    return encodeTablePara(para, gridKid, ctx, vertPos, secPr, hfRun);
+    return encodeTablePara(para, gridKid, ctx, vertPos, secPr, hfRun, pageFirst);
   }
 
   const paraPrId = ctx.paraPrMap.get(paraPrKey(para.props)) ?? 0;
@@ -1390,8 +1517,10 @@ function encodeParaPositioned(
   const lineHeightHwp = paraPr?.lineSpacingFixed !== undefined
     ? Math.max(paraPr.lineSpacingFixed, Math.ceil(fontSize * 1.15))
     : Math.max(fontSize, Math.round((fontSize * Math.max(100, lineSpacing)) / 100));
-  const spacing = Math.max(0, lineHeightHwp - fontSize);
-  let vertSize = lineHeightHwp;
+  const textHeight = Math.max(fontSize, inlineObjectHeightForPara(para, ctx));
+  const effectiveLineHeight = textHeight + Math.max(0, lineHeightHwp - fontSize);
+  const spacing = Math.max(0, effectiveLineHeight - textHeight);
+  let vertSize = effectiveLineHeight;
   const horzSize = availWidth ?? ctx.availableWidth;
 
   // 코드 블록 감지 (Courier 폰트 또는 styleId "code")
@@ -1416,24 +1545,37 @@ function encodeParaPositioned(
       fontSize,
       spacing,
       vertSize,
+      pageFirst,
     );
 
   let runsXml = encodeParaKids(para.kids, ctx);
   if (!runsXml) runsXml = `<hp:run charPrIDRef="0" charTcId="0"><hp:t xml:space="preserve"> </hp:t></hp:run>`;
 
   const paraText = extractParaText(para);
+  const paraStart = vertPos + Math.max(0, paraPr?.prevHwp ?? 0);
+  const firstHorzPos = Math.max(
+    0,
+    (paraPr?.leftHwp ?? 0) + (paraPr?.intentHwp ?? 0),
+  );
+  const restHorzPos = Math.max(0, paraPr?.leftHwp ?? 0);
   const { xml: linesegXml, totalHeight } = buildLinesegarray(
     paraText,
-    vertPos,
+    paraStart,
     fontSize,
     lineSpacing,
     horzSize,
-    lineHeightHwp,
+    effectiveLineHeight,
+    {
+      textHeight,
+      firstHorzPos,
+      restHorzPos,
+      rightMargin: Math.max(0, paraPr?.rightHwp ?? 0),
+      indentFirst: (paraPr?.intentHwp ?? 0) !== 0,
+      pageFirst,
+    },
   );
 
-  const hasPageBreak = para.kids.some(
-    (k) => k.tag === "span" && k.kids.some((c) => c.tag === "pb"),
-  );
+  const hasPageBreak = paraHasPageBreak(para);
 
   const xml =
     `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="${paraPrId}" styleIDRef="${styleIDRef}" ` +
@@ -1444,7 +1586,11 @@ function encodeParaPositioned(
     linesegXml +
     `</hp:p>`;
 
-  return { xml, nextVertPos: vertPos + totalHeight, hasPageBreak };
+  return {
+    xml,
+    nextVertPos: paraStart + totalHeight + Math.max(0, paraPr?.nextHwp ?? 0),
+    hasPageBreak,
+  };
 }
 
 /** ✅ 가이드 준수: 표를 포함하는 단락 인코딩 */
@@ -1455,35 +1601,32 @@ function encodeTablePara(
   vertPos: number,
   secPr: string,
   hfRun: string,
+  pageFirst: boolean,
 ): { xml: string; nextVertPos: number; hasPageBreak: boolean } {
   const paraPrId = ctx.paraPrMap.get(paraPrKey(para.props)) ?? 0;
   
   // 표 알맹이 생성 (기존 로직 재사용)
   const { xml: gridXml, height: tblHeight } = buildGridXml(grid, ctx);
   
-  // 가이드: 표 단락의 lineseg는 1개여야 하고, vertsize는 표 전체 높이여야 함
-  const fontSize = 1000; 
+  // A table occupies one cached line whose text box is the table height.
   const totalHeight = Math.max(1600, tblHeight);
-  const baseline = 850;
-  const spacing = Math.max(0, totalHeight - fontSize);
+  const baseline = Math.round(totalHeight * 0.85);
 
   const linesegXml =
     `<hp:linesegarray>` +
     `<hp:lineseg textpos="0" vertpos="${vertPos}" vertsize="${totalHeight}" ` +
-    `textheight="${fontSize}" baseline="${baseline}" spacing="${spacing}" ` +
-    `horzpos="0" horzsize="${ctx.availableWidth}" flags="1441792"/>` +
+    `textheight="${totalHeight}" baseline="${baseline}" spacing="0" ` +
+    `horzpos="0" horzsize="${ctx.availableWidth}" ` +
+    `flags="${LINESEG_FLAGS | (pageFirst ? LINESEG_FLAG_PAGE_FIRST | LINESEG_FLAG_COLUMN_FIRST : 0)}"/>` +
     `</hp:linesegarray>`;
 
-  const hasPageBreak = para.kids.some(
-    (k) => k.tag === "span" && k.kids.some((c) => c.tag === "pb"),
-  );
+  const hasPageBreak = paraHasPageBreak(para);
 
-  const runId = ctx.nextElementId++;
   const xml =
     `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="${paraPrId}" styleIDRef="0" ` +
     `pageBreak="${hasPageBreak ? 1 : 0}" columnBreak="0" merged="0" paraTcId="0">` +
     secPr +
-    `<hp:run id="${runId}" charPrIDRef="0" charTcId="0">` +
+    `<hp:run charPrIDRef="0" charTcId="0">` +
     gridXml +
     `</hp:run>` +
     hfRun +
@@ -1501,6 +1644,7 @@ function encodeCodeBlockPositioned(
   fontSize: number,
   spacing: number,
   vertSize: number,
+  pageFirst: boolean,
 ): { xml: string; nextVertPos: number; hasPageBreak: boolean } {
   const codeBfId = ctx.borderFillBank.addUniform(
     { kind: "solid", pt: 0.5, color: "aaaaaa" },
@@ -1518,13 +1662,15 @@ function encodeCodeBlockPositioned(
     fontSize,
     160, // 코드 블록 기본 줄간격 160%
     ctx.availableWidth,
+    undefined,
+    { pageFirst },
   );
 
   const xml =
-    `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" paraTcId="0">` +
+    `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0" paraTcId="0">` +
     secPr +
     `<hp:run charPrIDRef="0" charTcId="0">` +
-    `<hp:tbl id="${ctx.nextElementId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE" rowCnt="1" colCnt="1" cellSpacing="0" borderFillIDRef="${codeBfId}" noAdjust="0">` +
+    `<hp:tbl id="${ctx.nextElementId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE" repeatHeader="0" rowCnt="1" colCnt="1" cellSpacing="0" borderFillIDRef="${codeBfId}" noAdjust="0">` +
     `<hp:sz width="${cellW}" widthRelTo="ABSOLUTE" height="0" heightRelTo="ABSOLUTE" protect="0"/>` +
     `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>` +
     `<hp:outMargin left="138" right="138" top="138" bottom="138"/>` +
@@ -1608,7 +1754,11 @@ function encodeRunInner(span: SpanNode): string {
     } else if (kid.tag === "pagenum") {
       const fmt = (kid as any).format === "roman" ? "ROMAN_LOWER" 
                 : (kid as any).format === "romanCaps" ? "ROMAN_UPPER" : "DIGIT";
-      xml += `<hp:pageNum pageStartsOn="BOTH" formatType="${fmt}"/>`;
+      const numType = (kid as any).format === "total" ? "TOTAL_PAGE" : "PAGE";
+      xml +=
+        `<hp:ctrl><hp:autoNum num="1" numType="${numType}">` +
+        `<hp:autoNumFormat type="${fmt}" userChar="" prefixChar="" suffixChar="" supscript="0"/>` +
+        `</hp:autoNum></hp:ctrl>`;
     }
   }
   return xml;
@@ -1664,6 +1814,31 @@ const FLOW_MAP: Record<string, string> = {
   front: "BOTH_SIDES",
 };
 
+function getImageSourceDims(img: ImgNode): { w: number; h: number } {
+  const pixelDims = img.b64 ? readPixelDims(img.b64, img.mime) : null;
+  if (pixelDims && pixelDims.w > 0 && pixelDims.h > 0) {
+    return {
+      w: Metric.ptToHwp((pixelDims.w * 72) / 96),
+      h: Metric.ptToHwp((pixelDims.h * 72) / 96),
+    };
+  }
+  return {
+    w: Math.max(1, Metric.ptToHwp(img.w || 1)),
+    h: Math.max(1, Metric.ptToHwp(img.h || 1)),
+  };
+}
+
+function getImageDisplayDims(img: ImgNode, ctx: HwpxCtx): { w: number; h: number } {
+  const source = getImageSourceDims(img);
+  let w = img.w > 0 ? Metric.ptToHwp(img.w) : source.w;
+  let h = img.h > 0 ? Metric.ptToHwp(img.h) : source.h;
+  if (w > ctx.availableWidth) {
+    h = Math.round((h * ctx.availableWidth) / w);
+    w = ctx.availableWidth;
+  }
+  return { w: Math.max(1, w), h: Math.max(1, h) };
+}
+
 function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
   // 0. 플레이스홀더 처리 (차트 등 b64가 없는 경우)
   if (!img.b64) {
@@ -1673,25 +1848,10 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
   const binId = ctx.imgMap.get(img);
   if (!binId) return "";
 
-  // ANYTOHWP 영감: PNG/JPEG 바이너리 헤더에서 실제 픽셀 치수 추출
-  // img.w / img.h는 pt 단위이지만, 이미지 실제 픽셀을 HWPUNIT으로 변환하면 더 정확
-  const pixelDims = readPixelDims(img.b64, img.mime);
-  let wHwp: number, hHwp: number;
-
-  if (pixelDims && pixelDims.w > 0 && pixelDims.h > 0) {
-    // 픽셀 → pt (96dpi 기준) → HWPUNIT
-    wHwp = Metric.ptToHwp((pixelDims.w * 72) / 96);
-    hHwp = Metric.ptToHwp((pixelDims.h * 72) / 96);
-  } else {
-    wHwp = Metric.ptToHwp(img.w);
-    hHwp = Metric.ptToHwp(img.h);
-  }
-
-  // 가용 너비 초과 방지 (비율 유지)
-  if (wHwp > ctx.availableWidth) {
-    hHwp = Math.round((hHwp * ctx.availableWidth) / wHwp);
-    wHwp = ctx.availableWidth;
-  }
+  // Display size comes from the document model. Pixel dimensions describe the
+  // source bitmap and are used only for the clip/source coordinate space.
+  const { w: wHwp, h: hHwp } = getImageDisplayDims(img, ctx);
+  const sourceDims = getImageSourceDims(img);
 
   // 회전 중심점 (rotation center) 계산: 이미지 중앙을 기준으로 회전
   const rotationCenterX = Math.round(wHwp / 2);
@@ -1722,9 +1882,9 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
     `<hc:pt0 x="0" y="0"/><hc:pt1 x="${wHwp}" y="0"/>` +
     `<hc:pt2 x="${wHwp}" y="${hHwp}"/><hc:pt3 x="0" y="${hHwp}"/>` +
     `</hp:imgRect>` +
-    `<hp:imgClip left="0" right="0" top="0" bottom="0"/>` +
+    `<hp:imgClip left="0" right="${sourceDims.w}" top="0" bottom="${sourceDims.h}"/>` +
     `<hp:inMargin left="0" right="0" top="0" bottom="0"/>` +
-    `<hp:imgDim dimwidth="${wHwp}" dimheight="${hHwp}"/>` +
+    `<hp:imgDim dimwidth="${sourceDims.w}" dimheight="${sourceDims.h}"/>` +
     `<hc:img binaryItemIDRef="${binId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/>` +
     `<hp:effects/>` +
     `<hp:sz width="${wHwp}" widthRelTo="ABSOLUTE" height="${hHwp}" heightRelTo="ABSOLUTE" protect="0"/>` +
@@ -1752,28 +1912,27 @@ function encodeGridPositioned(
   vertPos: number,
   secPr = "",
   hfRun = "",
+  pageFirst = false,
 ): { xml: string; nextVertPos: number; hasPageBreak: boolean } {
   const { xml: gridXml, height: tblHeight } = buildGridXml(grid, ctx);
   const floats =
     grid.props.layout !== undefined && grid.props.layout.wrap !== "inline";
   const totalHeight = floats ? 1000 : Math.max(1600, tblHeight);
-  const fontSize = 1000;
-  const baseline = Math.round(fontSize * 0.83);
-  const spacing = Math.max(0, totalHeight - fontSize);
+  const baseline = Math.round(totalHeight * 0.85);
 
   const linesegXml =
     `<hp:linesegarray>` +
     `<hp:lineseg textpos="0" vertpos="${vertPos}" vertsize="${totalHeight}" ` +
-    `textheight="${fontSize}" baseline="${baseline}" spacing="${spacing}" ` +
-    `horzpos="0" horzsize="${ctx.availableWidth}" flags="${LINESEG_FLAGS_FIRST}"/>` +
+    `textheight="${totalHeight}" baseline="${baseline}" spacing="0" ` +
+    `horzpos="0" horzsize="${ctx.availableWidth}" ` +
+    `flags="${LINESEG_FLAGS | (pageFirst ? LINESEG_FLAG_PAGE_FIRST | LINESEG_FLAG_COLUMN_FIRST : 0)}"/>` +
     `</hp:linesegarray>`;
 
-  const runId = ctx.nextElementId++;
   const xml =
     `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0" paraTcId="0">` +
     secPr +
     hfRun +
-    `<hp:run id="${runId}" charPrIDRef="0" charTcId="0">` +
+    `<hp:run charPrIDRef="0" charTcId="0">` +
     gridXml +
     `</hp:run>` +
     linesegXml +
@@ -1984,35 +2143,46 @@ function buildGridXml(
 
       const innerW = Math.max(cellW - padL - padR, 100);
       let parasXml = '';
+      let localVertPos = 0;
       if (cell.kids.length > 0) {
         for (const kid of cell.kids) {
           if (kid.tag === 'grid') {
-            // 중첩 표: <hp:p><hp:run><hp:tbl>...</hp:tbl></hp:run></hp:p> 형식으로 감싸기
-            const { xml: tblXml } = buildGridXml(kid, ctx);
+            const { xml: tblXml, height: nestedHeight } = buildGridXml(kid, ctx);
             const pid = ctx.nextElementId++;
-            const rid = ctx.nextElementId++;
-            parasXml += `<hp:p id="${pid}" paraPrIDRef="0" styleIDRef="0" paraTcId="0"><hp:run id="${rid}" charPrIDRef="0" charTcId="0">${tblXml}</hp:run></hp:p>`;
+            const objectHeight = Math.max(1600, nestedHeight);
+            const baseline = Math.round(objectHeight * 0.85);
+            parasXml +=
+              `<hp:p id="${pid}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0" paraTcId="0">` +
+              `<hp:run charPrIDRef="0" charTcId="0">${tblXml}</hp:run>` +
+              `<hp:linesegarray><hp:lineseg textpos="0" vertpos="${localVertPos}" ` +
+              `vertsize="${objectHeight}" textheight="${objectHeight}" baseline="${baseline}" spacing="0" ` +
+              `horzpos="0" horzsize="${innerW}" flags="${LINESEG_FLAGS}"/></hp:linesegarray>` +
+              `</hp:p>`;
+            localVertPos += objectHeight;
           } else {
-            parasXml += encodeParaPositioned(kid, ctx, 0, '', innerW).xml;
+            const encoded = encodeParaPositioned(kid, ctx, localVertPos, '', innerW);
+            parasXml += encoded.xml;
+            localVertPos = encoded.nextVertPos;
           }
         }
       } else {
-        parasXml = `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" paraTcId="0"><hp:run charPrIDRef="0" charTcId="0"><hp:t xml:space="preserve"> </hp:t></hp:run></hp:p>`;
+        const { xml: emptyLineseg } = buildLinesegarray(" ", 0, 1000, 160, innerW);
+        parasXml = `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0" paraTcId="0"><hp:run charPrIDRef="0" charTcId="0"><hp:t xml:space="preserve"> </hp:t></hp:run>${emptyLineseg}</hp:p>`;
       }
 
       const vAlign =
         cp.va === "mid" ? "CENTER" : cp.va === "bot" ? "BOTTOM" : "TOP";
 
       cellsXml +=
-        `<hp:tc name="" header="0" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}">` +
-        `<hp:cellAddr colAddr="${ci}" rowAddr="${ri}"/>` +
-        `<hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/>` +
-        `<hp:cellSz width="${cellW}" height="${rowHeights[ri]}"/>` +
-        `<hp:cellMargin left="${padL}" right="${padR}" top="${padT}" bottom="${padB}"/>` +
+        `<hp:tc name="" header="${cp.isHeader || (grid.props.headerRow && ri === 0) ? 1 : 0}" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}">` +
         `<hp:subList id="${subListId}" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${vAlign}" ` +
         `linkListIDRef="0" linkListNextIDRef="0" textWidth="${innerW}" textHeight="${Math.max(100, rowHeights[ri] - padT - padB)}" hasTextRef="0" hasNumRef="0">` +
         parasXml +
         `</hp:subList>` +
+        `<hp:cellAddr colAddr="${ci}" rowAddr="${ri}"/>` +
+        `<hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/>` +
+        `<hp:cellSz width="${cellW}" height="${rowHeights[ri]}"/>` +
+        `<hp:cellMargin left="${padL}" right="${padR}" top="${padT}" bottom="${padB}"/>` +
         `</hp:tc>`;
     }
     rowsXml += `<hp:tr>${cellsXml}</hp:tr>`;
@@ -2025,9 +2195,9 @@ function buildGridXml(
   const horzAlign = alignMap[grid.props.align ?? 'left'] ?? 'LEFT';
   const layoutAttrs = buildGridLayoutAttrs(grid.props.layout, horzAlign);
 
-  const headerRow = grid.props.headerRow ? ' repeatHeader="1"' : "";
+  const repeatHeader = grid.props.headerRow ? 1 : 0;
   const xml =
-    `<hp:tbl id="${ctx.nextElementId++}" zOrder="${layoutAttrs.zOrder}" numberingType="TABLE" textWrap="${layoutAttrs.textWrap}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE"${headerRow} rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="${layoutAttrs.noAdjust}">` +
+    `<hp:tbl id="${ctx.nextElementId++}" zOrder="${layoutAttrs.zOrder}" numberingType="TABLE" textWrap="${layoutAttrs.textWrap}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE" repeatHeader="${repeatHeader}" rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="${layoutAttrs.noAdjust}">` +
     `<hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="${totalH}" heightRelTo="ABSOLUTE" protect="0"/>` +
     layoutAttrs.posXml +
     layoutAttrs.outMarginXml +
@@ -2043,7 +2213,7 @@ function estimateLineCountForWidth(
   fontSize: number,
   horzSize?: number,
 ): number {
-  if (!text) return 1;
+  if (!text) return 2;
   const maxWidth = Math.max(1, horzSize ?? 0);
   if (!horzSize || horzSize <= 0) return text.split(/\r\n|\r|\n/).length;
   let lines = 1;
@@ -2114,6 +2284,8 @@ function estimateCellHeight(
     const lineHeight = pp?.lineSpacingFixed !== undefined
       ? Math.max(pp.lineSpacingFixed, Math.ceil(fs * 1.15))
       : Math.max(fs, Math.round((fs * Math.max(100, pp?.lineSpacing ?? 160)) / 100));
+    const textHeight = Math.max(fs, inlineObjectHeightForPara(para, ctx));
+    const lineAdvance = textHeight + Math.max(0, lineHeight - fs);
     const lineCount = estimateLineCountForWidth(
       extractParaText(para),
       fs,
@@ -2121,7 +2293,7 @@ function estimateCellHeight(
     );
     const before = pp?.prevHwp ?? 0;
     const after = pp?.nextHwp ?? 0;
-    h += lineHeight * lineCount + before + after;
+    h += lineAdvance * lineCount + before + after;
   }
   if (!h) h = Math.round(1000 * 1.6);
   return h + topPad + botPad;

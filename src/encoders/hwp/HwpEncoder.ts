@@ -502,11 +502,12 @@ function mkStyle(
     .utf16(name)
     .u16(engName.length)
     .utf16(engName)
+    .u8(0) // paragraph style
+    .u8(0) // next style id
+    .i16(1042) // ko-KR
     .u16(paraPrId)
     .u16(charPrId)
-    .u16(0)
-    .u16(1042)
-    .u16(0)
+    .u16(0) // lockForm, present in Hancom-produced 5.0.5 files
     .build();
 }
 
@@ -702,13 +703,15 @@ function mkParaShape(p: ParaProps): Uint8Array {
     .i16(0)
     .i16(0)
     .u32(0)
-    .u32(4)
+    .u32(lineSpacingType)
     .u32(lineSpaceValue)
-    .build(); // 54 bytes
+    .u32(0) // 5.0.2.5+ 확장 속성. 한컴 5.1 파일과 동일하게 0. → 58바이트
+    .build(); // 58 bytes (matches Hancom 5.1 PARA_SHAPE)
 }
 
 function mkBinData(id: number, ext: string): Uint8Array {
-  return new BufWriter().u16(0x0002).u16(id).u16(ext.length).utf16(ext).build();
+  // EMBEDDING + do-not-compress. BinData streams contain the raw image bytes.
+  return new BufWriter().u16(0x0021).u16(id).u16(ext.length).utf16(ext).build();
 }
 
 interface BinImage {
@@ -906,38 +909,55 @@ function estimateCharWidthHwp(code: number, fontHwp: number): number {
   return Math.round(fontHwp * 0.42);
 }
 
-function estimateLineCountHwp(
+function lineStartPositionsHwp(
   text: string,
   fontHwp: number,
   availWidthHwp?: number,
-): number {
-  if (!text) return 1;
+): number[] {
+  if (!text) return [0];
   const maxWidth = Math.max(1, availWidthHwp ?? 0);
   if (!availWidthHwp || availWidthHwp <= 0) {
-    return text.split(/\r\n|\r|\n/).length;
+    const starts = [0];
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      if (code !== 10 && code !== 13) continue;
+      if (code === 13 && text.charCodeAt(i + 1) === 10) i++;
+      starts.push(i + 1);
+    }
+    return starts;
   }
-  let lines = 1;
+  const starts = [0];
   let currentWidth = 0;
   for (let i = 0; i < text.length; i++) {
     const code = text.charCodeAt(i);
     if (code === 10 || code === 13) {
       if (code === 13 && text.charCodeAt(i + 1) === 10) i++;
-      lines++;
+      starts.push(i + 1);
       currentWidth = 0;
       continue;
     }
+    // HWP control characters occupy text positions but have no glyph width.
+    if (code < 32) continue;
     const charWidth = estimateCharWidthHwp(code, fontHwp);
     if (currentWidth > 0 && currentWidth + charWidth > maxWidth) {
-      lines++;
+      starts.push(i);
       currentWidth = charWidth;
     } else {
       currentWidth += charWidth;
     }
   }
-  return Math.max(1, lines);
+  return starts;
 }
 
-function safeParaLineHeightHwp(
+function estimateLineCountHwp(
+  text: string,
+  fontHwp: number,
+  availWidthHwp?: number,
+): number {
+  return lineStartPositionsHwp(text, fontHwp, availWidthHwp).length;
+}
+
+function safeParaLineAdvanceHwp(
   props: ParaProps | undefined,
   fontHwp: number,
 ): number {
@@ -963,9 +983,36 @@ function minParaHeightHwp(para: ParaNode, availWidthHwp?: number): number {
   );
   return (
     Metric.ptToHwp(Math.max(0, para.props.spaceBefore ?? 0)) +
-    safeParaLineHeightHwp(para.props, fontHwp) * lineCount +
+    safeParaLineAdvanceHwp(para.props, fontHwp) * lineCount +
     Metric.ptToHwp(Math.max(0, para.props.spaceAfter ?? 0))
   );
+}
+
+function nextParaVertPosHwp(
+  para: ParaNode,
+  vertPos: number,
+  availWidthHwp: number,
+  pageBodyHeightHwp?: number,
+): number {
+  const fontHwp = maxFontHwpInPara(para);
+  const lineCount = estimateLineCountHwp(
+    extractParaLayoutText(para),
+    fontHwp,
+    availWidthHwp,
+  );
+  const lineAdvance = safeParaLineAdvanceHwp(para.props, fontHwp);
+  let next = vertPos + Metric.ptToHwp(Math.max(0, para.props.spaceBefore ?? 0));
+  for (let i = 0; i < lineCount; i++) {
+    if (
+      pageBodyHeightHwp !== undefined &&
+      next > 0 &&
+      next + lineAdvance > pageBodyHeightHwp
+    ) {
+      next = 0;
+    }
+    next += lineAdvance;
+  }
+  return next + Metric.ptToHwp(Math.max(0, para.props.spaceAfter ?? 0));
 }
 
 function minGridHeightHwp(grid: GridNode): number {
@@ -989,7 +1036,8 @@ function minCellHeightHwp(cell: any, innerWidthHwp?: number): number {
   let content = 0;
   for (const kid of cell.kids ?? []) {
     if (kid.tag === "para") content += minParaHeightHwp(kid, innerWidthHwp);
-    else if (kid.tag === "grid") content += minGridHeightHwp(kid);
+    else if (kid.tag === "grid")
+      content += minGridHeightHwp(kid) + Metric.ptToHwp(6);
   }
   return Math.max(content, 1000) + padT + padB;
 }
@@ -1024,20 +1072,17 @@ function mkLineSeg(
 function buildDefaultLineSeg(
   availWidthHwp: number,
   fontHwp: number,
-  nchars: number,
+  _nchars: number,
   paraProps?: ParaProps,
   vertPos = 0,
 ): Uint8Array {
-  const ratio = paraProps?.lineHeight
-    ? Math.round(paraProps.lineHeight * 100)
-    : 160;
-  const vertSize = paraProps?.lineHeightFixed !== undefined
-    ? safeParaLineHeightHwp(paraProps, fontHwp)
-    : Math.max(calcLineHeight(0, Math.max(100, ratio), fontHwp), fontHwp);
+  const lineAdvance = safeParaLineAdvanceHwp(paraProps, fontHwp);
+  const vertSize = fontHwp;
   const baseline = Math.round(fontHwp * 0.85);
-  const spacing = Math.max(0, vertSize - fontHwp);
-  // flags: bit 0 (페이지 첫 줄), bit 1 (컬럼 첫 줄)
-  const flags = 3;
+  const spacing = Math.max(0, lineAdvance - vertSize);
+  const hasIndent = (paraProps?.firstLineIndentPt ?? 0) !== 0;
+  // bits 17/18: first/last segment in the line; bit 20: indentation applied.
+  const flags = 0x60000 | (hasIndent ? 0x100000 : 0);
 
   return mkLineSeg(
     0,
@@ -1050,6 +1095,78 @@ function buildDefaultLineSeg(
     availWidthHwp,
     flags,
   );
+}
+
+function buildObjectLineSeg(
+  availWidthHwp: number,
+  objectHeightHwp: number,
+  vertPos = 0,
+): Uint8Array {
+  const vertSize = Math.max(1, objectHeightHwp);
+  const spacing = Math.max(0, safeParaLineAdvanceHwp(undefined, 1000) - 1000);
+  return mkLineSeg(
+    0,
+    vertPos,
+    vertSize,
+    vertSize,
+    Math.round(vertSize * 0.85),
+    spacing,
+    0,
+    availWidthHwp,
+    0x60000,
+  );
+}
+
+function buildParaLineSegs(
+  text: string,
+  availWidthHwp: number,
+  fontHwp: number,
+  paraProps: ParaProps | undefined,
+  vertPos: number,
+  textPosOffset = 0,
+  pageBodyHeightHwp?: number,
+): { data: Uint8Array; count: number; totalHeight: number } {
+  const starts = lineStartPositionsHwp(text, fontHwp, availWidthHwp);
+  const lineAdvance = safeParaLineAdvanceHwp(paraProps, fontHwp);
+  const vertSize = fontHwp;
+  const spacing = Math.max(0, lineAdvance - vertSize);
+  const baseline = Math.round(fontHwp * 0.85);
+  const hasIndent = (paraProps?.firstLineIndentPt ?? 0) !== 0;
+  let nextLineVertPos =
+    vertPos + Metric.ptToHwp(Math.max(0, paraProps?.spaceBefore ?? 0));
+  const segments = starts.map((start, index) => {
+    if (
+      pageBodyHeightHwp !== undefined &&
+      nextLineVertPos > 0 &&
+      nextLineVertPos + lineAdvance > pageBodyHeightHwp
+    ) {
+      nextLineVertPos = 0;
+    }
+    const lineVertPos = nextLineVertPos;
+    nextLineVertPos += lineAdvance;
+    const flags =
+      0x60000 |
+      (index === 0 && hasIndent ? 0x100000 : 0);
+    return mkLineSeg(
+      index === 0 ? 0 : textPosOffset + start,
+      lineVertPos,
+      vertSize,
+      fontHwp,
+      baseline,
+      spacing,
+      0,
+      availWidthHwp,
+      flags,
+    );
+  });
+  return {
+    data: concatU8(segments),
+    count: segments.length,
+    totalHeight:
+      Metric.ptToHwp(Math.max(0, paraProps?.spaceBefore ?? 0)) +
+      segments.length * lineAdvance +
+      Metric.ptToHwp(Math.max(0, paraProps?.spaceAfter ?? 0)),
+  };
 }
 
 function mkSecdParaText(): Uint8Array {
@@ -1219,6 +1336,7 @@ function encodePicPara(
   idGen: () => number,
   availWidthHwp: number,
   divideSort = 0,
+  vertPos = 0,
 ): Uint8Array[] {
   // ANYTOHWP 방식: 픽셀 치수 추출 시도 → 실패 시 pt 기반으로 폴백
   const rawData = TextKit.base64Decode(imgNode.b64);
@@ -1254,7 +1372,7 @@ function encodePicPara(
     mkRec(
       TAG_PARA_LINE_SEG,
       lv + 1,
-      buildDefaultLineSeg(availWidthHwp, hHwp, 9),
+      buildObjectLineSeg(availWidthHwp, hHwp, vertPos),
     ),
     mkRec(
       TAG_CTRL_HEADER,
@@ -1281,6 +1399,7 @@ function encodePara(
   vertPos = 0,
   divideSortOverride = 0,
   sectionPrefix?: { dims: PageDims },
+  pageBodyHeightHwp?: number,
 ): Uint8Array[] {
   let text = "";
   const csPairs: [number, number][] = [];
@@ -1304,6 +1423,9 @@ function encodePara(
           if (t.tag === "txt") {
             text += t.content;
             pos += t.content.length;
+          } else if (t.tag === "br") {
+            text += "\n";
+            pos += 1;
           }
         }
       } else if (kid.tag === "link") {
@@ -1356,6 +1478,15 @@ function encodePara(
     ? buildSectionControlRecords(sectionPrefix.dims, lv + 1)
     : [];
   const nchars = sectionCharCount + text.length + 1;
+  const lineSegs = buildParaLineSegs(
+    text,
+    availWidthHwp,
+    fontHwp,
+    para.props,
+    vertPos,
+    sectionCharCount,
+    pageBodyHeightHwp,
+  );
 
   return [
     mkRec(
@@ -1366,7 +1497,7 @@ function encodePara(
         effectiveMask,
         psId,
         effectiveCsPairs.length,
-        1,
+        lineSegs.count,
         instanceId,
         styleId,
         effectiveDivideSort,
@@ -1377,7 +1508,7 @@ function encodePara(
     mkRec(
       TAG_PARA_LINE_SEG,
       lv + 1,
-      buildDefaultLineSeg(availWidthHwp, fontHwp, nchars, para.props, vertPos),
+      lineSegs.data,
     ),
     ...sectionRecords,
     ...ctrlRecords,
@@ -1602,9 +1733,11 @@ function encodeGrid(
         ),
       );
 
-      const cellWidthHwp = wHwp;
+      const cellWidthHwp = Math.max(100, wHwp - padL - padR);
+      let cellVertPos = 0;
       for (const kid of cellKids) {
         if (kid.tag === "grid") {
+          const nestedGridHeight = minGridHeightHwp(kid);
           records.push(
             mkRec(
               TAG_PARA_HEADER,
@@ -1620,14 +1753,25 @@ function encodeGrid(
             mkRec(
               TAG_PARA_LINE_SEG,
               lv + 2,
-              buildDefaultLineSeg(cellWidthHwp, 1000, 9),
+              buildObjectLineSeg(cellWidthHwp, nestedGridHeight, cellVertPos),
             ),
           );
           records.push(...encodeGrid(kid, bank, lv + 2, idGen, cellWidthHwp));
+          cellVertPos += nestedGridHeight + Metric.ptToHwp(6);
         } else {
+          const para = kid as ParaNode;
           records.push(
-            ...encodePara(kid as ParaNode, bank, lv + 1, idGen(), cellWidthHwp),
+            ...encodePara(
+              para,
+              bank,
+              lv + 1,
+              idGen(),
+              cellWidthHwp,
+              0,
+              cellVertPos,
+            ),
           );
+          cellVertPos += minParaHeightHwp(para, cellWidthHwp);
         }
       }
       logicalCol += cs;
@@ -1779,6 +1923,12 @@ function buildBodyTextStream(
       Metric.ptToHwp(dims.ml) -
       Metric.ptToHwp(dims.mr),
   );
+  const bodyHeightHwp = Math.max(
+    1000,
+    Metric.ptToHwp(dims.hPt) -
+      Metric.ptToHwp(dims.mt) -
+      Metric.ptToHwp(dims.mb),
+  );
 
   let vertPos = 0; // 단락 간격 추적
   let sectionWritten = false;
@@ -1791,6 +1941,13 @@ function buildBodyTextStream(
         const hasPageBreak = paraHasPageBreak(para.kids);
         const paraDivideSort = hasPageBreak ? 4 : 0;
         let paraMask = 0;
+        const paraHeight = minParaHeightHwp(para, availWidthHwp);
+        if (
+          hasPageBreak ||
+          (vertPos > 0 && vertPos + paraHeight > bodyHeightHwp)
+        ) {
+          vertPos = 0;
+        }
 
         // 코드 블록 감지 → 1×1 표로 감싸기
         const hasCourier = (kids: any[]): boolean =>
@@ -1830,6 +1987,8 @@ function buildBodyTextStream(
               },
             ],
           };
+          const gridHeight = minGridHeightHwp(gridNode);
+          if (vertPos > 0 && vertPos + gridHeight > bodyHeightHwp) vertPos = 0;
           chunks.push(
             mkRec(
               TAG_PARA_HEADER,
@@ -1843,12 +2002,12 @@ function buildBodyTextStream(
             mkRec(
               TAG_PARA_LINE_SEG,
               1,
-              buildDefaultLineSeg(availWidthHwp, 1000, 9, undefined, vertPos),
+              buildObjectLineSeg(availWidthHwp, gridHeight, vertPos),
             ),
           );
-          vertPos += Metric.ptToHwp(20); // 코드 블록 후 간격
           for (const r of encodeGrid(gridNode, bank, 1, idGen, availWidthHwp))
             chunks.push(r);
+          vertPos += Math.max(Metric.ptToHwp(20), gridHeight + Metric.ptToHwp(6));
           continue;
         }
 
@@ -1862,6 +2021,13 @@ function buildBodyTextStream(
           for (const img of imgNodes) {
             const binImg = images.find((b) => b64Matches(b, img.b64));
             if (binImg) {
+              const imageHeight = Metric.ptToHwp(img.h ?? 100);
+              if (
+                vertPos > 0 &&
+                vertPos + imageHeight > bodyHeightHwp
+              ) {
+                vertPos = 0;
+              }
               const imageDivideSort = !appliedImageBreak ? paraDivideSort : 0;
               appliedImageBreak = true;
               for (const r of encodePicPara(
@@ -1872,11 +2038,12 @@ function buildBodyTextStream(
                 idGen,
                 availWidthHwp,
                 imageDivideSort,
+                vertPos,
               )) {
                 // 첫 레코드가 PARA_HEADER인 경우 페이지 브레이크 마스크 적용
                 chunks.push(r);
               }
-              vertPos += Metric.ptToHwp(img.h ?? 100); // 이미지 높이 추가
+              vertPos += imageHeight + Metric.ptToHwp(6);
             }
           }
           const textKids = para.kids.filter((k: any) => k.tag !== "img");
@@ -1886,6 +2053,8 @@ function buildBodyTextStream(
               props: para.props,
               kids: textKids as any,
             };
+            const textHeight = minParaHeightHwp(textPara, availWidthHwp);
+            if (vertPos > 0 && vertPos + textHeight > bodyHeightHwp) vertPos = 0;
             for (const r of encodePara(
               textPara,
               bank,
@@ -1896,6 +2065,7 @@ function buildBodyTextStream(
               vertPos,
               imgNodes.length > 0 ? 0 : paraDivideSort,
               undefined,
+              bodyHeightHwp,
             )) {
               // PARA_HEADER 레코드(목록의 첫 번째)에 마스크 적용
               if (r[0] === (TAG_PARA_HEADER & 0xff)) {
@@ -1905,7 +2075,12 @@ function buildBodyTextStream(
               chunks.push(r);
             }
             // 단락 높이 계산 및 vertPos 업데이트 (이미지/텍스트 혼합)
-            vertPos += minParaHeightHwp(textPara);
+            vertPos = nextParaVertPosHwp(
+              textPara,
+              vertPos,
+              availWidthHwp,
+              bodyHeightHwp,
+            );
           }
         } else {
           for (const r of encodePara(
@@ -1918,17 +2093,25 @@ function buildBodyTextStream(
             vertPos,
             paraDivideSort,
             !sectionWritten ? { dims } : undefined,
+            bodyHeightHwp,
           ))
             chunks.push(r);
           sectionWritten = true;
           // 단락 높이 계산 및 vertPos 업데이트 (일반 단락)
-          vertPos += minParaHeightHwp(para);
+          vertPos = nextParaVertPosHwp(
+            para,
+            vertPos,
+            availWidthHwp,
+            bodyHeightHwp,
+          );
         }
       } else if (node.tag === "grid") {
         if (!sectionWritten) {
           for (const r of buildSectionParagraph(dims, idGen())) chunks.push(r);
           sectionWritten = true;
         }
+        const gridHeight = minGridHeightHwp(node as GridNode);
+        if (vertPos > 0 && vertPos + gridHeight > bodyHeightHwp) vertPos = 0;
         chunks.push(
           mkRec(
             TAG_PARA_HEADER,
@@ -1942,10 +2125,9 @@ function buildBodyTextStream(
           mkRec(
             TAG_PARA_LINE_SEG,
             1,
-            buildDefaultLineSeg(availWidthHwp, 1000, 9, undefined, vertPos),
+            buildObjectLineSeg(availWidthHwp, gridHeight, vertPos),
           ),
         );
-        vertPos += Metric.ptToHwp(20); // 표 후 간격
         for (const r of encodeGrid(
           node as GridNode,
           bank,
@@ -1954,6 +2136,10 @@ function buildBodyTextStream(
           availWidthHwp,
         ))
           chunks.push(r);
+        vertPos += Math.max(
+          Metric.ptToHwp(20),
+          gridHeight + Metric.ptToHwp(6),
+        );
       }
     }
   }
@@ -1972,7 +2158,7 @@ function buildBodyTextStream(
  * 구조:
  *  0-15: 시그니처 "HWP Document File" (16 바이트)
  * 16-31: reserved (16 바이트)
- * 32-35: version (4 바이트, Little-Endian) - 0x05010100 = 5.0.1.1
+ * 32-35: version (4 바이트, Little-Endian) - 0x05010001 = 5.1.0.1
  * 36-39: flags (4 바이트, Little-Endian) - bit 0 = compressed, bit 1 = encrypted
  * 40-255: reserved (216 바이트)
  *
@@ -1991,8 +2177,10 @@ function buildHwpFileHeader(): Uint8Array {
 
   // 16-31: reserved (0 으로 초기화됨)
 
-  // 32-35: version (4 바이트, Little-Endian) - 0x05010100 = 5.0.1.1
-  dv.setUint32(32, 0x05010100, true);
+  // Record sizes (74-byte CHAR_SHAPE, 58-byte PARA_SHAPE) match HWP 5.1.0.1,
+  // so the declared version must agree — mismatched versions make 한글 reject
+  // the DocInfo stream ("알 수 없는 이유로 열 수 없음").
+  dv.setUint32(32, 0x05010001, true);
 
   // 36-39: flags (4 바이트, Little-Endian)
   // bit 0 = 1: compressed (압축됨)
@@ -2008,7 +2196,7 @@ function buildHwpFileHeader(): Uint8Array {
   if (new TextDecoder().decode(buf.subarray(0, sig.length)) !== sig) {
     throw new Error("FileHeader 시그니처 오류");
   }
-  if (dv.getUint32(32, true) !== 0x05010100) {
+  if (dv.getUint32(32, true) !== 0x05010001) {
     throw new Error("FileHeader 버전 오류");
   }
 
@@ -2028,6 +2216,7 @@ function buildHwpOle2(
   const ENDOFCHAIN = 0xfffffffe;
   const FREESECT = 0xffffffff;
   const FATSECT = 0xfffffffd;
+  const DIFSECT = 0xfffffffc;
 
   // FileHeader 크기 검증
   if (fileHeaderData.length < 256) {
@@ -2140,22 +2329,25 @@ function buildHwpOle2(
   // Mini Stream을 위한 정규 섹터 크기 결정
   const miniStreamN = Math.ceil(miniStreamData.length / SS);
 
-  // 정규 FAT 섹터 수 (fatN) 계산 루프
+  // FAT/DIFAT 섹터 수도 FAT가 주소화해야 하므로 함께 고정점 계산한다.
   const totalRegStreamN = regNs.reduce((a, b) => a + b, 0);
   const neededDataSec = dirN + miniFatN + miniStreamN + totalRegStreamN;
 
   let fatN = 1;
-  for (let iter = 0; iter < 10; iter++) {
-    const totalSec = fatN + neededDataSec;
-    const neededFat = Math.ceil(totalSec / 128);
-    if (neededFat <= fatN) break;
-    fatN = neededFat;
+  let difatN = 0;
+  for (let iter = 0; iter < 100; iter++) {
+    const nextFatN = Math.ceil((neededDataSec + fatN + difatN) / 128);
+    const nextDifatN = Math.ceil(Math.max(0, nextFatN - 109) / 127);
+    if (nextFatN === fatN && nextDifatN === difatN) break;
+    fatN = nextFatN;
+    difatN = nextDifatN;
   }
 
-  const totalSec = fatN + neededDataSec;
+  const totalSec = fatN + difatN + neededDataSec;
 
   // 각 정규 섹터 영역의 시작 위치 할당
-  const dirStartSec = fatN;
+  const difatStartSec = fatN;
+  const dirStartSec = difatStartSec + difatN;
   const miniFatStartSec = dirStartSec + dirN;
   const miniStreamStartSec = miniFatStartSec + miniFatN;
 
@@ -2178,6 +2370,10 @@ function buildHwpOle2(
   // FAT 섹터 자신 표시
   for (let i = 0; i < fatN; i++) {
     setFat(i, FATSECT);
+  }
+
+  for (let i = 0; i < difatN; i++) {
+    setFat(difatStartSec + i, DIFSECT);
   }
 
   // Directory 섹터 체인 연결
@@ -2232,6 +2428,27 @@ function buildHwpOle2(
     setMiniFat(i, miniSectorList[i]);
   }
 
+  // Header DIFAT에는 109개만 들어간다. 나머지 FAT sector id를 DIFAT
+  // sector당 127개씩 기록하고 마지막 DWORD로 다음 DIFAT sector를 잇는다.
+  const difatBuf = new Uint8Array(difatN * SS).fill(0xff);
+  const difatView = new DataView(difatBuf.buffer);
+  for (let i = 0; i < difatN; i++) {
+    const base = i * SS;
+    for (let j = 0; j < 127; j++) {
+      const fatSectorId = 109 + i * 127 + j;
+      difatView.setUint32(
+        base + j * 4,
+        fatSectorId < fatN ? fatSectorId : FREESECT,
+        true,
+      );
+    }
+    difatView.setUint32(
+      base + 127 * 4,
+      i + 1 < difatN ? difatStartSec + i + 1 : ENDOFCHAIN,
+      true,
+    );
+  }
+
   // 디렉토리 버퍼 생성
   const dirBuf = new Uint8Array(dirN * SS);
   const dv = new DataView(dirBuf.buffer);
@@ -2273,23 +2490,109 @@ function buildHwpOle2(
   function buildSiblingTree(nodes: Array<{ idx: number; name: string }>): {
     root: number;
     links: Map<number, { left: number; right: number }>;
+    colors: Map<number, number>;
   } {
-    const sorted = [...nodes].sort((a, b) => cfbNameCompare(a.name, b.name));
     const links = new Map<number, { left: number; right: number }>();
-    for (const node of sorted) links.set(node.idx, { left: -1, right: -1 });
+    const colors = new Map<number, number>(); // 0=red, 1=black
+    const parents = new Map<number, number>();
+    const names = new Map(nodes.map((node) => [node.idx, node.name]));
+    let root = -1;
 
-    const build = (lo: number, hi: number): number => {
-      if (lo > hi) return -1;
-      const mid = Math.floor((lo + hi + 1) / 2);
-      const node = sorted[mid];
-      links.set(node.idx, {
-        left: build(lo, mid - 1),
-        right: build(mid + 1, hi),
-      });
-      return node.idx;
+    const colorOf = (idx: number): number =>
+      idx < 0 ? 1 : (colors.get(idx) ?? 1);
+    const parentOf = (idx: number): number => parents.get(idx) ?? -1;
+    const leftOf = (idx: number): number => links.get(idx)?.left ?? -1;
+    const rightOf = (idx: number): number => links.get(idx)?.right ?? -1;
+
+    const rotateLeft = (x: number): void => {
+      const y = rightOf(x);
+      if (y < 0) return;
+      links.get(x)!.right = leftOf(y);
+      if (leftOf(y) >= 0) parents.set(leftOf(y), x);
+      const xp = parentOf(x);
+      parents.set(y, xp);
+      if (xp < 0) root = y;
+      else if (x === leftOf(xp)) links.get(xp)!.left = y;
+      else links.get(xp)!.right = y;
+      links.get(y)!.left = x;
+      parents.set(x, y);
     };
 
-    return { root: build(0, sorted.length - 1), links };
+    const rotateRight = (x: number): void => {
+      const y = leftOf(x);
+      if (y < 0) return;
+      links.get(x)!.left = rightOf(y);
+      if (rightOf(y) >= 0) parents.set(rightOf(y), x);
+      const xp = parentOf(x);
+      parents.set(y, xp);
+      if (xp < 0) root = y;
+      else if (x === rightOf(xp)) links.get(xp)!.right = y;
+      else links.get(xp)!.left = y;
+      links.get(y)!.right = x;
+      parents.set(x, y);
+    };
+
+    for (const node of nodes) {
+      links.set(node.idx, { left: -1, right: -1 });
+      colors.set(node.idx, 0);
+
+      let parent = -1;
+      let cursor = root;
+      while (cursor >= 0) {
+        parent = cursor;
+        cursor =
+          cfbNameCompare(node.name, names.get(cursor)!) < 0
+            ? leftOf(cursor)
+            : rightOf(cursor);
+      }
+      parents.set(node.idx, parent);
+      if (parent < 0) root = node.idx;
+      else if (cfbNameCompare(node.name, names.get(parent)!) < 0)
+        links.get(parent)!.left = node.idx;
+      else links.get(parent)!.right = node.idx;
+
+      let z = node.idx;
+      while (z !== root && colorOf(parentOf(z)) === 0) {
+        const p = parentOf(z);
+        const gp = parentOf(p);
+        if (p === leftOf(gp)) {
+          const uncle = rightOf(gp);
+          if (colorOf(uncle) === 0) {
+            colors.set(p, 1);
+            colors.set(uncle, 1);
+            colors.set(gp, 0);
+            z = gp;
+          } else {
+            if (z === rightOf(p)) {
+              z = p;
+              rotateLeft(z);
+            }
+            colors.set(parentOf(z), 1);
+            colors.set(parentOf(parentOf(z)), 0);
+            rotateRight(parentOf(parentOf(z)));
+          }
+        } else {
+          const uncle = leftOf(gp);
+          if (colorOf(uncle) === 0) {
+            colors.set(p, 1);
+            colors.set(uncle, 1);
+            colors.set(gp, 0);
+            z = gp;
+          } else {
+            if (z === leftOf(p)) {
+              z = p;
+              rotateRight(z);
+            }
+            colors.set(parentOf(z), 1);
+            colors.set(parentOf(parentOf(z)), 0);
+            rotateLeft(parentOf(parentOf(z)));
+          }
+        }
+      }
+      if (root >= 0) colors.set(root, 1);
+    }
+
+    return { root, links, colors };
   }
 
   // 모든 디렉토리 엔트리 -1 (NOSTREAM)으로 초기화
@@ -2340,7 +2643,7 @@ function buildHwpOle2(
     1,
     "FileHeader",
     2,
-    1,
+    rootTree.colors.get(1) ?? 1,
     fhLinks.left,
     fhLinks.right,
     -1,
@@ -2355,7 +2658,7 @@ function buildHwpOle2(
     2,
     "DocInfo",
     2,
-    1,
+    rootTree.colors.get(2) ?? 1,
     diLinks.left,
     diLinks.right,
     -1,
@@ -2369,7 +2672,7 @@ function buildHwpOle2(
     3,
     "BodyText",
     1,
-    1,
+    rootTree.colors.get(3) ?? 1,
     bodyLinks.left,
     bodyLinks.right,
     4,
@@ -2397,7 +2700,7 @@ function buildHwpOle2(
     prvTextDirIdx,
     "PrvText",
     2,
-    1,
+    rootTree.colors.get(prvTextDirIdx) ?? 1,
     prvTextLinks.left,
     prvTextLinks.right,
     -1,
@@ -2418,7 +2721,7 @@ function buildHwpOle2(
       5,
       "BinData",
       1,
-      1,
+      rootTree.colors.get(5) ?? 1,
       binLinks.left,
       binLinks.right,
       binTree.root,
@@ -2433,7 +2736,7 @@ function buildHwpOle2(
         6 + i,
         imgStream.name,
         2,
-        1,
+        binTree.colors.get(6 + i) ?? 1,
         imgLinks.left,
         imgLinks.right,
         -1,
@@ -2466,8 +2769,8 @@ function buildHwpOle2(
   hdv.setUint32(56, 0x1000, true); // Mini Stream Cutoff Size (0x0038)
   hdv.setUint32(60, miniFatN > 0 ? miniFatStartSec : ENDOFCHAIN, true); // Starting Sector of Mini FAT (0x003C)
   hdv.setUint32(64, miniFatN, true); // Number of Mini FAT Sectors (0x0040)
-  hdv.setUint32(68, ENDOFCHAIN, true); // Starting Sector of DIFAT (0x0044)
-  hdv.setUint32(72, 0, true); // Number of DIFAT Sectors (0x0048)
+  hdv.setUint32(68, difatN > 0 ? difatStartSec : ENDOFCHAIN, true); // Starting Sector of DIFAT
+  hdv.setUint32(72, difatN, true); // Number of DIFAT Sectors
 
   // Sector bitmap (DIFAT) 슬롯 채우기 (처음 109개 FAT 섹터 번호 지정)
   for (let i = 0; i < 109; i++) {
@@ -2486,17 +2789,23 @@ function buildHwpOle2(
   out.set(fatBuf, outOff);
   outOff += fatN * SS;
 
-  // 3. Directory sectors
+  // 3. DIFAT sectors
+  if (difatN > 0) {
+    out.set(difatBuf, outOff);
+    outOff += difatN * SS;
+  }
+
+  // 4. Directory sectors
   out.set(dirBuf, outOff);
   outOff += dirN * SS;
 
-  // 4. Mini FAT sectors
+  // 5. Mini FAT sectors
   if (miniFatN > 0) {
     out.set(miniFatBuf, outOff);
     outOff += miniFatN * SS;
   }
 
-  // 5. Mini Stream sectors (Root Entry Data)
+  // 6. Mini Stream sectors (Root Entry Data)
   if (miniStreamN > 0) {
     const miniStreamPad = new Uint8Array(miniStreamN * SS);
     miniStreamPad.set(miniStreamData);
@@ -2504,7 +2813,7 @@ function buildHwpOle2(
     outOff += miniStreamN * SS;
   }
 
-  // 6. Regular Streams sectors
+  // 7. Regular Streams sectors
   for (let i = 0; i < regularStreams.length; i++) {
     out.set(regPads[i], outOff);
     outOff += regNs[i] * SS;

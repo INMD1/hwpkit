@@ -87,6 +87,7 @@ interface GridProps {
     look?: TableLook;
     headerRow?: boolean;
     align?: Align;
+    layout?: ImgLayout;
 }
 interface PageDims {
     wPt: number;
