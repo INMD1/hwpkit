@@ -30,6 +30,7 @@ import type {
   Stroke,
   PageDims,
   Align,
+  CellProps,
 } from "../../model/doc-props";
 import { succeed, fail } from "../../contract/result";
 import { Metric, safeFontToKr } from "../../safety/StyleBridge";
@@ -37,6 +38,7 @@ import { registry } from "../../pipeline/registry";
 import { A4 } from "../../model/doc-props";
 import pako from "pako";
 import { TextKit } from "../../toolkit/TextKit";
+import { fitColumnWidths } from "../../toolkit/TableGeometry";
 import { BaseEncoder } from "../../core/BaseEncoder";
 
 // ─── HWP 5.0 태그 ID ────────────────────────────────────────
@@ -49,6 +51,7 @@ const TAG_BIN_DATA = T + 2; // 18
 const TAG_FACE_NAME = T + 3; // 19
 const TAG_BORDER_FILL = T + 4; // 20
 const TAG_CHAR_SHAPE = T + 5; // 21
+const TAG_TAB_DEF = T + 6; // 22
 const TAG_PARA_SHAPE = T + 9; // 25
 const TAG_STYLE = T + 10; // 26
 
@@ -61,15 +64,21 @@ const TAG_CTRL_HEADER = T + 55; // 71
 const TAG_LIST_HEADER = T + 56; // 72
 const TAG_PAGE_DEF = T + 57; // 73
 const TAG_FOOTNOTE_SHAPE = T + 58; // 74
+const TAG_PAGE_BORDER_FILL = T + 59; // 75
+const TAG_SHAPE_COMPONENT = T + 60; // 76
 const TAG_TABLE = T + 61; // 77
 const TAG_SHAPE_COMPONENT_PICTURE = T + 69; // 85
+const TAG_CTRL_DATA = T + 71; // 87
 
 // Control ID (LE UINT32)
 const CTRL_TABLE = 0x74626c20; // 'tbl '
 const CTRL_SECD = 0x73656364; // 'secd'
+const CTRL_COLD = 0x636f6c64; // 'cold'
+const CTRL_GSO = 0x67736f20; // 'gso '
 const CTRL_PIC = 0x24706963; // '$pic'
 const CTRL_FIELD_BEGIN = 0x646c6625; // '%fld'
 const CTRL_FIELD_END = 0x646c665c; // '\fld'
+const TABLE_CTRL_MASK = 1 << 11;
 
 /** 테두리선 굵기 인덱스 테이블 (pt) */
 const BORDER_W_PT = [
@@ -78,8 +87,8 @@ const BORDER_W_PT = [
 ];
 
 const BORDER_KIND_IDX: Record<string, number> = {
-  solid: 0,
-  dot: 1,
+  solid: 1,
+  dot: 3,
   dash: 2,
   double: 7,
   triple: 8,
@@ -128,6 +137,13 @@ class BufWriter {
   }
   i16(v: number): this {
     return this.u16(v < 0 ? v + 0x10000 : v);
+  }
+  f64(v: number): this {
+    const b = new Uint8Array(8);
+    new DataView(b.buffer).setFloat64(0, v, true);
+    this.chunks.push(b);
+    this._sz += 8;
+    return this;
   }
   bytes(d: Uint8Array): this {
     this.chunks.push(d);
@@ -251,6 +267,7 @@ class HwpStyleBank {
 
   readonly bfData: BfEntry[] = [];
   private bfIdx = new Map<string, number>();
+  private maxStyleId = 0;
 
   // charShape마다 언어별 fontId를 기록
   readonly csFontIds: number[][] = [[0, 0, 0, 0, 0, 0, 0]]; // id=0 → 모두 0
@@ -317,6 +334,16 @@ class HwpStyleBank {
     return id;
   }
 
+  registerStyleId(styleId: number | undefined): void {
+    if (styleId === undefined) return;
+    if (!Number.isInteger(styleId) || styleId < 0 || styleId > 255) return;
+    this.maxStyleId = Math.max(this.maxStyleId, styleId);
+  }
+
+  getStyleCount(): number {
+    return this.maxStyleId + 1;
+  }
+
   addBorderFill(s: Stroke, bg?: string): number {
     const k = bfKey(s, bg);
     if (this.bfIdx.has(k)) return this.bfIdx.get(k)!;
@@ -362,11 +389,25 @@ function psKey(p: ParaProps): string {
   return [
     p.align ?? "left",
     p.indentPt ?? 0,
+    p.indentRightPt ?? 0,
     p.firstLineIndentPt ?? 0,
     p.spaceBefore ?? 0,
     p.spaceAfter ?? 0,
     p.lineHeight ?? 1,
+    p.lineHeightFixed ?? 0,
   ].join("|");
+}
+
+function hwpStyleIdForPara(p: ParaProps): number | undefined {
+  if (p.hwpStyleId !== undefined) {
+    const id = Math.trunc(p.hwpStyleId);
+    return id >= 0 && id <= 255 ? id : undefined;
+  }
+  if (p.styleId !== undefined) {
+    const id = Number(p.styleId);
+    if (Number.isInteger(id) && id >= 0 && id <= 255) return id;
+  }
+  return undefined;
 }
 
 function bfKey(s: Stroke, bg?: string): string {
@@ -391,6 +432,7 @@ type BfEntry =
 
 function collectNode(node: ContentNode, bank: HwpStyleBank): void {
   if (node.tag === "para") {
+    bank.registerStyleId(hwpStyleIdForPara(node.props));
     bank.addParaShape(node.props);
     for (const kid of node.kids) {
       if (kid.tag === "span") bank.addCharShape((kid as SpanNode).props);
@@ -448,11 +490,11 @@ function mkIdMappings(bank: HwpStyleBank, nBinData = 0): Uint8Array {
   for (const lang of LANG_GROUPS) w.u32(bank.getFontCount(lang));
   w.u32(bank.bfData.length); // [8]
   w.u32(bank.csProps.length); // [9]
-  w.u32(0); // [10] tabDef
+  w.u32(1); // [10] tabDef
   w.u32(0); // [11] numbering
   w.u32(0); // [12] bullet
   w.u32(bank.psProps.length); // [13]
-  w.u32(1); // [14] style (바탕글 1개)
+  w.u32(bank.getStyleCount()); // [14] style
   w.u32(0); // [15]
   w.u32(0); // [16]
   w.u32(0); // [17]
@@ -470,24 +512,99 @@ function mkStyle(
     .utf16(name)
     .u16(engName.length)
     .utf16(engName)
+    .u8(0) // paragraph style
+    .u8(0) // next style id
+    .i16(1042) // ko-KR
     .u16(paraPrId)
     .u16(charPrId)
-    .u16(0)
-    .u16(1042)
-    .u16(0)
+    .u16(0) // lockForm, present in Hancom-produced 5.0.5 files
     .build();
 }
 
+function mkTabDef(): Uint8Array {
+  return new Uint8Array(8);
+}
+
+const HWP_STYLE_NAMES: Array<[string, string]> = [
+  ["바탕글", "Normal"],
+  ["본문", "Body Text"],
+  ["개요 1", "Heading 1"],
+  ["개요 2", "Heading 2"],
+  ["개요 3", "Heading 3"],
+  ["개요 4", "Heading 4"],
+  ["개요 5", "Heading 5"],
+  ["개요 6", "Heading 6"],
+  ["개요 7", "Heading 7"],
+  ["개요 8", "Heading 8"],
+  ["개요 9", "Heading 9"],
+  ["개요 10", "Heading 10"],
+  ["쪽 번호", "Page Number"],
+  ["머리말", "Header"],
+  ["각주", "Footnote"],
+  ["미주", "Endnote"],
+  ["메모", "Memo"],
+  ["차례 제목", "TOC Heading"],
+  ["차례 1", "TOC 1"],
+  ["차례 2", "TOC 2"],
+  ["차례 3", "TOC 3"],
+  ["본문 제목", "Body Title"],
+  ["그림", "Figure"],
+  ["표", "Table"],
+  ["수식", "Equation"],
+  ["인용문", "Quote"],
+  ["날짜", "Date"],
+  ["발신명의", "Sender"],
+  ["제목", "Title"],
+  ["부제목", "Subtitle"],
+  ["문단 제목", "Paragraph Title"],
+];
+
+function styleNameForId(id: number): [string, string] {
+  return HWP_STYLE_NAMES[id] ?? [`스타일 ${id}`, `Style ${id}`];
+}
+
+function basicFaceNameFor(face: string): string {
+  const normalized = face.trim();
+  const aliases: Record<string, string> = {
+    "맑은 고딕": "Malgun Gothic",
+    "맑은고딕": "Malgun Gothic",
+    "함초롬바탕": "HCR Batang",
+    "한컴바탕": "HCR Batang",
+    "함초롬돋움": "HCR Dotum",
+    "한컴돋움": "HCR Dotum",
+    "바탕": "Batang",
+    "돋움": "Dotum",
+    "굴림": "Gulim",
+    "궁서": "Gungsuh",
+    "한양신명조": "HY Sinmyeongjo",
+    "HY신명조": "HY Sinmyeongjo",
+    "한양견고딕": "HY Gyeongothic",
+    "HY견고딕": "HY Gyeongothic",
+    "한양중고딕": "HY Junggothic",
+    "HY중고딕": "HY Junggothic",
+    "HY헤드라인M": "HYHeadLine-Medium",
+  };
+  return aliases[normalized] ?? normalized;
+}
+
+function faceTypeInfo(face: string): number[] {
+  if (/바탕|명조|Batang|Myeong|Sinmyeong|Serif/i.test(face)) {
+    return [2, 3, 6, 4, 0, 1, 1, 1, 1, 1];
+  }
+  if (/고딕|돋움|Gothic|Dotum|HeadLine|헤드라인/i.test(face)) {
+    return [2, 11, 5, 3, 2, 0, 0, 2, 0, 4];
+  }
+  return [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+}
+
 function mkFaceName(name: string): Uint8Array {
-  return new BufWriter()
-    .u8(0)
+  const basic = basicFaceNameFor(name);
+  const w = new BufWriter()
+    .u8(0x61)
     .u16(name.length)
-    .utf16(name)
-    .u8(0)
-    .u16(0)
-    .zeros(10)
-    .u16(0)
-    .build();
+    .utf16(name);
+  for (const b of faceTypeInfo(name)) w.u8(b);
+  return w.u16(basic.length).utf16(basic).build();
 }
 
 function borderWidthIdx(pt: number): number {
@@ -505,14 +622,12 @@ function mkBorderFill(s: Stroke, bg?: string): Uint8Array {
   const wi = borderWidthIdx(s.pt);
   const col = s.color || "000000";
   w.u16(0);
-  for (let i = 0; i < 4; i++) w.u8(t);
-  for (let i = 0; i < 4; i++) w.u8(wi);
-  for (let i = 0; i < 4; i++) w.colorRef(col);
+  for (let i = 0; i < 4; i++) w.u8(t).u8(wi).colorRef(col);
   w.u8(0).u8(0).colorRef("000000");
   if (bg) {
-    w.u32(1).colorRef(bg).colorRef("FFFFFF").u32(0);
+    w.u32(1).colorRef(bg).colorRef(bg).u32(0xffffffff).u32(0).u8(0);
   } else {
-    w.u32(0);
+    w.u32(0).u32(0);
   }
   return w.build();
 }
@@ -526,23 +641,15 @@ function mkBorderFillPerSide(
 ): Uint8Array {
   const w = new BufWriter();
   w.u16(0);
-  w.u8(BORDER_KIND_IDX[l.kind] ?? 0)
-    .u8(BORDER_KIND_IDX[r.kind] ?? 0)
-    .u8(BORDER_KIND_IDX[t.kind] ?? 0)
-    .u8(BORDER_KIND_IDX[b.kind] ?? 0);
-  w.u8(borderWidthIdx(l.pt))
-    .u8(borderWidthIdx(r.pt))
-    .u8(borderWidthIdx(t.pt))
-    .u8(borderWidthIdx(b.pt));
-  w.colorRef(l.color || "000000")
-    .colorRef(r.color || "000000")
-    .colorRef(t.color || "000000")
-    .colorRef(b.color || "000000");
+  w.u8(BORDER_KIND_IDX[l.kind] ?? 0).u8(borderWidthIdx(l.pt)).colorRef(l.color || "000000");
+  w.u8(BORDER_KIND_IDX[r.kind] ?? 0).u8(borderWidthIdx(r.pt)).colorRef(r.color || "000000");
+  w.u8(BORDER_KIND_IDX[t.kind] ?? 0).u8(borderWidthIdx(t.pt)).colorRef(t.color || "000000");
+  w.u8(BORDER_KIND_IDX[b.kind] ?? 0).u8(borderWidthIdx(b.pt)).colorRef(b.color || "000000");
   w.u8(0).u8(0).colorRef("000000");
   if (bg) {
-    w.u32(1).colorRef(bg).colorRef("FFFFFF").u32(0);
+    w.u32(1).colorRef(bg).colorRef(bg).u32(0xffffffff).u32(0).u8(0);
   } else {
-    w.u32(0);
+    w.u32(0).u32(0);
   }
   return w.build();
 }
@@ -580,16 +687,24 @@ function mkCharShape(fontIds: number[], p: TextProps): Uint8Array {
 
 function mkParaShape(p: ParaProps): Uint8Array {
   const alignVal = ALIGN_CODE[p.align ?? "left"] ?? 1;
-  const attr1 = (alignVal & 0x7) << 2;
-  const lineSpacePct = p.lineHeight ? Math.round(p.lineHeight * 100) : 160;
+  const lineSpacingType = p.lineHeightFixed !== undefined ? 3 : 0;
+  const attr1 = (lineSpacingType & 0x3) | ((alignVal & 0x7) << 2);
+  const lineSpaceValue =
+    p.lineHeightFixed !== undefined
+      ? Math.max(
+          Metric.ptToHwp(p.lineHeightFixed) * 2,
+          Math.ceil(Metric.ptToHwp(10) * 1.15) * 2,
+        )
+      : Math.max(100, p.lineHeight ? Math.round(p.lineHeight * 100) : 160);
+  const paraShapeUnit = (pt: number) => Metric.ptToHwp(pt) * 2;
   return new BufWriter()
     .u32(attr1)
-    .i32(Metric.ptToHwp(p.indentPt ?? 0))
-    .i32(Metric.ptToHwp(p.indentRightPt ?? 0))
-    .i32(Metric.ptToHwp(p.firstLineIndentPt ?? 0))
-    .i32(Metric.ptToHwp(p.spaceBefore ?? 0))
-    .i32(Metric.ptToHwp(p.spaceAfter ?? 0))
-    .i32(lineSpacePct)
+    .i32(paraShapeUnit(p.indentPt ?? 0))
+    .i32(paraShapeUnit(p.indentRightPt ?? 0))
+    .i32(paraShapeUnit(p.firstLineIndentPt ?? 0))
+    .i32(paraShapeUnit(p.spaceBefore ?? 0))
+    .i32(paraShapeUnit(p.spaceAfter ?? 0))
+    .i32(lineSpaceValue)
     .u16(0)
     .u16(0)
     .u16(0)
@@ -598,13 +713,15 @@ function mkParaShape(p: ParaProps): Uint8Array {
     .i16(0)
     .i16(0)
     .u32(0)
-    .u32(4)
-    .u32(lineSpacePct)
-    .build(); // 54 bytes
+    .u32(lineSpacingType)
+    .u32(lineSpaceValue)
+    .u32(0) // 5.0.2.5+ 확장 속성. 한컴 5.1 파일과 동일하게 0. → 58바이트
+    .build(); // 58 bytes (matches Hancom 5.1 PARA_SHAPE)
 }
 
 function mkBinData(id: number, ext: string): Uint8Array {
-  return new BufWriter().u16(0x0002).u16(id).u16(ext.length).utf16(ext).build();
+  // EMBEDDING + do-not-compress. BinData streams contain the raw image bytes.
+  return new BufWriter().u16(0x0021).u16(id).u16(ext.length).utf16(ext).build();
 }
 
 interface BinImage {
@@ -624,7 +741,7 @@ function buildDocInfoStream(
   const chunks: Uint8Array[] = [];
 
   chunks.push(mkRec(TAG_DOCUMENT_PROPERTIES, 0, mkDocumentProperties()));
-  chunks.push(mkRec(TAG_ID_MAPPINGS, 1, mkIdMappings(bank, images.length)));
+  chunks.push(mkRec(TAG_ID_MAPPINGS, 0, mkIdMappings(bank, images.length)));
 
   for (const img of images) {
     chunks.push(mkRec(TAG_BIN_DATA, 1, mkBinData(img.id, img.ext)));
@@ -656,11 +773,16 @@ function buildDocInfoStream(
     );
   }
 
+  chunks.push(mkRec(TAG_TAB_DEF, 1, mkTabDef()));
+
   for (const p of bank.psProps) {
     chunks.push(mkRec(TAG_PARA_SHAPE, 1, mkParaShape(p)));
   }
 
-  chunks.push(mkRec(TAG_STYLE, 1, mkStyle("바탕글", "Normal", 0, 0)));
+  for (let i = 0; i < bank.getStyleCount(); i++) {
+    const [name, engName] = styleNameForId(i);
+    chunks.push(mkRec(TAG_STYLE, 1, mkStyle(name, engName, 0, 0)));
+  }
 
   return concatU8(chunks);
 }
@@ -668,15 +790,19 @@ function buildDocInfoStream(
 // ─── BodyText 레코드 빌더 ────────────────────────────────────
 
 function mkPageDef(dims: PageDims): Uint8Array {
+  const rawTopPt = dims.headerPt ?? dims.mt;
+  const rawBottomPt = dims.footerPt ?? dims.mb;
+  const rawHeaderPt = Math.max(0, dims.mt - rawTopPt);
+  const rawFooterPt = Math.max(0, dims.mb - rawBottomPt);
   return new BufWriter()
     .u32(Metric.ptToHwp(dims.wPt))
     .u32(Metric.ptToHwp(dims.hPt))
     .u32(Metric.ptToHwp(dims.ml))
     .u32(Metric.ptToHwp(dims.mr))
-    .u32(Metric.ptToHwp(dims.mt))
-    .u32(Metric.ptToHwp(dims.mb))
-    .u32(dims.headerPt ? Metric.ptToHwp(dims.headerPt) : 0)
-    .u32(dims.footerPt ? Metric.ptToHwp(dims.footerPt) : 0)
+    .u32(Metric.ptToHwp(rawTopPt))
+    .u32(Metric.ptToHwp(rawBottomPt))
+    .u32(Metric.ptToHwp(rawHeaderPt))
+    .u32(Metric.ptToHwp(rawFooterPt))
     .u32(0) // gutter
     .u32(dims.orient === "landscape" ? 1 : 0)
     .build(); // 40 bytes
@@ -689,13 +815,15 @@ function mkParaHeader(
   csCount: number,
   lineAlignCount = 0,
   instanceId = 0,
+  styleId = 0,
+  divideSort = 0,
 ): Uint8Array {
   return new BufWriter()
     .u32(nchars)
     .u32(ctrlMask)
     .u16(psId)
-    .u8(0)
-    .u8(0)
+    .u8(Math.max(0, Math.min(255, Math.trunc(styleId))))
+    .u8(Math.max(0, Math.min(255, Math.trunc(divideSort))))
     .u16(csCount)
     .u16(0)
     .u16(lineAlignCount)
@@ -735,14 +863,205 @@ function calcLineHeight(
     case 1:
       return value;
     case 2:
-      return Math.max(textHeight, value);
-    case 3:
       return textHeight + value;
+    case 3:
+      return Math.max(textHeight, value);
     case 4:
       return Math.floor(textHeight * value);
     default:
       return Math.floor((textHeight * value) / 100);
   }
+}
+
+function maxFontHwpInPara(para: ParaNode): number {
+  let maxHwp = 1000;
+  const visit = (kids: any[]) => {
+    for (const kid of kids ?? []) {
+      if (
+        kid.tag === "span" &&
+        typeof kid.props?.pt === "number" &&
+        kid.props.pt > 0
+      ) {
+        maxHwp = Math.max(maxHwp, Metric.ptToHwp(kid.props.pt));
+      }
+      if (kid.kids) visit(kid.kids);
+    }
+  };
+  visit(para.kids as any[]);
+  return maxHwp;
+}
+
+function extractParaLayoutText(para: ParaNode): string {
+  let text = "";
+  const visit = (kids: any[]) => {
+    for (const kid of kids ?? []) {
+      if (kid.tag === "span") {
+        for (const child of kid.kids ?? []) {
+          if (child.tag === "txt") text += child.content ?? "";
+          else if (child.tag === "br") text += "\n";
+        }
+      } else if (kid.tag === "link") {
+        visit(kid.kids ?? []);
+      }
+    }
+  };
+  visit(para.kids as any[]);
+  return text;
+}
+
+function estimateCharWidthHwp(code: number, fontHwp: number): number {
+  if (code >= 0xac00 && code <= 0xd7a3) return fontHwp;
+  if (code >= 0x3130 && code <= 0x318f) return fontHwp;
+  if (code >= 0x4e00 && code <= 0x9fff) return fontHwp;
+  if (code >= 65 && code <= 90) return Math.round(fontHwp * 0.65);
+  if (code === 32) return Math.round(fontHwp * 0.32);
+  if (code > 255) return fontHwp;
+  return Math.round(fontHwp * 0.42);
+}
+
+function lineStartPositionsHwp(
+  text: string,
+  fontHwp: number,
+  availWidthHwp?: number,
+): number[] {
+  if (!text) return [0];
+  const maxWidth = Math.max(1, availWidthHwp ?? 0);
+  if (!availWidthHwp || availWidthHwp <= 0) {
+    const starts = [0];
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      if (code !== 10 && code !== 13) continue;
+      if (code === 13 && text.charCodeAt(i + 1) === 10) i++;
+      starts.push(i + 1);
+    }
+    return starts;
+  }
+  const starts = [0];
+  let currentWidth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 10 || code === 13) {
+      if (code === 13 && text.charCodeAt(i + 1) === 10) i++;
+      starts.push(i + 1);
+      currentWidth = 0;
+      continue;
+    }
+    // HWP control characters occupy text positions but have no glyph width.
+    if (code < 32) continue;
+    const charWidth = estimateCharWidthHwp(code, fontHwp);
+    if (currentWidth > 0 && currentWidth + charWidth > maxWidth) {
+      starts.push(i);
+      currentWidth = charWidth;
+    } else {
+      currentWidth += charWidth;
+    }
+  }
+  return starts;
+}
+
+function estimateLineCountHwp(
+  text: string,
+  fontHwp: number,
+  availWidthHwp?: number,
+): number {
+  return lineStartPositionsHwp(text, fontHwp, availWidthHwp).length;
+}
+
+function safeParaLineAdvanceHwp(
+  props: ParaProps | undefined,
+  fontHwp: number,
+): number {
+  const textHeight = Math.max(1, fontHwp);
+  if (props?.lineHeightFixed !== undefined) {
+    const fixed = Math.max(0, Metric.ptToHwp(props.lineHeightFixed));
+    return calcLineHeight(
+      3,
+      Math.max(fixed, Math.ceil(textHeight * 1.15)),
+      textHeight,
+    );
+  }
+  const ratio = Math.max(100, Math.round((props?.lineHeight ?? 1.6) * 100));
+  return Math.max(calcLineHeight(0, ratio, textHeight), textHeight);
+}
+
+function minParaHeightHwp(para: ParaNode, availWidthHwp?: number): number {
+  const fontHwp = maxFontHwpInPara(para);
+  const lineCount = estimateLineCountHwp(
+    extractParaLayoutText(para),
+    fontHwp,
+    availWidthHwp,
+  );
+  return (
+    Metric.ptToHwp(Math.max(0, para.props.spaceBefore ?? 0)) +
+    safeParaLineAdvanceHwp(para.props, fontHwp) * lineCount +
+    Metric.ptToHwp(Math.max(0, para.props.spaceAfter ?? 0))
+  );
+}
+
+function nextParaVertPosHwp(
+  para: ParaNode,
+  vertPos: number,
+  availWidthHwp: number,
+  pageBodyHeightHwp?: number,
+): number {
+  const fontHwp = maxFontHwpInPara(para);
+  const lineCount = estimateLineCountHwp(
+    extractParaLayoutText(para),
+    fontHwp,
+    availWidthHwp,
+  );
+  const lineAdvance = safeParaLineAdvanceHwp(para.props, fontHwp);
+  let next = vertPos + Metric.ptToHwp(Math.max(0, para.props.spaceBefore ?? 0));
+  for (let i = 0; i < lineCount; i++) {
+    if (
+      pageBodyHeightHwp !== undefined &&
+      next > 0 &&
+      next + lineAdvance > pageBodyHeightHwp
+    ) {
+      next = 0;
+    }
+    next += lineAdvance;
+  }
+  return next + Metric.ptToHwp(Math.max(0, para.props.spaceAfter ?? 0));
+}
+
+function minGridHeightHwp(grid: GridNode): number {
+  return grid.kids.reduce((sum: number, row: any) => {
+    const explicit = row.heightPt != null && row.heightPt > 0
+      ? Metric.ptToHwp(row.heightPt)
+      : Metric.ptToHwp(DEFAULT_ROW_HEIGHT_PT);
+    let minRow = 0;
+    for (const cell of row.kids ?? []) {
+      const span = Math.max(1, cell.rs ?? 1);
+      minRow = Math.max(minRow, Math.ceil(minCellHeightHwp(cell) / span));
+    }
+    return sum + Math.max(explicit, minRow);
+  }, 0);
+}
+
+function minCellHeightHwp(cell: any, innerWidthHwp?: number): number {
+  const cp = cell.props ?? {};
+  const padT = cp.padT !== undefined ? Metric.ptToHwp(cp.padT) : 141;
+  const padB = cp.padB !== undefined ? Metric.ptToHwp(cp.padB) : 141;
+  let content = 0;
+  for (const kid of cell.kids ?? []) {
+    if (kid.tag === "para") {
+      const images = flatImgNodes(kid.kids);
+      for (const image of images) {
+        content += imageDisplaySizeHwp(
+          image,
+          innerWidthHwp ?? Number.MAX_SAFE_INTEGER,
+        ).h;
+      }
+      const textKids = kid.kids.filter((child: any) => child.tag !== "img");
+      if (textKids.length > 0 || images.length === 0) {
+        content += minParaHeightHwp({ ...kid, kids: textKids }, innerWidthHwp);
+      }
+    }
+    else if (kid.tag === "grid")
+      content += minGridHeightHwp(kid) + Metric.ptToHwp(6);
+  }
+  return Math.max(content, 1000) + padT + padB;
 }
 
 /**
@@ -775,18 +1094,17 @@ function mkLineSeg(
 function buildDefaultLineSeg(
   availWidthHwp: number,
   fontHwp: number,
-  nchars: number,
+  _nchars: number,
   paraProps?: ParaProps,
   vertPos = 0,
 ): Uint8Array {
-  const ratio = paraProps?.lineHeight
-    ? Math.round(paraProps.lineHeight * 100)
-    : 160;
-  const vertSize = calcLineHeight(0, ratio, fontHwp);
+  const lineAdvance = safeParaLineAdvanceHwp(paraProps, fontHwp);
+  const vertSize = fontHwp;
   const baseline = Math.round(fontHwp * 0.85);
-  const spacing = vertSize - fontHwp;
-  // flags: bit 0 (페이지 첫 줄), bit 1 (컬럼 첫 줄)
-  const flags = 3;
+  const spacing = Math.max(0, lineAdvance - vertSize);
+  const hasIndent = (paraProps?.firstLineIndentPt ?? 0) !== 0;
+  // bits 17/18: first/last segment in the line; bit 20: indentation applied.
+  const flags = 0x60000 | (hasIndent ? 0x100000 : 0);
 
   return mkLineSeg(
     0,
@@ -799,6 +1117,78 @@ function buildDefaultLineSeg(
     availWidthHwp,
     flags,
   );
+}
+
+function buildObjectLineSeg(
+  availWidthHwp: number,
+  objectHeightHwp: number,
+  vertPos = 0,
+): Uint8Array {
+  const vertSize = Math.max(1, objectHeightHwp);
+  const spacing = Math.max(0, safeParaLineAdvanceHwp(undefined, 1000) - 1000);
+  return mkLineSeg(
+    0,
+    vertPos,
+    vertSize,
+    vertSize,
+    Math.round(vertSize * 0.85),
+    spacing,
+    0,
+    availWidthHwp,
+    0x60000,
+  );
+}
+
+function buildParaLineSegs(
+  text: string,
+  availWidthHwp: number,
+  fontHwp: number,
+  paraProps: ParaProps | undefined,
+  vertPos: number,
+  textPosOffset = 0,
+  pageBodyHeightHwp?: number,
+): { data: Uint8Array; count: number; totalHeight: number } {
+  const starts = lineStartPositionsHwp(text, fontHwp, availWidthHwp);
+  const lineAdvance = safeParaLineAdvanceHwp(paraProps, fontHwp);
+  const vertSize = fontHwp;
+  const spacing = Math.max(0, lineAdvance - vertSize);
+  const baseline = Math.round(fontHwp * 0.85);
+  const hasIndent = (paraProps?.firstLineIndentPt ?? 0) !== 0;
+  let nextLineVertPos =
+    vertPos + Metric.ptToHwp(Math.max(0, paraProps?.spaceBefore ?? 0));
+  const segments = starts.map((start, index) => {
+    if (
+      pageBodyHeightHwp !== undefined &&
+      nextLineVertPos > 0 &&
+      nextLineVertPos + lineAdvance > pageBodyHeightHwp
+    ) {
+      nextLineVertPos = 0;
+    }
+    const lineVertPos = nextLineVertPos;
+    nextLineVertPos += lineAdvance;
+    const flags =
+      0x60000 |
+      (index === 0 && hasIndent ? 0x100000 : 0);
+    return mkLineSeg(
+      index === 0 ? 0 : textPosOffset + start,
+      lineVertPos,
+      vertSize,
+      fontHwp,
+      baseline,
+      spacing,
+      0,
+      availWidthHwp,
+      flags,
+    );
+  });
+  return {
+    data: concatU8(segments),
+    count: segments.length,
+    totalHeight:
+      Metric.ptToHwp(Math.max(0, paraProps?.spaceBefore ?? 0)) +
+      segments.length * lineAdvance +
+      Metric.ptToHwp(Math.max(0, paraProps?.spaceAfter ?? 0)),
+  };
 }
 
 function mkSecdParaText(): Uint8Array {
@@ -814,6 +1204,38 @@ function mkSecdParaText(): Uint8Array {
     .u16(0)
     .u16(0x0002)
     .u16(0x000d)
+    .build();
+}
+
+function mkSectionAndColumnParaText(): Uint8Array {
+  return new BufWriter()
+    .bytes(mkSectionAndColumnParaTextPrefix())
+    .u16(0x000d)
+    .build();
+}
+
+function mkSectionAndColumnParaTextPrefix(): Uint8Array {
+  const secdLo = CTRL_SECD & 0xffff;
+  const secdHi = (CTRL_SECD >>> 16) & 0xffff;
+  const coldLo = CTRL_COLD & 0xffff;
+  const coldHi = (CTRL_COLD >>> 16) & 0xffff;
+  return new BufWriter()
+    .u16(0x0002)
+    .u16(secdLo)
+    .u16(secdHi)
+    .u16(0)
+    .u16(0)
+    .u16(0)
+    .u16(0)
+    .u16(0x0002)
+    .u16(0x0002)
+    .u16(coldLo)
+    .u16(coldHi)
+    .u16(0)
+    .u16(0)
+    .u16(0)
+    .u16(0)
+    .u16(0x0002)
     .build();
 }
 
@@ -834,8 +1256,8 @@ function mkTableParaText(): Uint8Array {
 }
 
 function mkPicParaText(): Uint8Array {
-  const lo = CTRL_PIC & 0xffff;
-  const hi = (CTRL_PIC >>> 16) & 0xffff;
+  const lo = CTRL_GSO & 0xffff;
+  const hi = (CTRL_GSO >>> 16) & 0xffff;
   return new BufWriter()
     .u16(0x000b)
     .u16(lo)
@@ -862,18 +1284,78 @@ interface ImgLayout {
   distB?: number;
 }
 
+function imageDisplaySizeHwp(
+  imgNode: ImgNode,
+  maxWidthHwp: number,
+  maxHeightHwp = Number.MAX_SAFE_INTEGER,
+): { w: number; h: number } {
+  const rawData = TextKit.base64Decode(imgNode.b64);
+  const pixDims = readPixelDims(rawData, imgNode.mime);
+  const sourceW = pixDims?.w ? Metric.ptToHwp((pixDims.w * 72) / 96) : Metric.ptToHwp(72);
+  const sourceH = pixDims?.h ? Metric.ptToHwp((pixDims.h * 72) / 96) : Metric.ptToHwp(72);
+  let w = Number.isFinite(imgNode.w) && imgNode.w > 0 ? Metric.ptToHwp(imgNode.w) : sourceW;
+  let h = Number.isFinite(imgNode.h) && imgNode.h > 0 ? Metric.ptToHwp(imgNode.h) : sourceH;
+  const scale = Math.min(
+    1,
+    Math.max(1, maxWidthHwp) / Math.max(1, w),
+    Math.max(1, maxHeightHwp) / Math.max(1, h),
+  );
+  w = Math.max(1, Math.round(w * scale));
+  h = Math.max(1, Math.round(h * scale));
+  return { w, h };
+}
+
+function writeIdentityMatrix(w: BufWriter): void {
+  w.f64(1).f64(0).f64(0).f64(0).f64(1).f64(0);
+}
+
+/** HWP 5.0 spec tables 82-85: $pic shape component + three matrices. */
+function mkShapeComponent(wHwp: number, hHwp: number): Uint8Array {
+  const w = new BufWriter()
+    .u32(CTRL_PIC)
+    .u32(CTRL_PIC) // GenShapeObject records store the id twice
+    .i32(0)
+    .i32(0)
+    .u16(0)
+    .u16(1)
+    .u32(wHwp)
+    .u32(hHwp)
+    .u32(wHwp)
+    .u32(hHwp)
+    .u32(0)
+    .u16(0)
+    .i32(Math.round(wHwp / 2))
+    .i32(Math.round(hHwp / 2))
+    .u16(1);
+  writeIdentityMatrix(w);
+  writeIdentityMatrix(w);
+  writeIdentityMatrix(w);
+  return w.build();
+}
+
 function mkShapeComponentPicture(
   binDataId: number,
   wHwp: number,
   hHwp: number,
+  instanceId: number,
 ): Uint8Array {
-  const w = new BufWriter();
-  w.u32(CTRL_PIC).zeros(15);
-  w.u32(0).u32(0).u32(wHwp).u32(hHwp);
-  w.u32(0).u32(0).u32(wHwp).u32(hHwp);
-  w.zeros(36);
-  w.u16(binDataId).u8(0).u8(0).u8(0).zeros(5);
-  return w.build();
+  return new BufWriter()
+    .u32(0) // border color
+    .i32(0) // border thickness
+    .u32(0) // border attributes
+    // Four image rectangle points, serialized as x/y pairs.
+    .i32(0).i32(0)
+    .i32(wHwp).i32(0)
+    .i32(wHwp).i32(hHwp)
+    .i32(0).i32(hHwp)
+    .i32(0).i32(0).i32(wHwp).i32(hHwp) // crop rectangle
+    .u16(0).u16(0).u16(0).u16(0) // inner margins
+    .u8(0).u8(0).u8(0).u16(binDataId) // picture info
+    .u8(0) // border alpha
+    .u32(instanceId)
+    .u32(0) // no picture effects
+    .u32(wHwp).u32(hHwp).u8(0) // 5.1 source dimensions / alpha
+    .build();
 }
 
 function mkObjectCtrl(
@@ -884,7 +1366,7 @@ function mkObjectCtrl(
   layout?: ImgLayout,
 ): Uint8Array {
   let attr = 0x082a2210;
-  if (layout?.wrap === "inline") attr |= 1 << 3;
+  if (!layout || layout.wrap === "inline") attr |= 1 | (1 << 2);
   return new BufWriter()
     .u32(ctrlId)
     .u32(attr)
@@ -935,25 +1417,15 @@ function encodePicPara(
   lv: number,
   idGen: () => number,
   availWidthHwp: number,
+  divideSort = 0,
+  vertPos = 0,
+  maxHeightHwp = Number.MAX_SAFE_INTEGER,
 ): Uint8Array[] {
-  // ANYTOHWP 방식: 픽셀 치수 추출 시도 → 실패 시 pt 기반으로 폴백
-  const rawData = TextKit.base64Decode(imgNode.b64);
-  const pixDims = readPixelDims(rawData, imgNode.mime);
-
-  let wHwp: number, hHwp: number;
-  if (pixDims && pixDims.w > 0 && pixDims.h > 0) {
-    wHwp = Metric.ptToHwp((pixDims.w * 72) / 96); // px → pt(96dpi) → hwpunit
-    hHwp = Metric.ptToHwp((pixDims.h * 72) / 96);
-  } else {
-    wHwp = Metric.ptToHwp(imgNode.w);
-    hHwp = Metric.ptToHwp(imgNode.h);
-  }
-
-  // 가용 너비 초과 방지
-  if (wHwp > availWidthHwp) {
-    hHwp = Math.round((hHwp * availWidthHwp) / wHwp);
-    wHwp = availWidthHwp;
-  }
+  const { w: wHwp, h: hHwp } = imageDisplaySizeHwp(
+    imgNode,
+    availWidthHwp,
+    maxHeightHwp,
+  );
 
   const CTRL_MASK = 1 << 11;
   const instanceId = idGen();
@@ -963,24 +1435,29 @@ function encodePicPara(
     mkRec(
       TAG_PARA_HEADER,
       lv,
-      mkParaHeader(9, CTRL_MASK, psId, 1, 1, instanceId),
+      mkParaHeader(9, CTRL_MASK, psId, 1, 1, instanceId, 0, divideSort),
     ),
     mkRec(TAG_PARA_TEXT, lv + 1, mkPicParaText()),
     mkRec(TAG_PARA_CHAR_SHAPE, lv + 1, mkParaCharShape([[0, 0]])),
     mkRec(
       TAG_PARA_LINE_SEG,
       lv + 1,
-      buildDefaultLineSeg(availWidthHwp, hHwp, 9),
+      buildObjectLineSeg(availWidthHwp, hHwp, vertPos),
     ),
     mkRec(
       TAG_CTRL_HEADER,
       lv + 1,
-      mkObjectCtrl(CTRL_PIC, wHwp, hHwp, idGen(), imgNode.layout),
+      mkObjectCtrl(CTRL_GSO, wHwp, hHwp, idGen(), imgNode.layout),
+    ),
+    mkRec(
+      TAG_SHAPE_COMPONENT,
+      lv + 2,
+      mkShapeComponent(wHwp, hHwp),
     ),
     mkRec(
       TAG_SHAPE_COMPONENT_PICTURE,
-      lv + 2,
-      mkShapeComponentPicture(binDataId, wHwp, hHwp),
+      lv + 3,
+      mkShapeComponentPicture(binDataId, wHwp, hHwp, idGen()),
     ),
   ];
 }
@@ -995,23 +1472,15 @@ function encodePara(
   availWidthHwp: number,
   mask = 0,
   vertPos = 0,
+  divideSortOverride = 0,
+  sectionPrefix?: { dims: PageDims },
+  pageBodyHeightHwp?: number,
 ): Uint8Array[] {
   let text = "";
   const csPairs: [number, number][] = [];
   let pos = 0;
-  let fontHwp = 1000;
+  const fontHwp = maxFontHwpInPara(para);
   const ctrlRecords: Uint8Array[] = [];
-
-  for (const kid of para.kids) {
-    if (
-      kid.tag === "span" &&
-      (kid as SpanNode).props.pt &&
-      ((kid as SpanNode).props.pt as number) > 0
-    ) {
-      fontHwp = Metric.ptToHwp((kid as SpanNode).props.pt as number);
-      break;
-    }
-  }
 
   // 내부적으로 사용되는 ID 생성기 (단락 내에서 로컬하게 사용)
   let localIdCounter = 10000;
@@ -1029,6 +1498,9 @@ function encodePara(
           if (t.tag === "txt") {
             text += t.content;
             pos += t.content.length;
+          } else if (t.tag === "br") {
+            text += "\n";
+            pos += 1;
           }
         }
       } else if (kid.tag === "link") {
@@ -1056,24 +1528,64 @@ function encodePara(
     }
   }
   processKids(para.kids);
+  if (sectionPrefix && text.length === 0) text = " ";
   if (!csPairs.length) csPairs.push([0, 0]);
 
   const psId = bank.addParaShape(para.props);
-  const nchars = text.length + 1;
+  const styleId = hwpStyleIdForPara(para.props) ?? 0;
+  const divideSort = divideSortOverride || (paraHasPageBreak(para.kids) ? 4 : 0);
+  const sectionCharCount = sectionPrefix ? 16 : 0;
+  const effectiveMask = sectionPrefix ? mask | (1 << 2) : mask;
+  const effectiveDivideSort = sectionPrefix ? divideSort | 3 : divideSort;
+  const effectiveCsPairs: [number, number][] = sectionPrefix
+    ? [
+        [0, 0],
+        ...csPairs.map(([p, id]) => [p + sectionCharCount, id] as [number, number]),
+      ]
+    : csPairs;
+  const paraTextData = sectionPrefix
+    ? new BufWriter()
+        .bytes(mkSectionAndColumnParaTextPrefix())
+        .bytes(mkParaText(text))
+        .build()
+    : mkParaText(text);
+  const sectionRecords = sectionPrefix
+    ? buildSectionControlRecords(sectionPrefix.dims, lv + 1)
+    : [];
+  const nchars = sectionCharCount + text.length + 1;
+  const lineSegs = buildParaLineSegs(
+    text,
+    availWidthHwp,
+    fontHwp,
+    para.props,
+    vertPos,
+    sectionCharCount,
+    pageBodyHeightHwp,
+  );
 
   return [
     mkRec(
       TAG_PARA_HEADER,
       lv,
-      mkParaHeader(nchars, mask, psId, csPairs.length, 1, instanceId),
+      mkParaHeader(
+        nchars,
+        effectiveMask,
+        psId,
+        effectiveCsPairs.length,
+        lineSegs.count,
+        instanceId,
+        styleId,
+        effectiveDivideSort,
+      ),
     ),
-    mkRec(TAG_PARA_TEXT, lv + 1, mkParaText(text)),
-    mkRec(TAG_PARA_CHAR_SHAPE, lv + 1, mkParaCharShape(csPairs)),
+    mkRec(TAG_PARA_TEXT, lv + 1, paraTextData),
+    mkRec(TAG_PARA_CHAR_SHAPE, lv + 1, mkParaCharShape(effectiveCsPairs)),
     mkRec(
       TAG_PARA_LINE_SEG,
       lv + 1,
-      buildDefaultLineSeg(availWidthHwp, fontHwp, nchars, para.props, vertPos),
+      lineSegs.data,
     ),
+    ...sectionRecords,
     ...ctrlRecords,
   ];
 }
@@ -1110,13 +1622,22 @@ function mkTableCtrl(
 function mkTableRecord(
   rowCnt: number,
   colCnt: number,
-  rowHwp: number[],
+  cellCountPerRow: number[],
   bfId: number,
+  repeatHeader: boolean,
+  padL: number,
+  padR: number,
+  padT: number,
+  padB: number,
 ): Uint8Array {
   const w = new BufWriter();
-  w.u32(0x04000006).u16(rowCnt).u16(colCnt).u16(0);
-  w.u16(510).u16(510).u16(141).u16(141);
-  for (const h of rowHwp) w.u16(Math.max(1, h & 0xffff));
+  // Spec table 76: bits 0-1 = 1 permits page breaks at cell boundaries.
+  w.u32(0x04000001 | (repeatHeader ? 1 << 2 : 0))
+    .u16(rowCnt)
+    .u16(colCnt)
+    .u16(0);
+  w.u16(padL).u16(padR).u16(padT).u16(padB);
+  for (const count of cellCountPerRow) w.u16(Math.max(1, count & 0xffff));
   w.u16(bfId).u16(0);
   return w.build();
 }
@@ -1134,15 +1655,17 @@ function mkCellListHeader(
   padR = 141,
   padT = 141,
   padB = 141,
+  va?: CellProps["va"],
 ): Uint8Array {
+  const verticalAlign = va === "mid" ? 1 : va === "bot" ? 2 : 0;
   return new BufWriter()
     .u16(paraCount)
-    .u32(0)
     .u16(0)
+    .u32(verticalAlign << 5)
     .u16(col)
     .u16(row)
-    .u16(rs)
     .u16(cs)
+    .u16(rs)
     .u32(wHwp)
     .u32(hHwp)
     .u16(padL)
@@ -1162,33 +1685,72 @@ function encodeGrid(
   lv: number,
   idGen: () => number,
   availWidthHwp: number,
+  images: BinImage[],
 ): Uint8Array[] {
   const records: Uint8Array[] = [];
   const rowCnt = grid.kids.length;
-  const colCnt = Math.max(1, grid.kids[0]?.kids.length ?? 1);
+  const colCnt = Math.max(
+    1,
+    ...grid.kids.map((row: any) =>
+      row.kids.reduce(
+        (sum: number, cell: any) => sum + Math.max(1, cell.cs ?? 1),
+        0,
+      ),
+    ),
+  );
 
-  const cwPt = (grid.props as any).colWidths ?? [];
-  const totalPt = cwPt.reduce((s: number, w: number) => s + w, 0) || 453;
-  const defColPt = totalPt / colCnt;
+  const sourceWidthsHwp = ((grid.props as any).colWidths ?? []).map(
+    (width: number) => width > 0 ? Metric.ptToHwp(width) : 0,
+  );
+  const colWidthsHwp = fitColumnWidths(
+    sourceWidthsHwp,
+    colCnt,
+    availWidthHwp,
+    Math.min(100, Math.floor(availWidthHwp / colCnt)),
+  );
   const defStroke = grid.props.defaultStroke ?? bank.DEF_STROKE;
   const defBfId = bank.addBorderFill(defStroke);
+  const tablePadL = Metric.ptToHwp(grid.props.cellPadL ?? 5.1);
+  const tablePadR = Metric.ptToHwp(grid.props.cellPadR ?? 5.1);
+  const tablePadT = Metric.ptToHwp(grid.props.cellPadT ?? 1.41);
+  const tablePadB = Metric.ptToHwp(grid.props.cellPadB ?? 1.41);
 
-  const rowHwp = grid.kids.map((row: any) =>
-    row.heightPt != null && row.heightPt > 0
-      ? Metric.ptToHwp(row.heightPt)
-      : Metric.ptToHwp(DEFAULT_ROW_HEIGHT_PT),
+  const rowHwp = grid.kids.map((row: any) => {
+    const base =
+      row.heightPt != null && row.heightPt > 0
+        ? Metric.ptToHwp(row.heightPt)
+        : Metric.ptToHwp(DEFAULT_ROW_HEIGHT_PT);
+    let minRow = 0;
+    let logicalCol = 0;
+    for (const cell of row.kids ?? []) {
+      const cs = Math.max(1, cell.cs ?? 1);
+      let cellWidthHwp = 0;
+      for (let sc = logicalCol; sc < logicalCol + cs; sc++) {
+        cellWidthHwp += colWidthsHwp[sc] ?? 0;
+      }
+      if (cellWidthHwp <= 0) cellWidthHwp = Math.floor(availWidthHwp / colCnt) * cs;
+      const cp = cell.props ?? {};
+      const padL = cp.padL !== undefined ? Metric.ptToHwp(cp.padL) : tablePadL;
+      const padR = cp.padR !== undefined ? Metric.ptToHwp(cp.padR) : tablePadR;
+      const innerWidthHwp = Math.max(
+        100,
+        cellWidthHwp - padL - padR,
+      );
+      const span = Math.max(1, cell.rs ?? 1);
+      minRow = Math.max(
+        minRow,
+        Math.ceil(minCellHeightHwp(cell, innerWidthHwp) / span),
+      );
+      logicalCol += cs;
+    }
+    return Math.max(base, minRow);
+  });
+  const cellCountPerRow = grid.kids.map((row: any) =>
+    Math.max(1, row.kids.length),
   );
 
-  const tblWPt =
-    cwPt.length > 0 ? cwPt.reduce((s: number, w: number) => s + w, 0) : totalPt;
-  const tblHPt = grid.kids.reduce(
-    (s: number, row: any) =>
-      s +
-      (row.heightPt != null && row.heightPt > 0
-        ? row.heightPt
-        : DEFAULT_ROW_HEIGHT_PT),
-    0,
-  );
+  const tblWidthHwp = colWidthsHwp.reduce((sum, width) => sum + width, 0);
+  const tblHwp = rowHwp.reduce((s: number, h: number) => s + h, 0);
   const tblInstanceId = idGen();
   const tblAlign = grid.props.align ?? "left";
 
@@ -1197,22 +1759,44 @@ function encodeGrid(
       TAG_CTRL_HEADER,
       lv,
       mkTableCtrl(
-        Metric.ptToHwp(tblWPt),
-        Metric.ptToHwp(tblHPt),
+        tblWidthHwp,
+        tblHwp,
         tblInstanceId,
         tblAlign,
       ),
     ),
   );
   records.push(
-    mkRec(TAG_TABLE, lv + 1, mkTableRecord(rowCnt, colCnt, rowHwp, defBfId)),
+    mkRec(
+      TAG_TABLE,
+      lv + 1,
+      mkTableRecord(
+        rowCnt,
+        colCnt,
+        cellCountPerRow,
+        defBfId,
+        !!grid.props.headerRow,
+        tablePadL,
+        tablePadR,
+        tablePadT,
+        tablePadB,
+      ),
+    ),
   );
 
   for (let r = 0; r < grid.kids.length; r++) {
+    let logicalCol = 0;
     for (let c = 0; c < grid.kids[r].kids.length; c++) {
       const cell = grid.kids[r].kids[c];
-      const wHwp = Metric.ptToHwp(cwPt[c] ?? defColPt);
-      const hHwp = rowHwp[r];
+      const cs = Math.max(1, cell.cs ?? 1);
+      let wHwp = 0;
+      for (let sc = logicalCol; sc < logicalCol + cs; sc++) {
+        wHwp += colWidthsHwp[sc] ?? 0;
+      }
+      if (wHwp <= 0) wHwp = Math.floor(availWidthHwp / colCnt) * cs;
+      const hHwp = rowHwp
+        .slice(r, Math.min(rowHwp.length, r + Math.max(1, cell.rs ?? 1)))
+        .reduce((sum, height) => sum + height, 0);
       const cp = cell.props;
       const hasPerSide = cp.top || cp.bot || cp.left || cp.right;
       const bfId = hasPerSide
@@ -1225,26 +1809,34 @@ function encodeGrid(
           )
         : bank.addBorderFill(defStroke, cp.bg);
 
-      const paras =
+      const cellKids =
         cell.kids.length > 0
           ? cell.kids
           : [{ tag: "para" as const, props: {}, kids: [] }];
 
-      const padL = cp.padL !== undefined ? Metric.ptToHwp(cp.padL) : 510;
-      const padR = cp.padR !== undefined ? Metric.ptToHwp(cp.padR) : 510;
-      const padT = cp.padT !== undefined ? Metric.ptToHwp(cp.padT) : 141;
-      const padB = cp.padB !== undefined ? Metric.ptToHwp(cp.padB) : 141;
+      const padL = cp.padL !== undefined ? Metric.ptToHwp(cp.padL) : tablePadL;
+      const padR = cp.padR !== undefined ? Metric.ptToHwp(cp.padR) : tablePadR;
+      const padT = cp.padT !== undefined ? Metric.ptToHwp(cp.padT) : tablePadT;
+      const padB = cp.padB !== undefined ? Metric.ptToHwp(cp.padB) : tablePadB;
+      const encodedCellParagraphs = cellKids.reduce((count: number, kid: any) => {
+        if (kid.tag === "grid") return count + 1;
+        const paraImages = flatImgNodes(kid.kids).filter((img) =>
+          images.some((bin) => b64Matches(bin, img.b64)),
+        );
+        const textKids = kid.kids.filter((child: any) => child.tag !== "img");
+        return count + paraImages.length + (textKids.length > 0 || paraImages.length === 0 ? 1 : 0);
+      }, 0);
 
       records.push(
         mkRec(
           TAG_LIST_HEADER,
           lv + 1,
           mkCellListHeader(
-            paras.length,
+            Math.max(1, encodedCellParagraphs),
             r,
-            c,
+            logicalCol,
             cell.rs,
-            cell.cs,
+            cs,
             wHwp,
             hHwp,
             bfId,
@@ -1252,16 +1844,75 @@ function encodeGrid(
             padR,
             padT,
             padB,
+            cp.va,
           ),
         ),
       );
 
-      const cellWidthHwp = Metric.ptToHwp(cwPt[c] ?? defColPt);
-      for (const para of paras) {
-        records.push(
-          ...encodePara(para as ParaNode, bank, lv + 1, idGen(), cellWidthHwp),
-        );
+      const cellWidthHwp = Math.max(100, wHwp - padL - padR);
+      let cellVertPos = 0;
+      for (const kid of cellKids) {
+        if (kid.tag === "grid") {
+          const nestedGridHeight = minGridHeightHwp(kid);
+          records.push(
+            mkRec(
+              TAG_PARA_HEADER,
+              lv + 1,
+              mkParaHeader(9, TABLE_CTRL_MASK, 0, 1, 1, idGen()),
+            ),
+          );
+          records.push(mkRec(TAG_PARA_TEXT, lv + 2, mkTableParaText()));
+          records.push(
+            mkRec(TAG_PARA_CHAR_SHAPE, lv + 2, mkParaCharShape([[0, 0]])),
+          );
+          records.push(
+            mkRec(
+              TAG_PARA_LINE_SEG,
+              lv + 2,
+              buildObjectLineSeg(cellWidthHwp, nestedGridHeight, cellVertPos),
+            ),
+          );
+          records.push(...encodeGrid(kid, bank, lv + 2, idGen, cellWidthHwp, images));
+          cellVertPos += nestedGridHeight + Metric.ptToHwp(6);
+        } else {
+          const para = kid as ParaNode;
+          const paraImages = flatImgNodes(para.kids);
+          for (const img of paraImages) {
+            const binImg = images.find((bin) => b64Matches(bin, img.b64));
+            if (!binImg) continue;
+            records.push(
+              ...encodePicPara(
+                img,
+                binImg.id,
+                bank,
+                lv + 1,
+                idGen,
+                cellWidthHwp,
+                0,
+                cellVertPos,
+              ),
+            );
+            cellVertPos += imageDisplaySizeHwp(img, cellWidthHwp).h;
+          }
+          const textKids = para.kids.filter((child: any) => child.tag !== "img");
+          if (textKids.length > 0 || paraImages.length === 0) {
+            const textPara: ParaNode = { ...para, kids: textKids as any };
+            records.push(
+              ...encodePara(
+                textPara,
+                bank,
+                lv + 1,
+                idGen(),
+                cellWidthHwp,
+                0,
+                cellVertPos,
+              ),
+            );
+            cellVertPos += minParaHeightHwp(textPara, cellWidthHwp);
+          }
+        }
       }
+      logicalCol += cs;
     }
   }
   return records;
@@ -1272,10 +1923,63 @@ function mkSectionCtrl(): Uint8Array {
     .u32(CTRL_SECD)
     .u32(0)
     .u32(1134)
-    .u16(0x4000)
-    .u16(0x001f)
+    .u32(0x1f400000)
     .zeros(31)
     .build(); // 47 bytes
+}
+
+function mkColumnDefCtrl(): Uint8Array {
+  return new BufWriter()
+    .u32(CTRL_COLD)
+    .u32(0x00001004)
+    .u32(0)
+    .u32(0)
+    .build();
+}
+
+function mkPageBorderFill(): Uint8Array {
+  return new BufWriter()
+    .u32(1)
+    .u16(1417)
+    .u16(1417)
+    .u16(1417)
+    .u16(1417)
+    .u16(1)
+    .build();
+}
+
+const SECTION_CTRL_DATA_HEX =
+  "1b020100000019020080190203000000024009000100000000400900000000006602008066020f000000094001800a00" +
+  "000005000000000005006400000005000000000005000000000005000000000005000000000005000000000005000000" +
+  "0000050000000000050000000000084001800a00000005000000ff000500000000000500000000000500000000000500" +
+  "000000000500000000000500000000000500000000000500000000000500000000000a40060032000000074005000200" +
+  "000006400500640000000340050000000000054005000000000004400500320000000240050001000000014009000400" +
+  "00001e40028000002140020000000000224002000000000020400500000000002440050005000000";
+
+function bytesFromHex(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+function mkSectionCtrlData(): Uint8Array {
+  return bytesFromHex(SECTION_CTRL_DATA_HEX);
+}
+
+function buildSectionControlRecords(dims: PageDims, level: number): Uint8Array[] {
+  return [
+    mkRec(TAG_CTRL_HEADER, level, mkSectionCtrl()),
+    mkRec(TAG_CTRL_DATA, level + 1, mkSectionCtrlData()),
+    mkRec(TAG_PAGE_DEF, level + 1, mkPageDef(dims)),
+    mkRec(TAG_FOOTNOTE_SHAPE, level + 1, new Uint8Array(28)),
+    mkRec(TAG_FOOTNOTE_SHAPE, level + 1, new Uint8Array(28)),
+    mkRec(TAG_PAGE_BORDER_FILL, level + 1, mkPageBorderFill()),
+    mkRec(TAG_PAGE_BORDER_FILL, level + 1, mkPageBorderFill()),
+    mkRec(TAG_PAGE_BORDER_FILL, level + 1, mkPageBorderFill()),
+    mkRec(TAG_CTRL_HEADER, level, mkColumnDefCtrl()),
+  ];
 }
 
 function buildSectionParagraph(
@@ -1283,7 +1987,7 @@ function buildSectionParagraph(
   instanceId: number,
 ): Uint8Array[] {
   const SECD_CTRL_MASK = 1 << 2;
-  const nchars = 9;
+  const nchars = 18;
   const availWidthHwp = Math.max(
     1000,
     Metric.ptToHwp(dims.wPt) -
@@ -1296,17 +2000,21 @@ function buildSectionParagraph(
       0,
       mkParaHeader(nchars, SECD_CTRL_MASK, 0, 1, 1, instanceId),
     ),
-    mkRec(TAG_PARA_TEXT, 1, mkSecdParaText()),
-    mkRec(TAG_PARA_CHAR_SHAPE, 1, mkParaCharShape([[0, 0]])),
+    mkRec(
+      TAG_PARA_TEXT,
+      1,
+      new BufWriter()
+        .bytes(mkSectionAndColumnParaTextPrefix())
+        .bytes(mkParaText(" "))
+        .build(),
+    ),
+    mkRec(TAG_PARA_CHAR_SHAPE, 1, mkParaCharShape([[0, 0], [16, 0]])),
     mkRec(
       TAG_PARA_LINE_SEG,
       1,
       buildDefaultLineSeg(availWidthHwp, 1000, nchars),
     ),
-    mkRec(TAG_CTRL_HEADER, 1, mkSectionCtrl()),
-    mkRec(TAG_PAGE_DEF, 2, mkPageDef(dims)),
-    mkRec(TAG_FOOTNOTE_SHAPE, 2, new Uint8Array(28)),
-    mkRec(TAG_FOOTNOTE_SHAPE, 2, new Uint8Array(28)),
+    ...buildSectionControlRecords(dims, 1),
   ];
 }
 
@@ -1320,6 +2028,16 @@ function flatImgNodes(kids: any[]): any[] {
       result.push(...flatImgNodes(kid.kids));
   }
   return result;
+}
+
+function paraHasPageBreak(kids: any[]): boolean {
+  return kids.some((kid) => {
+    if (kid?.tag === "span")
+      return (kid.kids ?? []).some((child: any) => child?.tag === "pb");
+    if (kid?.tag === "link" && Array.isArray(kid.kids))
+      return paraHasPageBreak(kid.kids);
+    return false;
+  });
 }
 
 function b64Matches(binImg: BinImage, b64: string): boolean {
@@ -1343,21 +2061,31 @@ function buildBodyTextStream(
       Metric.ptToHwp(dims.ml) -
       Metric.ptToHwp(dims.mr),
   );
+  const bodyHeightHwp = Math.max(
+    1000,
+    Metric.ptToHwp(dims.hPt) -
+      Metric.ptToHwp(dims.mt) -
+      Metric.ptToHwp(dims.mb),
+  );
 
-  for (const r of buildSectionParagraph(dims, idGen())) chunks.push(r);
-
-  const TABLE_CTRL_MASK = 1 << 11;
   let vertPos = 0; // 단락 간격 추적
+  let sectionWritten = false;
 
   for (const sheet of doc.kids) {
     for (const node of sheet.kids) {
       if (node.tag === "para") {
         const para = node as ParaNode;
 
-        const hasPageBreak = para.kids.some(
-          (k) => k.tag === "span" && k.kids.some((c) => c.tag === "pb"),
-        );
-        let paraMask = hasPageBreak ? 1 << 2 : 0;
+        const hasPageBreak = paraHasPageBreak(para.kids);
+        const paraDivideSort = hasPageBreak ? 4 : 0;
+        let paraMask = 0;
+        const paraHeight = minParaHeightHwp(para, availWidthHwp);
+        if (
+          hasPageBreak ||
+          (vertPos > 0 && vertPos + paraHeight > bodyHeightHwp)
+        ) {
+          vertPos = 0;
+        }
 
         // 코드 블록 감지 → 1×1 표로 감싸기
         const hasCourier = (kids: any[]): boolean =>
@@ -1372,6 +2100,10 @@ function buildBodyTextStream(
           hasCourier(para.kids);
 
         if (isCode) {
+          if (!sectionWritten) {
+            for (const r of buildSectionParagraph(dims, idGen())) chunks.push(r);
+            sectionWritten = true;
+          }
           const gridNode: GridNode = {
             tag: "grid",
             props: {
@@ -1393,11 +2125,13 @@ function buildBodyTextStream(
               },
             ],
           };
+          const gridHeight = minGridHeightHwp(gridNode);
+          if (vertPos > 0 && vertPos + gridHeight > bodyHeightHwp) vertPos = 0;
           chunks.push(
             mkRec(
               TAG_PARA_HEADER,
               0,
-              mkParaHeader(9, TABLE_CTRL_MASK | paraMask, 0, 1, 1, idGen()),
+              mkParaHeader(9, TABLE_CTRL_MASK | paraMask, 0, 1, 1, idGen(), 0, paraDivideSort),
             ),
           );
           chunks.push(mkRec(TAG_PARA_TEXT, 1, mkTableParaText()));
@@ -1406,20 +2140,38 @@ function buildBodyTextStream(
             mkRec(
               TAG_PARA_LINE_SEG,
               1,
-              buildDefaultLineSeg(availWidthHwp, 1000, 9, undefined, vertPos),
+              buildObjectLineSeg(availWidthHwp, gridHeight, vertPos),
             ),
           );
-          vertPos += Metric.ptToHwp(20); // 코드 블록 후 간격
-          for (const r of encodeGrid(gridNode, bank, 1, idGen, availWidthHwp))
+          for (const r of encodeGrid(gridNode, bank, 1, idGen, availWidthHwp, images))
             chunks.push(r);
+          vertPos += Math.max(Metric.ptToHwp(20), gridHeight + Metric.ptToHwp(6));
           continue;
         }
 
         const imgNodes = flatImgNodes(para.kids);
         if (imgNodes.length > 0) {
+          if (!sectionWritten) {
+            for (const r of buildSectionParagraph(dims, idGen())) chunks.push(r);
+            sectionWritten = true;
+          }
+          let appliedImageBreak = false;
           for (const img of imgNodes) {
             const binImg = images.find((b) => b64Matches(b, img.b64));
             if (binImg) {
+              const imageHeight = imageDisplaySizeHwp(
+                img,
+                availWidthHwp,
+                bodyHeightHwp,
+              ).h;
+              if (
+                vertPos > 0 &&
+                vertPos + imageHeight > bodyHeightHwp
+              ) {
+                vertPos = 0;
+              }
+              const imageDivideSort = !appliedImageBreak ? paraDivideSort : 0;
+              appliedImageBreak = true;
               for (const r of encodePicPara(
                 img,
                 binImg.id,
@@ -1427,22 +2179,25 @@ function buildBodyTextStream(
                 0,
                 idGen,
                 availWidthHwp,
+                imageDivideSort,
+                vertPos,
+                bodyHeightHwp,
               )) {
                 // 첫 레코드가 PARA_HEADER인 경우 페이지 브레이크 마스크 적용
                 chunks.push(r);
               }
-              vertPos += Metric.ptToHwp(img.h ?? 100); // 이미지 높이 추가
+              vertPos += imageHeight + Metric.ptToHwp(6);
             }
           }
-          const textKids = para.kids.filter(
-            (k: any) => k.tag !== "img" && k.tag !== "link",
-          );
+          const textKids = para.kids.filter((k: any) => k.tag !== "img");
           if (textKids.length > 0) {
             const textPara: ParaNode = {
               tag: "para",
               props: para.props,
               kids: textKids as any,
             };
+            const textHeight = minParaHeightHwp(textPara, availWidthHwp);
+            if (vertPos > 0 && vertPos + textHeight > bodyHeightHwp) vertPos = 0;
             for (const r of encodePara(
               textPara,
               bank,
@@ -1451,6 +2206,9 @@ function buildBodyTextStream(
               availWidthHwp,
               paraMask,
               vertPos,
+              imgNodes.length > 0 ? 0 : paraDivideSort,
+              undefined,
+              bodyHeightHwp,
             )) {
               // PARA_HEADER 레코드(목록의 첫 번째)에 마스크 적용
               if (r[0] === (TAG_PARA_HEADER & 0xff)) {
@@ -1460,21 +2218,12 @@ function buildBodyTextStream(
               chunks.push(r);
             }
             // 단락 높이 계산 및 vertPos 업데이트 (이미지/텍스트 혼합)
-            const fontHwp_img = (
-              textKids.find(
-                (k: any) => k.tag === "span" && k.props?.pt,
-              ) as SpanNode
-            )?.props.pt
-              ? Metric.ptToHwp(
-                  (
-                    textKids.find(
-                      (k: any) => k.tag === "span" && k.props?.pt,
-                    ) as SpanNode
-                  ).props.pt as number,
-                )
-              : 1000;
-            const lineSpacePct_img = Math.round((para.props.lineHeight ?? 1.6) * 100);
-            vertPos += Math.round((fontHwp_img * lineSpacePct_img) / 100);
+            vertPos = nextParaVertPosHwp(
+              textPara,
+              vertPos,
+              availWidthHwp,
+              bodyHeightHwp,
+            );
           }
         } else {
           for (const r of encodePara(
@@ -1485,28 +2234,27 @@ function buildBodyTextStream(
             availWidthHwp,
             paraMask,
             vertPos,
+            paraDivideSort,
+            !sectionWritten ? { dims } : undefined,
+            bodyHeightHwp,
           ))
             chunks.push(r);
+          sectionWritten = true;
           // 단락 높이 계산 및 vertPos 업데이트 (일반 단락)
-          const fontHwp_para = (
-            para.kids.find(
-              (k: any) => k.tag === "span" && k.props?.pt,
-            ) as SpanNode
-          )?.props.pt
-            ? Metric.ptToHwp(
-                (
-                  para.kids.find(
-                    (k: any) => k.tag === "span" && k.props?.pt,
-                  ) as SpanNode
-                ).props.pt as number,
-              )
-            : 1000;
-          const lineSpacePct_para = para.props.lineHeight
-            ? Math.round(para.props.lineHeight * 100)
-            : 160;
-          vertPos += Math.round((fontHwp_para * lineSpacePct_para) / 100);
+          vertPos = nextParaVertPosHwp(
+            para,
+            vertPos,
+            availWidthHwp,
+            bodyHeightHwp,
+          );
         }
       } else if (node.tag === "grid") {
+        if (!sectionWritten) {
+          for (const r of buildSectionParagraph(dims, idGen())) chunks.push(r);
+          sectionWritten = true;
+        }
+        const gridHeight = minGridHeightHwp(node as GridNode);
+        if (vertPos > 0 && vertPos + gridHeight > bodyHeightHwp) vertPos = 0;
         chunks.push(
           mkRec(
             TAG_PARA_HEADER,
@@ -1520,20 +2268,28 @@ function buildBodyTextStream(
           mkRec(
             TAG_PARA_LINE_SEG,
             1,
-            buildDefaultLineSeg(availWidthHwp, 1000, 9, undefined, vertPos),
+            buildObjectLineSeg(availWidthHwp, gridHeight, vertPos),
           ),
         );
-        vertPos += Metric.ptToHwp(20); // 표 후 간격
         for (const r of encodeGrid(
           node as GridNode,
           bank,
           1,
           idGen,
           availWidthHwp,
+          images,
         ))
           chunks.push(r);
+        vertPos += Math.max(
+          Metric.ptToHwp(20),
+          gridHeight + Metric.ptToHwp(6),
+        );
       }
     }
+  }
+
+  if (!sectionWritten) {
+    for (const r of buildSectionParagraph(dims, idGen())) chunks.push(r);
   }
 
   return concatU8(chunks);
@@ -1546,7 +2302,7 @@ function buildBodyTextStream(
  * 구조:
  *  0-15: 시그니처 "HWP Document File" (16 바이트)
  * 16-31: reserved (16 바이트)
- * 32-35: version (4 바이트, Little-Endian) - 0x05000300 = 5.0.3.0
+ * 32-35: version (4 바이트, Little-Endian) - 0x05010001 = 5.1.0.1
  * 36-39: flags (4 바이트, Little-Endian) - bit 0 = compressed, bit 1 = encrypted
  * 40-255: reserved (216 바이트)
  *
@@ -1565,8 +2321,10 @@ function buildHwpFileHeader(): Uint8Array {
 
   // 16-31: reserved (0 으로 초기화됨)
 
-  // 32-35: version (4 바이트, Little-Endian) - 0x05000300 = 5.0.3.0
-  dv.setUint32(32, 0x05000300, true);
+  // Record sizes (74-byte CHAR_SHAPE, 58-byte PARA_SHAPE) match HWP 5.1.0.1,
+  // so the declared version must agree — mismatched versions make 한글 reject
+  // the DocInfo stream ("알 수 없는 이유로 열 수 없음").
+  dv.setUint32(32, 0x05010001, true);
 
   // 36-39: flags (4 바이트, Little-Endian)
   // bit 0 = 1: compressed (압축됨)
@@ -1582,7 +2340,7 @@ function buildHwpFileHeader(): Uint8Array {
   if (new TextDecoder().decode(buf.subarray(0, sig.length)) !== sig) {
     throw new Error("FileHeader 시그니처 오류");
   }
-  if (dv.getUint32(32, true) !== 0x05000300) {
+  if (dv.getUint32(32, true) !== 0x05010001) {
     throw new Error("FileHeader 버전 오류");
   }
 
@@ -1602,6 +2360,7 @@ function buildHwpOle2(
   const ENDOFCHAIN = 0xfffffffe;
   const FREESECT = 0xffffffff;
   const FATSECT = 0xfffffffd;
+  const DIFSECT = 0xfffffffc;
 
   // FileHeader 크기 검증
   if (fileHeaderData.length < 256) {
@@ -1639,9 +2398,18 @@ function buildHwpOle2(
     isMini: section0Data.length < 4096,
   });
 
+  const prvTextDirIdx = binImages.length > 0 ? 6 + binImages.length : 5;
+  const prvTextData = new BufWriter().utf16("HWPKit Preview\r\n").build();
+  streams.push({
+    name: "PrvText",
+    data: prvTextData,
+    dirIdx: prvTextDirIdx,
+    isMini: prvTextData.length < 4096,
+  });
+
   for (let i = 0; i < binImages.length; i++) {
     const img = binImages[i];
-    const name = `BIN${String(img.id).padStart(4, "0")}.${img.ext}`;
+    const name = `BIN${img.id.toString(16).toUpperCase().padStart(4, "0")}.${img.ext}`;
     streams.push({
       name,
       data: img.data,
@@ -1695,7 +2463,8 @@ function buildHwpOle2(
   const regNs = regPads.map((p) => p.length / SS);
 
   // 디렉토리 섹터 크기 결정 (엔트리 개수 비례)
-  const numDirEntries = 5 + (binImages.length > 0 ? 1 + binImages.length : 0);
+  const numDirEntries =
+    6 + (binImages.length > 0 ? 1 + binImages.length : 0);
   const dirN = Math.max(1, Math.ceil((numDirEntries * 128) / SS));
 
   // Mini FAT 섹터 크기 결정 (1 섹터당 128개 FAT 엔트리 수용)
@@ -1704,22 +2473,25 @@ function buildHwpOle2(
   // Mini Stream을 위한 정규 섹터 크기 결정
   const miniStreamN = Math.ceil(miniStreamData.length / SS);
 
-  // 정규 FAT 섹터 수 (fatN) 계산 루프
+  // FAT/DIFAT 섹터 수도 FAT가 주소화해야 하므로 함께 고정점 계산한다.
   const totalRegStreamN = regNs.reduce((a, b) => a + b, 0);
   const neededDataSec = dirN + miniFatN + miniStreamN + totalRegStreamN;
 
   let fatN = 1;
-  for (let iter = 0; iter < 10; iter++) {
-    const totalSec = fatN + neededDataSec;
-    const neededFat = Math.ceil(totalSec / 128);
-    if (neededFat <= fatN) break;
-    fatN = neededFat;
+  let difatN = 0;
+  for (let iter = 0; iter < 100; iter++) {
+    const nextFatN = Math.ceil((neededDataSec + fatN + difatN) / 128);
+    const nextDifatN = Math.ceil(Math.max(0, nextFatN - 109) / 127);
+    if (nextFatN === fatN && nextDifatN === difatN) break;
+    fatN = nextFatN;
+    difatN = nextDifatN;
   }
 
-  const totalSec = fatN + neededDataSec;
+  const totalSec = fatN + difatN + neededDataSec;
 
   // 각 정규 섹터 영역의 시작 위치 할당
-  const dirStartSec = fatN;
+  const difatStartSec = fatN;
+  const dirStartSec = difatStartSec + difatN;
   const miniFatStartSec = dirStartSec + dirN;
   const miniStreamStartSec = miniFatStartSec + miniFatN;
 
@@ -1742,6 +2514,10 @@ function buildHwpOle2(
   // FAT 섹터 자신 표시
   for (let i = 0; i < fatN; i++) {
     setFat(i, FATSECT);
+  }
+
+  for (let i = 0; i < difatN; i++) {
+    setFat(difatStartSec + i, DIFSECT);
   }
 
   // Directory 섹터 체인 연결
@@ -1796,6 +2572,27 @@ function buildHwpOle2(
     setMiniFat(i, miniSectorList[i]);
   }
 
+  // Header DIFAT에는 109개만 들어간다. 나머지 FAT sector id를 DIFAT
+  // sector당 127개씩 기록하고 마지막 DWORD로 다음 DIFAT sector를 잇는다.
+  const difatBuf = new Uint8Array(difatN * SS).fill(0xff);
+  const difatView = new DataView(difatBuf.buffer);
+  for (let i = 0; i < difatN; i++) {
+    const base = i * SS;
+    for (let j = 0; j < 127; j++) {
+      const fatSectorId = 109 + i * 127 + j;
+      difatView.setUint32(
+        base + j * 4,
+        fatSectorId < fatN ? fatSectorId : FREESECT,
+        true,
+      );
+    }
+    difatView.setUint32(
+      base + 127 * 4,
+      i + 1 < difatN ? difatStartSec + i + 1 : ENDOFCHAIN,
+      true,
+    );
+  }
+
   // 디렉토리 버퍼 생성
   const dirBuf = new Uint8Array(dirN * SS);
   const dv = new DataView(dirBuf.buffer);
@@ -1804,6 +2601,7 @@ function buildHwpOle2(
     idx: number,
     name: string,
     type: number,
+    color: number,
     left: number,
     right: number,
     child: number,
@@ -1818,12 +2616,127 @@ function buildHwpOle2(
     }
     dv.setUint16(base + 64, (nl + 1) * 2, true);
     dirBuf[base + 66] = type;
-    dirBuf[base + 67] = 1; // DE_NODE (블랙 노드)
+    dirBuf[base + 67] = color;
     dv.setInt32(base + 68, left, true);
     dv.setInt32(base + 72, right, true);
     dv.setInt32(base + 76, child, true);
     dv.setUint32(base + 116, startSec >>> 0, true);
     dv.setUint32(base + 120, size >>> 0, true);
+  }
+
+  function cfbNameCompare(a: string, b: string): number {
+    if (a.length !== b.length) return a.length - b.length;
+    const au = a.toUpperCase();
+    const bu = b.toUpperCase();
+    return au < bu ? -1 : au > bu ? 1 : 0;
+  }
+
+  function buildSiblingTree(nodes: Array<{ idx: number; name: string }>): {
+    root: number;
+    links: Map<number, { left: number; right: number }>;
+    colors: Map<number, number>;
+  } {
+    const links = new Map<number, { left: number; right: number }>();
+    const colors = new Map<number, number>(); // 0=red, 1=black
+    const parents = new Map<number, number>();
+    const names = new Map(nodes.map((node) => [node.idx, node.name]));
+    let root = -1;
+
+    const colorOf = (idx: number): number =>
+      idx < 0 ? 1 : (colors.get(idx) ?? 1);
+    const parentOf = (idx: number): number => parents.get(idx) ?? -1;
+    const leftOf = (idx: number): number => links.get(idx)?.left ?? -1;
+    const rightOf = (idx: number): number => links.get(idx)?.right ?? -1;
+
+    const rotateLeft = (x: number): void => {
+      const y = rightOf(x);
+      if (y < 0) return;
+      links.get(x)!.right = leftOf(y);
+      if (leftOf(y) >= 0) parents.set(leftOf(y), x);
+      const xp = parentOf(x);
+      parents.set(y, xp);
+      if (xp < 0) root = y;
+      else if (x === leftOf(xp)) links.get(xp)!.left = y;
+      else links.get(xp)!.right = y;
+      links.get(y)!.left = x;
+      parents.set(x, y);
+    };
+
+    const rotateRight = (x: number): void => {
+      const y = leftOf(x);
+      if (y < 0) return;
+      links.get(x)!.left = rightOf(y);
+      if (rightOf(y) >= 0) parents.set(rightOf(y), x);
+      const xp = parentOf(x);
+      parents.set(y, xp);
+      if (xp < 0) root = y;
+      else if (x === rightOf(xp)) links.get(xp)!.right = y;
+      else links.get(xp)!.left = y;
+      links.get(y)!.right = x;
+      parents.set(x, y);
+    };
+
+    for (const node of nodes) {
+      links.set(node.idx, { left: -1, right: -1 });
+      colors.set(node.idx, 0);
+
+      let parent = -1;
+      let cursor = root;
+      while (cursor >= 0) {
+        parent = cursor;
+        cursor =
+          cfbNameCompare(node.name, names.get(cursor)!) < 0
+            ? leftOf(cursor)
+            : rightOf(cursor);
+      }
+      parents.set(node.idx, parent);
+      if (parent < 0) root = node.idx;
+      else if (cfbNameCompare(node.name, names.get(parent)!) < 0)
+        links.get(parent)!.left = node.idx;
+      else links.get(parent)!.right = node.idx;
+
+      let z = node.idx;
+      while (z !== root && colorOf(parentOf(z)) === 0) {
+        const p = parentOf(z);
+        const gp = parentOf(p);
+        if (p === leftOf(gp)) {
+          const uncle = rightOf(gp);
+          if (colorOf(uncle) === 0) {
+            colors.set(p, 1);
+            colors.set(uncle, 1);
+            colors.set(gp, 0);
+            z = gp;
+          } else {
+            if (z === rightOf(p)) {
+              z = p;
+              rotateLeft(z);
+            }
+            colors.set(parentOf(z), 1);
+            colors.set(parentOf(parentOf(z)), 0);
+            rotateRight(parentOf(parentOf(z)));
+          }
+        } else {
+          const uncle = leftOf(gp);
+          if (colorOf(uncle) === 0) {
+            colors.set(p, 1);
+            colors.set(uncle, 1);
+            colors.set(gp, 0);
+            z = gp;
+          } else {
+            if (z === leftOf(p)) {
+              z = p;
+              rotateRight(z);
+            }
+            colors.set(parentOf(z), 1);
+            colors.set(parentOf(parentOf(z)), 0);
+            rotateLeft(parentOf(parentOf(z)));
+          }
+        }
+      }
+      if (root >= 0) colors.set(root, 1);
+    }
+
+    return { root, links, colors };
   }
 
   // 모든 디렉토리 엔트리 -1 (NOSTREAM)으로 초기화
@@ -1845,51 +2758,71 @@ function buildHwpOle2(
     0,
     "Root Entry",
     5,
+    0,
     -1,
     -1,
-    3,
+    -1,
     miniStreamStartSec,
     miniStreamData.length,
   );
 
-  // HWP Root Entry CLSID 설정
-  const HWP_CLSID = [
-    0x20, 0xe9, 0xe3, 0xc0, 0x46, 0x35, 0xcf, 0x11, 0x8d, 0x81, 0x00, 0xaa,
-    0x00, 0x38, 0x9b, 0x71,
-  ];
-  for (let i = 0; i < 16; i++) {
-    dirBuf[0 * 128 + 80 + i] = HWP_CLSID[i];
-  }
+  // CFB sibling tree는 이름 길이 우선, 그 다음 대소문자 무시 비교 순서다.
+  const hasBinData = binImages.length > 0;
+  const rootTree = buildSiblingTree([
+    ...(hasBinData ? [{ idx: 5, name: "BinData" }] : []),
+    { idx: 3, name: "BodyText" },
+    { idx: 2, name: "DocInfo" },
+    { idx: 1, name: "FileHeader" },
+    { idx: prvTextDirIdx, name: "PrvText" },
+  ]);
+  dv.setInt32(76, rootTree.root, true);
+
+  const rootLinks = (idx: number): { left: number; right: number } =>
+    rootTree.links.get(idx) ?? { left: -1, right: -1 };
 
   // FileHeader (1번)
   const fhStream = streamMap.get(1)!;
+  const fhLinks = rootLinks(1);
   writeDirEntry(
     1,
     "FileHeader",
     2,
-    -1,
-    -1,
+    rootTree.colors.get(1) ?? 1,
+    fhLinks.left,
+    fhLinks.right,
     -1,
     fhStream.startSec!,
     fhStream.data.length,
   );
 
-  // DocInfo (2번) - 이미지가 있는 경우 BinData(5번)를 left로 지정
+  // DocInfo (2번)
   const diStream = streamMap.get(2)!;
-  const docInfoLeft = binImages.length > 0 ? 5 : -1;
+  const diLinks = rootLinks(2);
   writeDirEntry(
     2,
     "DocInfo",
     2,
-    docInfoLeft,
-    -1,
+    rootTree.colors.get(2) ?? 1,
+    diLinks.left,
+    diLinks.right,
     -1,
     diStream.startSec!,
     diStream.data.length,
   );
 
-  // BodyText (3번) - Root Entry 아래의 검색 허브 역할 (left: DocInfo(2), right: FileHeader(1), child: Section0(4))
-  writeDirEntry(3, "BodyText", 1, 2, 1, 4, ENDOFCHAIN, 0);
+  // BodyText (3번)
+  const bodyLinks = rootLinks(3);
+  writeDirEntry(
+    3,
+    "BodyText",
+    1,
+    rootTree.colors.get(3) ?? 1,
+    bodyLinks.left,
+    bodyLinks.right,
+    4,
+    ENDOFCHAIN,
+    0,
+  );
 
   // Section0 (4번)
   const s0Stream = streamMap.get(4)!;
@@ -1897,6 +2830,7 @@ function buildHwpOle2(
     4,
     "Section0",
     2,
+    1,
     -1,
     -1,
     -1,
@@ -1904,19 +2838,51 @@ function buildHwpOle2(
     s0Stream.data.length,
   );
 
+  const prvTextStream = streamMap.get(prvTextDirIdx)!;
+  const prvTextLinks = rootLinks(prvTextDirIdx);
+  writeDirEntry(
+    prvTextDirIdx,
+    "PrvText",
+    2,
+    rootTree.colors.get(prvTextDirIdx) ?? 1,
+    prvTextLinks.left,
+    prvTextLinks.right,
+    -1,
+    prvTextStream.startSec!,
+    prvTextStream.data.length,
+  );
+
   // BinData (5번)
-  if (binImages.length > 0) {
-    writeDirEntry(5, "BinData", 1, -1, -1, 6, ENDOFCHAIN, 0);
+  if (hasBinData) {
+    const binLinks = rootLinks(5);
+    const binTree = buildSiblingTree(
+      binImages.map((img, i) => ({
+        idx: 6 + i,
+        name: `BIN${img.id.toString(16).toUpperCase().padStart(4, "0")}.${img.ext}`,
+      })),
+    );
+    writeDirEntry(
+      5,
+      "BinData",
+      1,
+      rootTree.colors.get(5) ?? 1,
+      binLinks.left,
+      binLinks.right,
+      binTree.root,
+      ENDOFCHAIN,
+      0,
+    );
 
     for (let i = 0; i < binImages.length; i++) {
       const imgStream = streamMap.get(6 + i)!;
-      const sibling = i + 1 < binImages.length ? 7 + i : -1;
+      const imgLinks = binTree.links.get(6 + i) ?? { left: -1, right: -1 };
       writeDirEntry(
         6 + i,
         imgStream.name,
         2,
-        -1,
-        sibling,
+        binTree.colors.get(6 + i) ?? 1,
+        imgLinks.left,
+        imgLinks.right,
         -1,
         imgStream.startSec!,
         imgStream.data.length,
@@ -1947,8 +2913,8 @@ function buildHwpOle2(
   hdv.setUint32(56, 0x1000, true); // Mini Stream Cutoff Size (0x0038)
   hdv.setUint32(60, miniFatN > 0 ? miniFatStartSec : ENDOFCHAIN, true); // Starting Sector of Mini FAT (0x003C)
   hdv.setUint32(64, miniFatN, true); // Number of Mini FAT Sectors (0x0040)
-  hdv.setUint32(68, ENDOFCHAIN, true); // Starting Sector of DIFAT (0x0044)
-  hdv.setUint32(72, 0, true); // Number of DIFAT Sectors (0x0048)
+  hdv.setUint32(68, difatN > 0 ? difatStartSec : ENDOFCHAIN, true); // Starting Sector of DIFAT
+  hdv.setUint32(72, difatN, true); // Number of DIFAT Sectors
 
   // Sector bitmap (DIFAT) 슬롯 채우기 (처음 109개 FAT 섹터 번호 지정)
   for (let i = 0; i < 109; i++) {
@@ -1967,17 +2933,23 @@ function buildHwpOle2(
   out.set(fatBuf, outOff);
   outOff += fatN * SS;
 
-  // 3. Directory sectors
+  // 3. DIFAT sectors
+  if (difatN > 0) {
+    out.set(difatBuf, outOff);
+    outOff += difatN * SS;
+  }
+
+  // 4. Directory sectors
   out.set(dirBuf, outOff);
   outOff += dirN * SS;
 
-  // 4. Mini FAT sectors
+  // 5. Mini FAT sectors
   if (miniFatN > 0) {
     out.set(miniFatBuf, outOff);
     outOff += miniFatN * SS;
   }
 
-  // 5. Mini Stream sectors (Root Entry Data)
+  // 6. Mini Stream sectors (Root Entry Data)
   if (miniStreamN > 0) {
     const miniStreamPad = new Uint8Array(miniStreamN * SS);
     miniStreamPad.set(miniStreamData);
@@ -1985,7 +2957,7 @@ function buildHwpOle2(
     outOff += miniStreamN * SS;
   }
 
-  // 6. Regular Streams sectors
+  // 7. Regular Streams sectors
   for (let i = 0; i < regularStreams.length; i++) {
     out.set(regPads[i], outOff);
     outOff += regNs[i] * SS;
@@ -2038,7 +3010,7 @@ export class HwpEncoder extends BaseEncoder {
       let binIdCounter = 1;
 
       function registerImg(img: any): void {
-        const key = img.b64.substring(0, 50);
+        const key = String(img.b64 ?? "").replace(/\s/g, "");
         if (seenB64.has(key)) return;
         seenB64.add(key);
         const raw = TextKit.base64Decode(img.b64);
@@ -2049,6 +3021,10 @@ export class HwpEncoder extends BaseEncoder {
               ? "gif"
               : img.mime === "image/bmp"
                 ? "bmp"
+                : img.mime === "image/x-wmf"
+                  ? "wmf"
+                  : img.mime === "image/x-emf"
+                    ? "emf"
                 : "jpg";
         images.push({ id: binIdCounter++, ext, data: new Uint8Array(raw) });
       }

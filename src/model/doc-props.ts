@@ -45,11 +45,11 @@ export interface TextProps {
   indentPt?: number;             // 문단 왼쪽 전체 들여쓰기 (pt) — OWPML hc:left
   indentRightPt?: number;        // 문단 오른쪽 전체 들여쓰기 (pt) — OWPML hc:right
   firstLineIndentPt?: number;    // 첫 줄 들여쓰기 (pt, 음수=내어쓰기) — OWPML hc:indent
-  leftMargin?: number;           // 문단 왼쪽 여백 (HWP leftMargin, pt)
   spaceBefore?: number;
   spaceAfter?: number;
   lineHeight?: number;           // 줄 간격 배율 (예: 1.5 = 150%)
   lineHeightFixed?: number;      // 고정 줄 높이 (pt) — OWPML lineSpacing type="FIXED"
+  lineHeightRule?: 'exact' | 'atLeast'; // FIXED/AT_LEAST 의미를 출력까지 보존
   listLv?: number;
   listOrd?: boolean;
   listMark?: string;
@@ -90,10 +90,15 @@ export interface TableLook {
 export interface GridProps {
   widthPct?: number;
   colWidths?: number[];   // column widths in points
+  cellPadT?: number;      // table-level default cell padding (pt)
+  cellPadB?: number;
+  cellPadL?: number;
+  cellPadR?: number;
   defaultStroke?: Stroke;
   look?: TableLook;
   headerRow?: boolean;
   align?: Align;          // 표 정렬: 'left' | 'center' | 'right' | 'justify'
+  layout?: ImgLayout;     // 표 배치/위치 정보 (없으면 inline 흐름 표)
 }
 
 export interface PageDims {
