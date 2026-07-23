@@ -94,11 +94,11 @@ var FormatRegistry = class {
       for (const alias of e.aliases) this.encoders.set(alias, e);
     }
   }
-  getDecoder(fmt2) {
-    return this.decoders.get(fmt2);
+  getDecoder(fmt) {
+    return this.decoders.get(fmt);
   }
-  getEncoder(fmt2) {
-    return this.encoders.get(fmt2);
+  getEncoder(fmt) {
+    return this.encoders.get(fmt);
   }
   supportedInputs() {
     return [...this.decoders.keys()];
@@ -648,6 +648,160 @@ var TextKit = {
   }
 };
 
+// src/toolkit/TableGeometry.ts
+function fitColumnWidths(source, columnCount, maxTotal, minWidth = 1) {
+  const n = Math.max(0, Math.floor(columnCount));
+  if (n === 0) return [];
+  const limit = Math.max(n, Math.floor(Number.isFinite(maxTotal) ? maxTotal : n));
+  const floorWidth = Math.max(1, Math.min(Math.floor(minWidth), Math.floor(limit / n)));
+  const values = Array.from({ length: n }, (_, index) => {
+    const value = Number(source[index]);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  });
+  const knownTotal = values.reduce((sum, value) => sum + value, 0);
+  const missing = values.reduce((count, value) => count + (value <= 0 ? 1 : 0), 0);
+  if (missing === n) {
+    values.fill(limit / n);
+  } else if (missing > 0) {
+    const remaining2 = limit - knownTotal;
+    const knownAverage = knownTotal / (n - missing);
+    const fill = remaining2 > 0 ? remaining2 / missing : knownAverage;
+    for (let i = 0; i < n; i++) if (values[i] <= 0) values[i] = Math.max(1, fill);
+  }
+  const rawTotal = values.reduce((sum, value) => sum + value, 0);
+  const target = Math.max(
+    floorWidth * n,
+    Math.min(limit, Math.round(rawTotal > 0 ? rawTotal : limit))
+  );
+  const exact = new Array(n).fill(0);
+  const active = new Set(Array.from({ length: n }, (_, index) => index));
+  let remaining = target;
+  while (active.size > 0) {
+    const weightTotal = [...active].reduce((sum, index) => sum + values[index], 0);
+    const tooSmall = [...active].filter(
+      (index) => weightTotal <= 0 || remaining * values[index] / weightTotal < floorWidth
+    );
+    if (tooSmall.length === 0) {
+      for (const index of active) exact[index] = remaining * values[index] / weightTotal;
+      break;
+    }
+    for (const index of tooSmall) {
+      exact[index] = floorWidth;
+      remaining -= floorWidth;
+      active.delete(index);
+    }
+  }
+  const result = exact.map(Math.floor);
+  let residual = target - result.reduce((sum, value) => sum + value, 0);
+  const order = exact.map((value, index) => ({ index, fraction: value - Math.floor(value) })).sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+  for (let i = 0; residual > 0; i++, residual--) {
+    result[order[i % order.length].index]++;
+  }
+  return result;
+}
+function inferColumnWidths(columnCount, observations) {
+  const n = Math.max(0, Math.floor(columnCount));
+  if (n === 0) return [];
+  const constraints = observations.map((item) => ({
+    start: Math.max(0, Math.floor(item.start)),
+    span: Math.max(1, Math.floor(item.span)),
+    width: Number(item.width)
+  })).filter(
+    (item) => Number.isFinite(item.width) && item.width > 0 && item.start < n && item.start + item.span <= n
+  );
+  if (constraints.length === 0) return new Array(n).fill(0);
+  const priorSums = new Array(n).fill(0);
+  const priorWeights = new Array(n).fill(0);
+  for (const item of constraints) {
+    const estimate = item.width / item.span;
+    const weight = 1 / item.span;
+    for (let col = item.start; col < item.start + item.span; col++) {
+      priorSums[col] += estimate * weight;
+      priorWeights[col] += weight;
+    }
+  }
+  const fullWidths = constraints.filter((item) => item.start === 0 && item.span === n).map((item) => item.width).sort((a, b) => a - b);
+  const totalHint = fullWidths.length ? fullWidths[Math.floor(fullWidths.length / 2)] : constraints.reduce((largest, item) => Math.max(largest, item.width), 0);
+  const defaultWidth = totalHint / n;
+  const prior = priorSums.map(
+    (sum, col) => priorWeights[col] > 0 ? sum / priorWeights[col] : defaultWidth
+  );
+  if (n > 256) {
+    const priorTotal = prior.reduce((sum, width) => sum + Math.max(0, width), 0);
+    const scale = priorTotal > 0 ? totalHint / priorTotal : 1;
+    return prior.map((width) => Math.max(1e-4, width * scale));
+  }
+  const matrix = Array.from({ length: n }, () => new Array(n).fill(0));
+  const rhs = new Array(n).fill(0);
+  for (const item of constraints) {
+    const weight = 1 / Math.sqrt(item.span);
+    for (let a = item.start; a < item.start + item.span; a++) {
+      rhs[a] += weight * item.width;
+      for (let b = item.start; b < item.start + item.span; b++) {
+        matrix[a][b] += weight;
+      }
+    }
+  }
+  const maxDiagonal = Math.max(1, ...matrix.map((row, i) => row[i]));
+  const ridge = maxDiagonal * 1e-8;
+  for (let i = 0; i < n; i++) {
+    matrix[i][i] += ridge;
+    rhs[i] += ridge * prior[i];
+  }
+  const solved = solveLinearSystem(matrix, rhs);
+  const minWidth = Math.max(1e-4, totalHint * 1e-8);
+  const widths = (solved ?? prior).map(
+    (value, col) => Number.isFinite(value) && value > minWidth ? value : Math.max(minWidth, prior[col])
+  );
+  for (let pass = 0; pass < 80; pass++) {
+    let maxRelativeResidual = 0;
+    for (const item of constraints) {
+      let actual = 0;
+      for (let col = item.start; col < item.start + item.span; col++) {
+        actual += widths[col];
+      }
+      const residual = item.width - actual;
+      maxRelativeResidual = Math.max(
+        maxRelativeResidual,
+        Math.abs(residual) / Math.max(1, item.width)
+      );
+      if (Math.abs(residual) <= 1e-9) continue;
+      const adjustable = widths.slice(item.start, item.start + item.span).reduce((sum, value) => sum + Math.max(minWidth, value), 0);
+      for (let col = item.start; col < item.start + item.span; col++) {
+        const share = Math.max(minWidth, widths[col]) / adjustable;
+        widths[col] = Math.max(minWidth, widths[col] + residual * share);
+      }
+    }
+    if (maxRelativeResidual < 1e-8) break;
+  }
+  return widths;
+}
+function solveLinearSystem(matrix, rhs) {
+  const n = rhs.length;
+  const augmented = matrix.map((row, i) => [...row, rhs[i]]);
+  for (let col = 0; col < n; col++) {
+    let pivot = col;
+    for (let row = col + 1; row < n; row++) {
+      if (Math.abs(augmented[row][col]) > Math.abs(augmented[pivot][col])) {
+        pivot = row;
+      }
+    }
+    if (Math.abs(augmented[pivot][col]) < 1e-12) return null;
+    if (pivot !== col) [augmented[pivot], augmented[col]] = [augmented[col], augmented[pivot]];
+    const divisor = augmented[col][col];
+    for (let j = col; j <= n; j++) augmented[col][j] /= divisor;
+    for (let row = 0; row < n; row++) {
+      if (row === col) continue;
+      const factor = augmented[row][col];
+      if (Math.abs(factor) < 1e-15) continue;
+      for (let j = col; j <= n; j++) {
+        augmented[row][j] -= factor * augmented[col][j];
+      }
+    }
+  }
+  return augmented.map((row) => row[n]);
+}
+
 // src/core/BaseDecoder.ts
 var BaseDecoder = class {
   constructor() {
@@ -886,12 +1040,12 @@ function extractDims(headObj) {
       return {
         wPt: Metric.hwpToPt(ew2),
         hPt: Metric.hwpToPt(eh2),
-        mt: Metric.hwpToPt(mt2),
-        mb: Metric.hwpToPt(mb2),
+        mt: Metric.hwpToPt(mt2 + Math.max(0, header2)),
+        mb: Metric.hwpToPt(mb2 + Math.max(0, footer2)),
         ml: Metric.hwpToPt(ml2),
         mr: Metric.hwpToPt(mr2),
-        headerPt: Metric.hwpToPt(header2 > 0 ? header2 : mt2),
-        footerPt: Metric.hwpToPt(footer2 > 0 ? footer2 : mb2),
+        headerPt: Metric.hwpToPt(Math.max(0, mt2)),
+        footerPt: Metric.hwpToPt(Math.max(0, mb2)),
         orient: ew2 > eh2 ? "landscape" : "portrait"
       };
     }
@@ -913,12 +1067,12 @@ function extractDims(headObj) {
     return {
       wPt: Metric.hwpToPt(ew),
       hPt: Metric.hwpToPt(eh),
-      mt: Metric.hwpToPt(mt),
-      mb: Metric.hwpToPt(mb),
+      mt: Metric.hwpToPt(mt + Math.max(0, header)),
+      mb: Metric.hwpToPt(mb + Math.max(0, footer)),
       ml: Metric.hwpToPt(ml),
       mr: Metric.hwpToPt(mr),
-      headerPt: Metric.hwpToPt(header > 0 ? header : mt),
-      footerPt: Metric.hwpToPt(footer > 0 ? footer : mb),
+      headerPt: Metric.hwpToPt(Math.max(0, mt)),
+      footerPt: Metric.hwpToPt(Math.max(0, mb)),
       orient: ew > eh ? "landscape" : "portrait"
     };
   } catch {
@@ -1080,7 +1234,7 @@ function extractParaPrs(headObj) {
         const lsAttr = lineSpEl._attr ?? {};
         const lsType = lsAttr.type ?? "PERCENT";
         const lsVal = Number(lsAttr.value ?? 160);
-        if (lsType === "PERCENT" && lsVal > 0 && lsVal !== 160) {
+        if (lsType === "PERCENT" && lsVal > 0) {
           lineHeight = lsVal / 100;
         } else if ((lsType === "FIXED" || lsType === "AT_LEAST") && lsVal > 0) {
           lineHeightFixed = Metric.hwpToPt(lsVal);
@@ -1094,7 +1248,8 @@ function extractParaPrs(headObj) {
         spaceBefore,
         spaceAfter,
         lineHeight,
-        lineHeightFixed
+        lineHeightFixed,
+        lineHeightRule: lineHeightFixed !== void 0 ? lineSpEl?._attr?.type === "AT_LEAST" ? "atLeast" : "exact" : void 0
       });
     }
   } catch {
@@ -1103,27 +1258,15 @@ function extractParaPrs(headObj) {
 }
 function addParaItems(p, items) {
   const runs = getTag(p, "hp:run", "hp:RUN");
-  let hasTable = false;
-  let hasDirectText = false;
   for (const run of runs) {
     const tbls = getTag(run, "hp:tbl", "hp:TABLE");
     if (tbls.length > 0) {
       for (const tbl of tbls) {
         items.push({ type: "table", node: tbl });
       }
-      hasTable = true;
-    }
-    const textNodes = getTag(run, "hp:t", "hp:T", "hp:CHAR");
-    if (textNodes.some((t) => {
-      const val = typeof t === "string" ? t : t?._text ?? t?._ ?? t?.["#text"] ?? "";
-      return String(val).trim().length > 0;
-    })) {
-      hasDirectText = true;
     }
   }
-  if (!hasTable || hasDirectText) {
-    items.push({ type: "para", node: p });
-  }
+  items.push({ type: "para", node: p });
 }
 function decodeSection(sec, dims, ctx) {
   const firstParas = getTag(sec, "hp:p", "hp:P");
@@ -1197,12 +1340,12 @@ function parseSecPrDims(secPr) {
   return {
     wPt: Metric.hwpToPt(pw),
     hPt: Metric.hwpToPt(ph),
-    mt: Metric.hwpToPt(mt),
-    mb: Metric.hwpToPt(mb),
+    mt: Metric.hwpToPt(mt + Math.max(0, header)),
+    mb: Metric.hwpToPt(mb + Math.max(0, footer)),
     ml: Metric.hwpToPt(ml),
     mr: Metric.hwpToPt(mr),
-    headerPt: Metric.hwpToPt(header > 0 ? header : mt),
-    footerPt: Metric.hwpToPt(footer > 0 ? footer : mb),
+    headerPt: Metric.hwpToPt(Math.max(0, mt)),
+    footerPt: Metric.hwpToPt(Math.max(0, mb)),
     orient: pw > ph ? "landscape" : "portrait"
   };
 }
@@ -1276,6 +1419,8 @@ function decodePara(p, ctx) {
       props.lineHeight = paraPrDef.lineHeight;
     if (paraPrDef.lineHeightFixed !== void 0)
       props.lineHeightFixed = paraPrDef.lineHeightFixed;
+    if (paraPrDef.lineHeightRule !== void 0)
+      props.lineHeightRule = paraPrDef.lineHeightRule;
   }
   if (inlineAttr.listType) {
     props.listOrd = inlineAttr.listType === "DIGIT" || inlineAttr.listType === "DECIMAL";
@@ -1301,8 +1446,8 @@ function decodePara(p, ctx) {
     const pageNums = getTag(run, "hp:pageNum", "hp:PAGENUM");
     if (pageNums.length > 0) {
       const pn = pageNums[0]?._attr ?? {};
-      const fmt2 = pn.formatType === "ROMAN_LOWER" ? "roman" : pn.formatType === "ROMAN_UPPER" ? "romanCaps" : "decimal";
-      const pageNumNode = { tag: "pagenum", format: fmt2 };
+      const fmt = pn.formatType === "ROMAN_LOWER" ? "roman" : pn.formatType === "ROMAN_UPPER" ? "romanCaps" : "decimal";
+      const pageNumNode = { tag: "pagenum", format: fmt };
       const spanProps = resolveCharPr(run, ctx);
       kids.push({ tag: "span", props: spanProps, kids: [pageNumNode] });
       continue;
@@ -1386,7 +1531,9 @@ function decodePic(pic, ctx) {
       jpg: "image/jpeg",
       jpeg: "image/jpeg",
       gif: "image/gif",
-      bmp: "image/bmp"
+      bmp: "image/bmp",
+      wmf: "image/x-wmf",
+      emf: "image/x-emf"
     };
     const posAttr = pic?.["hp:pos"]?.[0]?._attr ?? pic?.pos?.[0]?._attr ?? {};
     const layout = extractHwpxLayout(posAttr, pic);
@@ -1502,64 +1649,34 @@ function decodeGrid(tbl, ctx) {
     if (a) gridProps.align = a;
   }
   const rowArr = getTag(tbl, "hp:tr", "hp:ROW");
+  let detectedCols = Math.max(0, Number(tblAttr.colCnt ?? tblAttr.ColCnt ?? 0));
+  const widthConstraints = [];
   for (const row of rowArr) {
-    const cells = getTag(row, "hp:tc", "hp:CELL");
-    const rowWidths = [];
-    let allSingle = true;
-    for (const cell of cells) {
-      const cellSpanAttr = cell?.["hp:cellSpan"]?.[0]?._attr ?? {};
-      const cs = Number(cellSpanAttr.colSpan ?? cell?._attr?.ColSpan ?? 1);
-      if (cs > 1) {
-        allSingle = false;
-        break;
-      }
-      const szAttr = cell?.["hp:cellSz"]?.[0]?._attr ?? {};
-      const w = Number(szAttr.width ?? 0);
-      rowWidths.push(Metric.hwpToPt(w));
-    }
-    if (allSingle && rowWidths.length > 0 && rowWidths.some((w) => w > 0)) {
-      gridProps.colWidths = rowWidths;
-      break;
+    let sequentialCol = 0;
+    for (const cell of getTag(row, "hp:tc", "hp:CELL")) {
+      const spanAttr = cell?.["hp:cellSpan"]?.[0]?._attr ?? {};
+      const addrAttr = cell?.["hp:cellAddr"]?.[0]?._attr ?? {};
+      const span = Math.max(1, Number(spanAttr.colSpan ?? cell?._attr?.ColSpan ?? 1));
+      const address = Number(addrAttr.colAddr ?? sequentialCol);
+      const start = Number.isFinite(address) && address >= 0 ? address : sequentialCol;
+      const width = Number(cell?.["hp:cellSz"]?.[0]?._attr?.width ?? 0);
+      if (width > 0) widthConstraints.push({ start, span, width });
+      detectedCols = Math.max(detectedCols, start + span);
+      sequentialCol = start + span;
     }
   }
-  if (!gridProps.colWidths) {
-    let detectedCols = 0;
-    for (const row of rowArr) {
-      let ci = 0;
-      for (const cell of getTag(row, "hp:tc", "hp:CELL")) {
-        const csEl = cell?.["hp:cellSpan"]?.[0]?._attr ?? {};
-        ci += Number(csEl.colSpan ?? cell?._attr?.ColSpan ?? 1);
-      }
-      if (ci > detectedCols) detectedCols = ci;
-    }
-    if (detectedCols > 0) {
-      const sums = new Float64Array(detectedCols);
-      const counts = new Int32Array(detectedCols);
-      for (const row of rowArr) {
-        let ci = 0;
-        for (const cell of getTag(row, "hp:tc", "hp:CELL")) {
-          const csEl = cell?.["hp:cellSpan"]?.[0]?._attr ?? {};
-          const cs = Number(csEl.colSpan ?? cell?._attr?.ColSpan ?? 1);
-          const szAttr = cell?.["hp:cellSz"]?.[0]?._attr ?? {};
-          const w = Number(szAttr.width ?? 0);
-          if (w > 0 && cs > 0) {
-            const perCol = w / cs;
-            for (let k = 0; k < cs && ci + k < detectedCols; k++) {
-              sums[ci + k] += perCol;
-              counts[ci + k]++;
-            }
-          }
-          ci += cs;
-        }
-      }
-      const estimated = Array.from(sums).map(
-        (s, i) => counts[i] > 0 ? Metric.hwpToPt(s / counts[i]) : 0
-      );
-      if (estimated.some((w) => w > 0)) gridProps.colWidths = estimated;
+  if (detectedCols > 0) {
+    const inferred = inferColumnWidths(detectedCols, widthConstraints);
+    if (inferred.some((width) => width > 0)) {
+      gridProps.colWidths = inferred.map(Metric.hwpToPt);
     }
   }
   const rowNodes = rowArr.map((row) => {
-    const cellArr = getTag(row, "hp:tc", "hp:CELL");
+    const cellArr = [...getTag(row, "hp:tc", "hp:CELL")].sort((a, b) => {
+      const aa = Number(a?.["hp:cellAddr"]?.[0]?._attr?.colAddr ?? 0);
+      const ba = Number(b?.["hp:cellAddr"]?.[0]?._attr?.colAddr ?? 0);
+      return aa - ba;
+    });
     const cellNodes = cellArr.map((cell) => {
       const ca = cell?._attr ?? {};
       const cellBfId = Number(ca.borderFillIDRef ?? 0);
@@ -1601,7 +1718,6 @@ function decodeGrid(tbl, ctx) {
       for (const sp of sourcePSource) {
         try {
           const runs = getTag(sp, "hp:run", "hp:RUN");
-          let hasNestedTable = false;
           for (const run of runs) {
             const nestedTbls = getTag(run, "hp:tbl", "hp:TABLE");
             for (const nestedTbl of nestedTbls) {
@@ -1609,12 +1725,9 @@ function decodeGrid(tbl, ctx) {
                 cellKids.push(decodeGrid(nestedTbl, ctx));
               } catch {
               }
-              hasNestedTable = true;
             }
           }
-          if (!hasNestedTable) {
-            cellKids.push(decodePara(sp, ctx));
-          }
+          cellKids.push(decodePara(sp, ctx));
         } catch {
         }
       }
@@ -1835,6 +1948,7 @@ var TAG_PARA_TEXT = HWPTAG_BEGIN + 51;
 var TAG_PARA_CHAR_SHAPE = HWPTAG_BEGIN + 52;
 var TAG_CTRL_HEADER = HWPTAG_BEGIN + 55;
 var TAG_PAGE_DEF = HWPTAG_BEGIN + 57;
+var TAG_SHAPE_COMPONENT_PICTURE = HWPTAG_BEGIN + 69;
 var TAG_LIST_HEADER = HWPTAG_BEGIN + 56;
 var TAG_TABLE_A = HWPTAG_BEGIN + 61;
 var TAG_CELL_A = HWPTAG_BEGIN + 62;
@@ -1976,6 +2090,41 @@ function parseBorderFill(d) {
   }
   return { borders, bgColor };
 }
+function parseObjectLayout(data) {
+  if (data.length < 28) return void 0;
+  const flags = BinaryKit.readU32LE(data, 4);
+  if ((flags & 1) !== 0) return { wrap: "inline" };
+  const vertRelCode = flags >>> 3 & 3;
+  const horzRelCode = flags >>> 8 & 3;
+  const vertAlignCode = flags >>> 5 & 7;
+  const horzAlignCode = flags >>> 10 & 7;
+  const wrapCode = flags >>> 21 & 7;
+  const vertRelTo = vertRelCode === 2 ? "para" : "page";
+  const horzRelTo = horzRelCode === 2 ? "column" : horzRelCode === 3 ? "para" : "page";
+  const vertAlign = ["top", "center", "bottom"][vertAlignCode];
+  const horzAlign = ["left", "center", "right"][horzAlignCode];
+  const wrap = ["square", "tight", "through", "topAndBottom", "behind", "front"][wrapCode] ?? "square";
+  const rawY = i32(data, 8);
+  const rawX = i32(data, 12);
+  const layout = {
+    wrap,
+    horzRelTo,
+    vertRelTo,
+    horzAlign,
+    vertAlign,
+    xPt: rawX !== 0 ? Metric.hwpToPt(rawX) : void 0,
+    yPt: rawY !== 0 ? Metric.hwpToPt(rawY) : void 0,
+    behindDoc: wrap === "behind" || void 0,
+    zOrder: Math.max(0, i32(data, 24))
+  };
+  if (data.length >= 36) {
+    layout.distL = Metric.hwpToPt(BinaryKit.readU16LE(data, 28));
+    layout.distR = Metric.hwpToPt(BinaryKit.readU16LE(data, 30));
+    layout.distT = Metric.hwpToPt(BinaryKit.readU16LE(data, 32));
+    layout.distB = Metric.hwpToPt(BinaryKit.readU16LE(data, 34));
+  }
+  return layout;
+}
 function parseBody(raw, compressed, di, shield, gsoCtx) {
   const recs = parseRecords(compressed ? tryInflate(raw) : raw);
   const content = [];
@@ -2054,12 +2203,17 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
         } else {
           const MAX_HWP = 1e6;
           const rawW = r.data.length >= 24 ? BinaryKit.readU32LE(r.data, 16) : 0;
-          const rawH = r.data.length >= 28 ? BinaryKit.readU32LE(r.data, 20) : 0;
+          const rawH = r.data.length >= 24 ? BinaryKit.readU32LE(r.data, 20) : 0;
           const wPt = rawW > 0 && rawW < MAX_HWP ? Metric.hwpToPt(rawW) : 0;
           const hPt = rawH > 0 && rawH < MAX_HWP ? Metric.hwpToPt(rawH) : 0;
+          const layout = parseObjectLayout(r.data);
           const atnoType = ctrlId === CTRL_ATNO && r.data.length >= 8 ? BinaryKit.readU32LE(r.data, 4) & 15 : void 0;
-          const imgId = ctrlId === CTRL_GSO || ctrlId === CTRL_PIC ? gsoCtx.count++ : r.data.length >= 6 ? BinaryKit.readU16LE(r.data, 4) : 0;
-          ctrlHeaders.push({ ctrlId, imgId, wPt, hPt, atnoType });
+          const isPicture = ctrlId === CTRL_GSO || ctrlId === CTRL_PIC;
+          const imgId = isPicture ? gsoCtx.count++ : r.data.length >= 6 ? BinaryKit.readU16LE(r.data, 4) : 0;
+          const binIndex = isPicture ? pictureBinIndex(recs, i) : void 0;
+          ctrlHeaders.push({ ctrlId, imgId, wPt, hPt, layout, atnoType });
+          const isImageCtrl = ctrlId === CTRL_IMAGE || ctrlId === CTRL_PIC || ctrlId === CTRL_FIG || ctrlId === CTRL_OBJ || ctrlId === CTRL_GSO;
+          if (isImageCtrl) gsoCtx.objects.set(imgId, { wPt, hPt, layout, binIndex });
           if (ctrlId === CTRL_TABLE) {
             const tr = shield.guard(
               () => parseTableCtrl(recs, i, di, shield, gsoCtx),
@@ -2114,8 +2268,7 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
         if (!ch) continue;
         const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_PIC || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
         if (!isImg) continue;
-        const dimStr = ch.wPt > 0 && ch.hPt > 0 ? `_W${Math.round(ch.wPt)}_H${Math.round(ch.hPt)}` : "";
-        paraContent.push(buildSpan(`__EXT_${ch.imgId}${dimStr}__`));
+        paraContent.push(buildSpan(`__EXT_${ch.imgId}__`));
       }
     }
     if (divideSort & 4) {
@@ -2143,6 +2296,17 @@ function skipKids(recs, idx) {
   let i = idx + 1;
   while (i < recs.length && recs[i].level > lv) i++;
   return i;
+}
+function pictureBinIndex(recs, ctrlIdx) {
+  const end = skipKids(recs, ctrlIdx);
+  for (let i = ctrlIdx + 1; i < end; i++) {
+    const data = recs[i].data;
+    if (recs[i].tag === TAG_SHAPE_COMPONENT_PICTURE && data.length >= 73) {
+      const binId = BinaryKit.readU16LE(data, 71);
+      if (binId > 0) return binId - 1;
+    }
+  }
+  return void 0;
 }
 var EXT_CTRL = /* @__PURE__ */ new Set([2, 3, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
 var INL_CTRL = /* @__PURE__ */ new Set([4, 5, 6, 7, 8]);
@@ -2349,37 +2513,10 @@ function parseTableCtrl(recs, ctrlIdx, di, shield, gsoCtx) {
   }
   const maxRow = parsed.reduce((m, c) => Math.max(m, c.row + c.rs), 0);
   const actualRowCnt = Math.max(rowCnt, maxRow);
-  const colWidthsPt = new Array(colCnt).fill(0);
-  for (const c of parsed) {
-    if (c.cs === 1 && c.widthHwp > 0) {
-      const wPt = Metric.hwpToPt(c.widthHwp);
-      if (wPt > colWidthsPt[c.col]) colWidthsPt[c.col] = wPt;
-    }
-  }
-  const zeroColumns = colWidthsPt.filter((w) => w === 0).length;
-  if (zeroColumns > 0) {
-    const spanCells = parsed.filter((c) => c.cs > 1 && c.widthHwp > 0).sort((a, b) => a.cs - b.cs);
-    for (const c of spanCells) {
-      if (c.cs > 1 && c.widthHwp > 0) {
-        let known = 0;
-        let unknownCols = 0;
-        for (let ci = c.col; ci < c.col + c.cs && ci < colCnt; ci++) {
-          if (colWidthsPt[ci] > 0) known += colWidthsPt[ci];
-          else unknownCols++;
-        }
-        if (unknownCols > 0) {
-          const remaining = Metric.hwpToPt(c.widthHwp) - known;
-          const each = remaining > 0 ? remaining / unknownCols : 0;
-          for (let ci = c.col; ci < c.col + c.cs && ci < colCnt; ci++) {
-            if (colWidthsPt[ci] === 0 && each > 0) colWidthsPt[ci] = each;
-          }
-        }
-      }
-    }
-  }
-  for (let i2 = 0; i2 < colWidthsPt.length; i2++) {
-    if (colWidthsPt[i2] > 0 && colWidthsPt[i2] < 1) colWidthsPt[i2] = 1;
-  }
+  const colWidthsPt = inferColumnWidths(
+    colCnt,
+    parsed.filter((c) => c.widthHwp > 0).map((c) => ({ start: c.col, span: c.cs, width: c.widthHwp }))
+  ).map(Metric.hwpToPt);
   const rows = [];
   for (let r = 0; r < actualRowCnt; r++) {
     const rc = parsed.filter((c) => c.row === r).sort((a, b) => a.col - b.col);
@@ -2414,6 +2551,8 @@ function parseTableCtrl(recs, ctrlIdx, di, shield, gsoCtx) {
   if (defStroke) gp.defaultStroke = defStroke;
   const hasWidths = colWidthsPt.some((w) => w > 0);
   if (hasWidths) gp.colWidths = colWidthsPt;
+  const tableLayout = parseObjectLayout(recs[ctrlIdx].data);
+  if (tableLayout && tableLayout.wrap !== "inline") gp.layout = tableLayout;
   return { grid: buildGrid(rows, gp), next: i };
 }
 function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gsoCtx) {
@@ -2507,11 +2646,16 @@ function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gs
                   j = nestedTr.next;
                 } else {
                   const rawW = recs[j].data.length >= 24 ? BinaryKit.readU32LE(recs[j].data, 16) : 0;
-                  const rawH = recs[j].data.length >= 28 ? BinaryKit.readU32LE(recs[j].data, 20) : 0;
+                  const rawH = recs[j].data.length >= 24 ? BinaryKit.readU32LE(recs[j].data, 20) : 0;
                   const wPt = rawW > 0 && rawW < MAX_HWP ? Metric.hwpToPt(rawW) : 0;
                   const hPt = rawH > 0 && rawH < MAX_HWP ? Metric.hwpToPt(rawH) : 0;
-                  const imgId = ctrlId === CTRL_GSO || ctrlId === CTRL_PIC ? gsoCtx.count++ : recs[j].data.length >= 6 ? BinaryKit.readU16LE(recs[j].data, 4) : 0;
-                  ctrlHdrs.push({ ctrlId, imgId, wPt, hPt });
+                  const layout = parseObjectLayout(recs[j].data);
+                  const isPicture = ctrlId === CTRL_GSO || ctrlId === CTRL_PIC;
+                  const imgId = isPicture ? gsoCtx.count++ : recs[j].data.length >= 6 ? BinaryKit.readU16LE(recs[j].data, 4) : 0;
+                  const binIndex = isPicture ? pictureBinIndex(recs, j) : void 0;
+                  ctrlHdrs.push({ ctrlId, imgId, wPt, hPt, layout });
+                  const isImageCtrl = ctrlId === CTRL_IMAGE || ctrlId === CTRL_PIC || ctrlId === CTRL_FIG || ctrlId === CTRL_OBJ || ctrlId === CTRL_GSO;
+                  if (isImageCtrl) gsoCtx.objects.set(imgId, { wPt, hPt, layout, binIndex });
                   j = skipKids(recs, j);
                 }
               } else {
@@ -2527,8 +2671,7 @@ function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gs
               if (!ch) continue;
               const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_PIC || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
               if (!isImg) continue;
-              const dimStr = ch.wPt > 0 && ch.hPt > 0 ? `_W${Math.round(ch.wPt)}_H${Math.round(ch.hPt)}` : "";
-              paraContent.push(buildSpan(`__EXT_${ch.imgId}${dimStr}__`));
+              paraContent.push(buildSpan(`__EXT_${ch.imgId}__`));
             }
           }
           const kids = paraContent.length > 0 ? paraContent : [buildSpan("")];
@@ -2547,12 +2690,14 @@ function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gs
       const cellCtrlId = BinaryKit.readU32LE(recs[k].data, 0);
       if (cellCtrlId === CTRL_GSO || cellCtrlId === CTRL_PIC) {
         const gsoId = gsoCtx.count++;
+        const binIndex = pictureBinIndex(recs, k);
         const rawW = recs[k].data.length >= 24 ? BinaryKit.readU32LE(recs[k].data, 16) : 0;
-        const rawH = recs[k].data.length >= 28 ? BinaryKit.readU32LE(recs[k].data, 20) : 0;
+        const rawH = recs[k].data.length >= 24 ? BinaryKit.readU32LE(recs[k].data, 20) : 0;
         const wPt = rawW > 0 && rawW < MAX_HWP ? Metric.hwpToPt(rawW) : 0;
         const hPt = rawH > 0 && rawH < MAX_HWP ? Metric.hwpToPt(rawH) : 0;
-        const dimStr = wPt > 0 && hPt > 0 ? `_W${Math.round(wPt)}_H${Math.round(hPt)}` : "";
-        cellChildren.push(buildPara([buildSpan(`__EXT_${gsoId}${dimStr}__`)]));
+        const layout = parseObjectLayout(recs[k].data);
+        gsoCtx.objects.set(gsoId, { wPt, hPt, layout, binIndex });
+        cellChildren.push(buildPara([buildSpan(`__EXT_${gsoId}__`)]));
         k = skipKids(recs, k);
       } else if (cellCtrlId === CTRL_TABLE) {
         const tr = shield.guard(
@@ -2638,7 +2783,10 @@ function buildParaProps(ps, hwpStyleId) {
   if (ps.spaceBefore > 0) p.spaceBefore = Metric.hwpToPt(ps.spaceBefore / 2);
   if (ps.spaceAfter > 0) p.spaceAfter = Metric.hwpToPt(ps.spaceAfter / 2);
   if (ps.lineSpacingType === 1 || ps.lineSpacingType === 3) {
-    if (ps.lineSpacing > 0) p.lineHeightFixed = Metric.hwpToPt(ps.lineSpacing);
+    if (ps.lineSpacing > 0) {
+      p.lineHeightFixed = Metric.hwpToPt(ps.lineSpacing);
+      p.lineHeightRule = ps.lineSpacingType === 3 ? "atLeast" : "exact";
+    }
   } else {
     if (ps.lineSpacing > 0) p.lineHeight = ps.lineSpacing / 100;
   }
@@ -2672,22 +2820,29 @@ var HwpScanner = class {
       }
       const binEntries = [];
       for (const [path, streamData] of streams) {
-        const m = path.match(/^BinData[/\\]BIN(\d+)\.\w+$/i);
-        if (m) binEntries.push({ binNum: parseInt(m[1], 10), data: streamData });
+        const m = path.match(/^BinData[/\\]BIN([0-9a-f]+)\.([a-z0-9]+)$/i);
+        if (m) binEntries.push({ binNum: parseInt(m[1], 16), ext: m[2].toLowerCase(), data: streamData });
       }
       binEntries.sort((a, b) => a.binNum - b.binNum);
       const objectMap = /* @__PURE__ */ new Map();
-      for (let idx = 0; idx < binEntries.length; idx++) {
-        const { data: imgData } = binEntries[idx];
+      for (const { binNum, ext, data: storedData } of binEntries) {
+        let imgData = storedData;
+        try {
+          const inflated = import_pako2.default.inflateRaw(storedData);
+          if (looksLikeImageData(inflated, ext)) imgData = inflated;
+        } catch {
+        }
         let mimeType = "image/jpeg";
         if (imgData[0] === 137 && imgData[1] === 80) mimeType = "image/png";
         else if (imgData[0] === 71 && imgData[1] === 73) mimeType = "image/gif";
         else if (imgData[0] === 66 && imgData[1] === 77) mimeType = "image/bmp";
+        else if (ext === "wmf") mimeType = "image/x-wmf";
+        else if (ext === "emf") mimeType = "image/x-emf";
         const base64 = TextKit.base64Encode(imgData);
         const { wPt, hPt } = getImageDimsPt(imgData, mimeType);
-        objectMap.set(idx, buildImg(base64, mimeType, wPt, hPt));
+        objectMap.set(binNum - 1, buildImg(base64, mimeType, wPt, hPt));
       }
-      const gsoCtx = { count: 0 };
+      const gsoCtx = { count: 0, objects: /* @__PURE__ */ new Map() };
       const allContent = [];
       let pageDims = A4;
       for (let s = 0; s < 100; s++) {
@@ -2712,7 +2867,7 @@ var HwpScanner = class {
         if (r.pageDims) pageDims = r.pageDims;
       }
       if (objectMap.size > 0) {
-        injectImagesIntoContent(allContent, objectMap);
+        injectImagesIntoContent(allContent, objectMap, gsoCtx.objects);
       }
       normalizeHancomParagraphAnchors(allContent, di);
       warns.push(...shield.flush());
@@ -2731,6 +2886,17 @@ function findBodySection(streams) {
   for (const [k, v] of streams)
     if (k.includes("Section") && !k.includes("Header") && !k.includes("Info")) return v;
   return void 0;
+}
+function looksLikeImageData(data, ext) {
+  if (data.length < 4) return false;
+  if (data[0] === 137 && data[1] === 80 && data[2] === 78 && data[3] === 71) return true;
+  if (data[0] === 255 && data[1] === 216 && data[2] === 255) return true;
+  if (data[0] === 71 && data[1] === 73 && data[2] === 70) return true;
+  if (data[0] === 66 && data[1] === 77) return true;
+  if (ext === "wmf") {
+    return data[0] === 215 && data[1] === 205 && data[2] === 198 && data[3] === 154 || data[0] === 1 && data[1] === 0 && data[2] === 9 && data[3] === 0;
+  }
+  return ext === "emf" && data.length >= 44 && data[40] === 32 && data[41] === 69 && data[42] === 77 && data[43] === 70;
 }
 function getImageDimsPt(data, mime) {
   const fallback = { wPt: 72, hPt: 72 };
@@ -2771,7 +2937,7 @@ function getImageDimsPt(data, mime) {
   }
   return fallback;
 }
-function injectImagesIntoContent(content, objectMap) {
+function injectImagesIntoContent(content, objectMap, objectInfo) {
   if (objectMap.size === 0) return;
   const processKids = (kids) => {
     for (let i = 0; i < kids.length; i++) {
@@ -2781,11 +2947,17 @@ function injectImagesIntoContent(content, objectMap) {
         const match = text.match?.(/^__(?:IMG|EXT)_(\d+)(?:_W(\d+)_H(\d+))?__$/);
         if (match) {
           const objId = parseInt(match[1], 10);
-          const base = objectMap.get(objId);
+          const info = objectInfo.get(objId);
+          const base = objectMap.get(info?.binIndex ?? objId);
           if (base) {
             const wPt = match[2] ? parseInt(match[2], 10) : 0;
             const hPt = match[3] ? parseInt(match[3], 10) : 0;
-            kids[i] = wPt > 0 && hPt > 0 ? { ...base, w: wPt, h: hPt } : base;
+            kids[i] = {
+              ...base,
+              w: info?.wPt && info.wPt > 0 ? info.wPt : wPt > 0 ? wPt : base.w,
+              h: info?.hPt && info.hPt > 0 ? info.hPt : hPt > 0 ? hPt : base.h,
+              layout: info?.layout
+            };
           }
         }
       }
@@ -3045,8 +3217,8 @@ async function parseNumbering(xml) {
       for (const lvl of toArr2(abs?.["w:lvl"] ?? abs?.lvl)) {
         const ilvl = Number(lvl?._attr?.["w:ilvl"] ?? lvl?._attr?.ilvl ?? 0);
         const fmtNode = lvl?.["w:numFmt"]?.[0]?._attr ?? lvl?.numFmt?.[0]?._attr ?? {};
-        const fmt2 = fmtNode?.["w:val"] ?? fmtNode?.val ?? "decimal";
-        levels.set(ilvl, { fmt: fmt2, isOrdered: fmt2 !== "bullet" });
+        const fmt = fmtNode?.["w:val"] ?? fmtNode?.val ?? "decimal";
+        levels.set(ilvl, { fmt, isOrdered: fmt !== "bullet" });
       }
       absMap.set(absId, levels);
     }
@@ -3485,7 +3657,9 @@ function decodeDrawing(drawing, ctx) {
       jpg: "image/jpeg",
       jpeg: "image/jpeg",
       gif: "image/gif",
-      bmp: "image/bmp"
+      bmp: "image/bmp",
+      wmf: "image/x-wmf",
+      emf: "image/x-emf"
     };
     const mime = mimeMap[ext] ?? "image/png";
     const layout = inline ? { wrap: "inline" } : extractAnchorLayout(anchor);
@@ -4989,6 +5163,8 @@ function mimeToExt(mime) {
   if (mime.includes("jpeg")) return "jpg";
   if (mime.includes("gif")) return "gif";
   if (mime.includes("bmp")) return "bmp";
+  if (mime.includes("wmf")) return "wmf";
+  if (mime.includes("emf")) return "emf";
   return "png";
 }
 function registerImage(img, ctx) {
@@ -5203,7 +5379,7 @@ var HwpxEncoder = class extends BaseEncoder {
       ];
       for (const bin of ctx.bins) {
         const ext = bin.name.split(".").pop()?.toLowerCase() ?? "png";
-        const ct = ext === "png" ? "image/png" : ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "gif" ? "image/gif" : "image/bmp";
+        const ct = ext === "png" ? "image/png" : ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "gif" ? "image/gif" : ext === "wmf" ? "image/x-wmf" : ext === "emf" ? "image/x-emf" : "image/bmp";
         entries.push({ name: `BinData/${bin.name}`, data: bin.data, mime: ct });
       }
       return succeed(await this.zip(entries));
@@ -5227,7 +5403,7 @@ function buildContentHpf(ctx, meta) {
   let items = `<opf:item id="header"   href="Contents/header.xml"   media-type="application/xml"/><opf:item id="section0" href="Contents/section0.xml" media-type="application/xml"/><opf:item id="settings" href="settings.xml"          media-type="application/xml"/>`;
   for (const bin of ctx.bins) {
     const ext = bin.name.split(".").pop()?.toLowerCase() ?? "png";
-    const ct = ext === "png" ? "image/png" : ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "gif" ? "image/gif" : "image/bmp";
+    const ct = ext === "png" ? "image/png" : ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "gif" ? "image/gif" : ext === "wmf" ? "image/x-wmf" : ext === "emf" ? "image/x-emf" : "image/bmp";
     items += `<opf:item id="${bin.id}" href="BinData/${bin.name}" media-type="${ct}" isEmbeded="1"/>`;
   }
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><opf:package ${NS} version="" unique-identifier="" id=""><opf:metadata><opf:title>${title}</opf:title><opf:language>ko</opf:language><opf:meta name="creator"      content="text">${creator}</opf:meta><opf:meta name="subject"      content="text">${subject}</opf:meta><opf:meta name="description"  content="text">${desc}</opf:meta><opf:meta name="CreatedDate"  content="text">${created}</opf:meta><opf:meta name="ModifiedDate" content="text">${modified}</opf:meta><opf:meta name="keyword"      content="text">${keyword}</opf:meta><opf:meta name="trackchageConfig" content="text">0</opf:meta></opf:metadata><opf:manifest>${items}</opf:manifest><opf:spine><opf:itemref idref="header" linear="yes"/><opf:itemref idref="section0" linear="yes"/></opf:spine></opf:package>`;
@@ -5610,7 +5786,7 @@ function encodeCodeBlockPositioned(para, ctx, vertPos, secPr, fontSize, spacing,
     void 0,
     { pageFirst }
   );
-  const xml = `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0" paraTcId="0">` + secPr + `<hp:run charPrIDRef="0" charTcId="0"><hp:tbl id="${ctx.nextElementId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE" repeatHeader="0" rowCnt="1" colCnt="1" cellSpacing="0" borderFillIDRef="${codeBfId}" noAdjust="0"><hp:sz width="${cellW}" widthRelTo="ABSOLUTE" height="0" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="138" right="138" top="138" bottom="138"/><hp:inMargin left="138" right="138" top="138" bottom="138"/><hp:tr><hp:tc name="" header="0" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${codeBfId}"><hp:subList id="${subListId}" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">` + innerXml + `</hp:subList><hp:cellAddr colAddr="0" rowAddr="0"/><hp:cellSpan colSpan="1" rowSpan="1"/><hp:cellSz width="${cellW}" height="0"/><hp:cellMargin left="283" right="283" top="141" bottom="141"/></hp:tc></hp:tr></hp:tbl><hp:t xml:space="preserve"> </hp:t></hp:run>` + linesegXml + `</hp:p>`;
+  const xml = `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0" paraTcId="0">` + secPr + `<hp:run charPrIDRef="0" charTcId="0"><hp:tbl id="${ctx.nextElementId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="0" rowCnt="1" colCnt="1" cellSpacing="0" borderFillIDRef="${codeBfId}" noAdjust="0"><hp:sz width="${cellW}" widthRelTo="ABSOLUTE" height="0" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="138" right="138" top="138" bottom="138"/><hp:inMargin left="138" right="138" top="138" bottom="138"/><hp:tr><hp:tc name="" header="0" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${codeBfId}"><hp:subList id="${subListId}" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">` + innerXml + `</hp:subList><hp:cellAddr colAddr="0" rowAddr="0"/><hp:cellSpan colSpan="1" rowSpan="1"/><hp:cellSz width="${cellW}" height="0"/><hp:cellMargin left="283" right="283" top="141" bottom="141"/></hp:tc></hp:tr></hp:tbl><hp:t xml:space="preserve"> </hp:t></hp:run>` + linesegXml + `</hp:p>`;
   return { xml, nextVertPos: vertPos + totalHeight, hasPageBreak: false };
 }
 function encodeParaKids(kids, ctx) {
@@ -5662,9 +5838,9 @@ function encodeRunInner(span) {
     } else if (kid.tag === "br") {
       xml += `<hp:br/>`;
     } else if (kid.tag === "pagenum") {
-      const fmt2 = kid.format === "roman" ? "ROMAN_LOWER" : kid.format === "romanCaps" ? "ROMAN_UPPER" : "DIGIT";
+      const fmt = kid.format === "roman" ? "ROMAN_LOWER" : kid.format === "romanCaps" ? "ROMAN_UPPER" : "DIGIT";
       const numType = kid.format === "total" ? "TOTAL_PAGE" : "PAGE";
-      xml += `<hp:ctrl><hp:autoNum num="1" numType="${numType}"><hp:autoNumFormat type="${fmt2}" userChar="" prefixChar="" suffixChar="" supscript="0"/></hp:autoNum></hp:ctrl>`;
+      xml += `<hp:ctrl><hp:autoNum num="1" numType="${numType}"><hp:autoNumFormat type="${fmt}" userChar="" prefixChar="" suffixChar="" supscript="0"/></hp:autoNum></hp:ctrl>`;
     }
   }
   return xml;
@@ -5807,7 +5983,7 @@ function buildGridLayoutAttrs(layout, fallbackHorzAlign) {
     outMarginXml
   };
 }
-function buildGridXml(grid, ctx) {
+function buildGridXml(grid, ctx, maxWidth = ctx.availableWidth) {
   const rowCount = grid.kids.length;
   const tableMap = Array.from({ length: rowCount }, () => []);
   for (let ri = 0; ri < rowCount; ri++) {
@@ -5830,23 +6006,16 @@ function buildGridXml(grid, ctx) {
   for (let ri = 0; ri < rowCount; ri++)
     colCount = Math.max(colCount, tableMap[ri].length);
   if (colCount === 0) colCount = 1;
-  const totalW = ctx.availableWidth;
-  const colWidths = [];
-  if (grid.props.colWidths && grid.props.colWidths.length === colCount) {
-    for (const wPt of grid.props.colWidths) {
-      colWidths.push(Metric.ptToHwp(wPt));
-    }
-  } else {
-    const defW = Math.round(totalW / colCount);
-    for (let c = 0; c < colCount; c++) colWidths.push(defW);
-  }
-  const rawTotal = colWidths.reduce((s, w) => s + w, 0);
-  if (rawTotal > totalW && rawTotal > 0) {
-    const scale = totalW / rawTotal;
-    for (let i = 0; i < colWidths.length; i++) {
-      colWidths[i] = Math.max(100, Math.round(colWidths[i] * scale));
-    }
-  }
+  const totalW = Math.max(1, Math.min(ctx.availableWidth, maxWidth));
+  const sourceWidths = (grid.props.colWidths ?? []).map(
+    (width) => width > 0 ? Metric.ptToHwp(width) : 0
+  );
+  const colWidths = fitColumnWidths(
+    sourceWidths,
+    colCount,
+    totalW,
+    Math.min(100, Math.floor(totalW / colCount))
+  );
   const actualTotal = colWidths.reduce((s, w) => s + w, 0);
   const rowHeights = [];
   for (let ri = 0; ri < rowCount; ri++) {
@@ -5902,7 +6071,7 @@ function buildGridXml(grid, ctx) {
       if (cell.kids.length > 0) {
         for (const kid of cell.kids) {
           if (kid.tag === "grid") {
-            const { xml: tblXml, height: nestedHeight } = buildGridXml(kid, ctx);
+            const { xml: tblXml, height: nestedHeight } = buildGridXml(kid, ctx, innerW);
             const pid = ctx.nextElementId++;
             const objectHeight = Math.max(1600, nestedHeight);
             const baseline = Math.round(objectHeight * 0.85);
@@ -5919,7 +6088,8 @@ function buildGridXml(grid, ctx) {
         parasXml = `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0" paraTcId="0"><hp:run charPrIDRef="0" charTcId="0"><hp:t xml:space="preserve"> </hp:t></hp:run>${emptyLineseg}</hp:p>`;
       }
       const vAlign = cp.va === "mid" ? "CENTER" : cp.va === "bot" ? "BOTTOM" : "TOP";
-      cellsXml += `<hp:tc name="" header="${cp.isHeader || grid.props.headerRow && ri === 0 ? 1 : 0}" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}"><hp:subList id="${subListId}" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${vAlign}" linkListIDRef="0" linkListNextIDRef="0" textWidth="${innerW}" textHeight="${Math.max(100, rowHeights[ri] - padT - padB)}" hasTextRef="0" hasNumRef="0">` + parasXml + `</hp:subList><hp:cellAddr colAddr="${ci}" rowAddr="${ri}"/><hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/><hp:cellSz width="${cellW}" height="${rowHeights[ri]}"/><hp:cellMargin left="${padL}" right="${padR}" top="${padT}" bottom="${padB}"/></hp:tc>`;
+      const cellHeight = rowHeights.slice(ri, Math.min(rowHeights.length, ri + Math.max(1, cell.rs))).reduce((sum, height) => sum + height, 0);
+      cellsXml += `<hp:tc name="" header="${cp.isHeader || grid.props.headerRow && ri === 0 ? 1 : 0}" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}"><hp:subList id="${subListId}" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${vAlign}" linkListIDRef="0" linkListNextIDRef="0" textWidth="${innerW}" textHeight="${Math.max(100, cellHeight - padT - padB)}" hasTextRef="0" hasNumRef="0">` + parasXml + `</hp:subList><hp:cellAddr colAddr="${ci}" rowAddr="${ri}"/><hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/><hp:cellSz width="${cellW}" height="${cellHeight}"/><hp:cellMargin left="${padL}" right="${padR}" top="${padT}" bottom="${padB}"/></hp:tc>`;
     }
     rowsXml += `<hp:tr>${cellsXml}</hp:tr>`;
   }
@@ -5932,7 +6102,7 @@ function buildGridXml(grid, ctx) {
   const horzAlign = alignMap[grid.props.align ?? "left"] ?? "LEFT";
   const layoutAttrs = buildGridLayoutAttrs(grid.props.layout, horzAlign);
   const repeatHeader = grid.props.headerRow ? 1 : 0;
-  const xml = `<hp:tbl id="${ctx.nextElementId++}" zOrder="${layoutAttrs.zOrder}" numberingType="TABLE" textWrap="${layoutAttrs.textWrap}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE" repeatHeader="${repeatHeader}" rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="${layoutAttrs.noAdjust}"><hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="${totalH}" heightRelTo="ABSOLUTE" protect="0"/>` + layoutAttrs.posXml + layoutAttrs.outMarginXml + `<hp:inMargin left="0" right="0" top="0" bottom="0"/>` + rowsXml + `</hp:tbl>`;
+  const xml = `<hp:tbl id="${ctx.nextElementId++}" zOrder="${layoutAttrs.zOrder}" numberingType="TABLE" textWrap="${layoutAttrs.textWrap}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="${repeatHeader}" rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="${layoutAttrs.noAdjust}"><hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="${totalH}" heightRelTo="ABSOLUTE" protect="0"/>` + layoutAttrs.posXml + layoutAttrs.outMarginXml + `<hp:inMargin left="0" right="0" top="0" bottom="0"/>` + rowsXml + `</hp:tbl>`;
   return { xml, height: totalH };
 }
 function estimateLineCountForWidth(text, fontSize, horzSize) {
@@ -6100,6 +6270,7 @@ var DocxEncoder = class extends BaseEncoder {
       const images = [];
       const ctx = {
         images,
+        dims,
         nextId: 10,
         nextImgNum: 1,
         warns: [],
@@ -6166,11 +6337,19 @@ var DocxEncoder = class extends BaseEncoder {
           name: "word/header1.xml",
           data: this.stringToBytes(headerXml)
         });
+        entries.push({
+          name: "word/_rels/header1.xml.rels",
+          data: this.stringToBytes(imagePartRels(images))
+        });
       }
       if (hasFooter) {
         entries.push({
           name: "word/footer1.xml",
           data: this.stringToBytes(footerXml)
+        });
+        entries.push({
+          name: "word/_rels/footer1.xml.rels",
+          data: this.stringToBytes(imagePartRels(images))
         });
       }
       for (const img of images) {
@@ -6186,6 +6365,8 @@ function mimeToExt2(mime) {
   if (mime.includes("jpeg")) return "jpeg";
   if (mime.includes("gif")) return "gif";
   if (mime.includes("bmp")) return "bmp";
+  if (mime.includes("wmf")) return "wmf";
+  if (mime.includes("emf")) return "emf";
   return "png";
 }
 function collectImages(kids, ctx) {
@@ -6207,22 +6388,21 @@ function collectImagesFromPara(para, ctx) {
 }
 function registerImage2(img, ctx) {
   if (ctx.imgMap.has(img)) return;
-  const ext = mimeToExt2(img.mime);
+  const data = TextKit.base64Decode(img.b64);
+  const ext = imageExtFromBytes(data) ?? mimeToExt2(img.mime);
   const name = `image${ctx.nextImgNum++}.${ext}`;
   const rId = `rId${ctx.nextId++}`;
-  const data = TextKit.base64Decode(img.b64);
   ctx.images.push({ rId, name, data, ext });
   ctx.imgMap.set(img, rId);
 }
-function registerSvgImage(svg, ctx) {
-  const entry = {
-    rId: `rId${ctx.nextId++}`,
-    name: `image${ctx.nextImgNum++}.svg`,
-    data: TextKit.encode(svg),
-    ext: "svg"
-  };
-  ctx.images.push(entry);
-  return entry;
+function imageExtFromBytes(data) {
+  if (data.length >= 8 && data[0] === 137 && data[1] === 80 && data[2] === 78 && data[3] === 71) return "png";
+  if (data.length >= 3 && data[0] === 255 && data[1] === 216 && data[2] === 255) return "jpeg";
+  if (data.length >= 6 && data[0] === 71 && data[1] === 73 && data[2] === 70) return "gif";
+  if (data.length >= 2 && data[0] === 66 && data[1] === 77) return "bmp";
+  if (data.length >= 4 && data[0] === 215 && data[1] === 205 && data[2] === 198 && data[3] === 154) return "wmf";
+  if (data.length >= 44 && data[40] === 32 && data[41] === 69 && data[42] === 77 && data[43] === 70) return "emf";
+  return void 0;
 }
 function collectFonts(kids, fonts = /* @__PURE__ */ new Set()) {
   for (const kid of kids) {
@@ -6292,7 +6472,7 @@ function contentTypes(images, hasHeader, hasFooter, hasFontTable) {
   let defaults = `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>`;
   for (const ext of imgDefaults) {
-    const ct = ext === "png" ? "image/png" : ext === "jpeg" ? "image/jpeg" : ext === "gif" ? "image/gif" : ext === "svg" ? "image/svg+xml" : "image/bmp";
+    const ct = ext === "png" ? "image/png" : ext === "jpeg" ? "image/jpeg" : ext === "gif" ? "image/gif" : ext === "svg" ? "image/svg+xml" : ext === "wmf" ? "image/x-wmf" : ext === "emf" ? "image/x-emf" : "image/bmp";
     defaults += `
   <Default Extension="${ext}" ContentType="${ct}"/>`;
   }
@@ -6352,6 +6532,15 @@ function docRels(images, headerRId, footerRId, hasLists, hasFontTable) {
   ${rels}
 </Relationships>`;
 }
+function imagePartRels(images) {
+  const rels = images.map(
+    (img) => `<Relationship Id="${img.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${img.name}"/>`
+  ).join("\n  ");
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  ${rels}
+</Relationships>`;
+}
 function appXml() {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">
@@ -6373,12 +6562,12 @@ function stylesXml() {
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:docDefaults>
     <w:rPrDefault><w:rPr>
-      <w:rFonts w:ascii="\uB9D1\uC740 \uACE0\uB515" w:eastAsia="\uD568\uCD08\uB86C\uBC14\uD0D5" w:hAnsi="\uB9D1\uC740 \uACE0\uB515" w:hint="eastAsia"/>
+      <w:rFonts w:ascii="\uD568\uCD08\uB86C\uBC14\uD0D5" w:eastAsia="\uD568\uCD08\uB86C\uBC14\uD0D5" w:hAnsi="\uD568\uCD08\uB86C\uBC14\uD0D5" w:hint="eastAsia"/>
       <w:sz w:val="20"/>
       <w:szCs w:val="20"/>
     </w:rPr></w:rPrDefault>
     <w:pPrDefault><w:pPr>
-      <w:spacing w:after="0" w:line="240" w:lineRule="auto"/>
+      <w:spacing w:after="0" w:line="384" w:lineRule="auto"/>
       <w:jc w:val="both"/>
     </w:pPr></w:pPrDefault>
   </w:docDefaults>
@@ -6460,9 +6649,9 @@ function numberingXml(info) {
   if (info.hasNumbered) {
     abstractNums += `<w:abstractNum w:abstractNumId="1">`;
     for (let lvl = 0; lvl < 9; lvl++) {
-      const fmt2 = lvl % 3 === 0 ? "decimal" : lvl % 3 === 1 ? "lowerLetter" : "lowerRoman";
+      const fmt = lvl % 3 === 0 ? "decimal" : lvl % 3 === 1 ? "lowerLetter" : "lowerRoman";
       const indent = (lvl + 1) * 720;
-      abstractNums += `<w:lvl w:ilvl="${lvl}"><w:start w:val="1"/><w:numFmt w:val="${fmt2}"/><w:lvlText w:val="%${lvl + 1}."/><w:pPr><w:ind w:left="${indent}" w:hanging="360"/></w:pPr></w:lvl>`;
+      abstractNums += `<w:lvl w:ilvl="${lvl}"><w:start w:val="1"/><w:numFmt w:val="${fmt}"/><w:lvlText w:val="%${lvl + 1}."/><w:pPr><w:ind w:left="${indent}" w:hanging="360"/></w:pPr></w:lvl>`;
     }
     abstractNums += `</w:abstractNum>`;
     nums += `<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>`;
@@ -6506,9 +6695,9 @@ ${body}
 </w:document>`;
 }
 function encodeContent(node, ctx, dims) {
-  return node.tag === "grid" ? encodeGrid(node, ctx, dims) : encodeParaInner(node, ctx, { compactEmptyBodyPara: true });
+  return node.tag === "grid" ? encodeGrid(node, ctx, dims) : encodeParaInner(node, ctx);
 }
-function encodeParaInner(para, ctx, opts = {}) {
+function encodeParaInner(para, ctx, maxWidthPt) {
   const align = para.props.align;
   let headStyle = "";
   if (para.props.hwpStyleId !== void 0) {
@@ -6523,7 +6712,7 @@ function encodeParaInner(para, ctx, opts = {}) {
     numPr = `<w:pStyle w:val="ListParagraph"/><w:numPr><w:ilvl w:val="${ilvl}"/><w:numId w:val="${numId}"/></w:numPr>`;
   }
   let spacingXml = "";
-  const { spaceBefore, spaceAfter, lineHeight, lineHeightFixed } = para.props;
+  const { spaceBefore, spaceAfter, lineHeight, lineHeightFixed, lineHeightRule } = para.props;
   if (spaceBefore !== void 0 || spaceAfter !== void 0 || lineHeight !== void 0 || lineHeightFixed !== void 0) {
     const parts = [];
     if (spaceBefore !== void 0)
@@ -6531,9 +6720,8 @@ function encodeParaInner(para, ctx, opts = {}) {
     if (spaceAfter !== void 0)
       parts.push(`w:after="${Math.max(0, Metric.ptToDxa(spaceAfter))}"`);
     if (lineHeightFixed !== void 0) {
-      const fixedPt = safeFixedLineHeightPt(para, lineHeightFixed);
       parts.push(
-        `w:line="${Math.max(1, Metric.ptToDxa(fixedPt))}" w:lineRule="atLeast"`
+        `w:line="${Math.max(1, Metric.ptToDxa(lineHeightFixed))}" w:lineRule="${lineHeightRule ?? "exact"}"`
       );
     } else if (lineHeight !== void 0) {
       const ratio = docxLineHeightRatio(lineHeight);
@@ -6542,9 +6730,6 @@ function encodeParaInner(para, ctx, opts = {}) {
       );
     }
     spacingXml = `<w:spacing ${parts.join(" ")}/>`;
-  }
-  if (opts.compactEmptyBodyPara && paraTextContent(para) === "" && !paraHasNonTextContent(para)) {
-    spacingXml = '<w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/>';
   }
   let indentXml = "";
   let leftDxa = Math.round(Metric.ptToDxa(para.props.indentPt ?? 0));
@@ -6574,7 +6759,7 @@ function encodeParaInner(para, ctx, opts = {}) {
   const jcXml = align && !omitEmptyLeftAlign ? `<w:jc w:val="${docxJcValue(align)}"/>` : "";
   const runs = para.kids.map((k) => {
     if (k.tag === "span") return encodeRun(k, ctx);
-    if (k.tag === "img") return encodeImage2(k, ctx);
+    if (k.tag === "img") return encodeImage2(k, ctx, maxWidthPt);
     if (k.tag === "pagenum") {
       const instr = k.format === "total" ? " NUMPAGES " : " PAGE ";
       return `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>${instr}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`;
@@ -6602,125 +6787,24 @@ function paraTextContent(para) {
   collect(para.kids);
   return text;
 }
-function paraHasNonTextContent(para) {
-  let found = false;
-  const visit = (kids) => {
-    for (const kid of kids ?? []) {
-      if (kid.tag === "img" || kid.tag === "br" || kid.tag === "pb" || kid.tag === "pagenum") {
-        found = true;
-        return;
-      }
-      if (kid.kids) visit(kid.kids);
-      if (found) return;
-    }
-  };
-  visit(para.kids);
-  return found;
-}
-function maxFontPtInPara(para) {
-  let maxPt = 10;
-  const visit = (kids) => {
-    for (const kid of kids ?? []) {
-      if (kid.tag === "span" && typeof kid.props?.pt === "number") {
-        maxPt = Math.max(maxPt, kid.props.pt);
-      }
-      if (kid.kids) visit(kid.kids);
-    }
-  };
-  visit(para.kids);
-  return maxPt;
-}
-function safeFixedLineHeightPt(para, fixedPt) {
-  const fontPt = maxFontPtInPara(para);
-  return Math.max(fixedPt, fontPt * 1.15);
-}
-function minParaHeightPt(para) {
-  const fontPt = maxFontPtInPara(para);
-  const before = Math.max(0, para.props.spaceBefore ?? 0);
-  const after = Math.max(0, para.props.spaceAfter ?? 0);
-  const lineCount = paraLineCount(para);
-  let linePt;
-  if (para.props.lineHeightFixed !== void 0) {
-    linePt = safeFixedLineHeightPt(para, para.props.lineHeightFixed);
-  } else {
-    const ratio = docxLineHeightRatio(para.props.lineHeight ?? 1.15);
-    linePt = fontPt * ratio;
-  }
-  return linePt * lineCount + before + after;
-}
 function docxLineHeightRatio(lineHeight) {
-  const ratio = Math.max(1, lineHeight);
-  if (ratio < 1.6) return ratio;
-  return Math.max(1.3, ratio * (14 / 17));
-}
-function paraLineCount(para) {
-  let lines = 1;
-  const visit = (kids) => {
-    for (const kid of kids ?? []) {
-      if (kid.tag === "span") {
-        for (const child of kid.kids ?? []) {
-          if (child.tag === "br") lines++;
-          else if (child.tag === "txt") {
-            lines += String(child.content ?? "").split(/\r\n|\r|\n/).length - 1;
-          }
-        }
-      }
-      if (kid.kids) visit(kid.kids);
-    }
-  };
-  visit(para.kids);
-  return Math.max(1, lines);
-}
-function minGridHeightPt(grid) {
-  return (grid.kids ?? []).reduce((sum, row) => {
-    const base = row.heightPt != null && row.heightPt > 0 ? row.heightPt : 14;
-    let minRow = 0;
-    for (const cell of row.kids ?? []) {
-      const span = Math.max(1, cell.rs ?? 1);
-      minRow = Math.max(minRow, minCellHeightPt(cell) / span);
-    }
-    return sum + Math.max(base, minRow);
-  }, 0);
-}
-function minCellHeightPt(cell) {
-  const cp = cell.props ?? {};
-  const padT = cp.padT ?? 1.4;
-  const padB = cp.padB ?? 1.4;
-  if (!cellHasVisibleContent(cell)) return padT + padB;
-  let content = 0;
-  for (const kid of cell.kids ?? []) {
-    if (kid.tag === "para") content += minParaHeightPt(kid);
-    else if (kid.tag === "grid") content += minGridHeightPt(kid);
-  }
-  return Math.max(content, 10) + padT + padB;
-}
-function cellHasVisibleContent(cell) {
-  for (const kid of cell.kids ?? []) {
-    if (kid.tag === "grid") return true;
-    if (kid.tag === "para") {
-      if (paraTextContent(kid).trim() !== "") return true;
-      if (paraHasNonTextContent(kid)) return true;
-    }
-  }
-  return false;
+  return Math.max(0.01, lineHeight);
 }
 function encodeRun(span, _ctx) {
   const p = span.props;
   const rPr = [];
-  const omitDefaultTableText = p.font === "\uD55C\uC591\uC2E0\uBA85\uC870" && p.pt === 10 && !p.b && !p.i && !p.u && !p.s && !p.sup && !p.sub && !p.color && !p.bg;
-  const omitInheritedTenPointSize = p.pt === 10;
   if (p.b) rPr.push("<w:b/>");
   if (p.i) rPr.push("<w:i/>");
   if (p.u) rPr.push('<w:u w:val="single"/>');
   if (p.s) rPr.push("<w:strike/>");
   if (p.sup) rPr.push('<w:vertAlign w:val="superscript"/>');
   if (p.sub) rPr.push('<w:vertAlign w:val="subscript"/>');
-  if (p.pt && !omitDefaultTableText && !omitInheritedTenPointSize)
+  if (p.pt)
     rPr.push(
       `<w:sz w:val="${Metric.ptToHalfPt(p.pt)}"/><w:szCs w:val="${Metric.ptToHalfPt(p.pt)}"/>`
     );
   if (p.color) rPr.push(`<w:color w:val="${p.color}"/>`);
-  if (p.font && !omitDefaultTableText)
+  if (p.font)
     rPr.push(
       `<w:rFonts w:ascii="${esc2(p.font)}" w:hAnsi="${esc2(p.font)}" w:eastAsia="${esc2(p.font)}" w:hint="eastAsia"/>`
     );
@@ -6747,11 +6831,19 @@ function encodeRun(span, _ctx) {
   }
   return parts.join("");
 }
-function encodeImage2(img, ctx) {
+function encodeImage2(img, ctx, maxWidthPt) {
   const rId = ctx.imgMap.get(img);
   if (!rId) return "";
-  const cx = Metric.ptToEmu(img.w > 0 ? img.w : 72);
-  const cy = Metric.ptToEmu(img.h > 0 ? img.h : 72);
+  const bodyWidthPt = Math.max(1, ctx.dims.wPt - ctx.dims.ml - ctx.dims.mr);
+  const bodyHeightPt = Math.max(1, ctx.dims.hPt - ctx.dims.mt - ctx.dims.mb);
+  let widthPt = Number.isFinite(img.w) && img.w > 0 ? img.w : 72;
+  let heightPt = Number.isFinite(img.h) && img.h > 0 ? img.h : 72;
+  const widthLimit = Math.max(1, Math.min(bodyWidthPt, maxWidthPt ?? bodyWidthPt));
+  const scale = Math.min(1, widthLimit / widthPt, bodyHeightPt / heightPt);
+  widthPt *= scale;
+  heightPt *= scale;
+  const cx = Metric.ptToEmu(widthPt);
+  const cy = Metric.ptToEmu(heightPt);
   const alt = esc2(img.alt ?? "");
   const docPrId = ctx.nextId++;
   const graphic = `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="Image"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${rId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic>`;
@@ -6766,8 +6858,8 @@ function encodeImage2(img, ctx) {
 function encodeAnchor(_img, cx, cy, alt, docPrId, graphic, layout) {
   const distT = Metric.ptToEmu(layout.distT ?? 0);
   const distB = Metric.ptToEmu(layout.distB ?? 0);
-  const distL = Metric.ptToEmu(layout.distL ?? 9144);
-  const distR = Metric.ptToEmu(layout.distR ?? 9144);
+  const distL = Metric.ptToEmu(layout.distL ?? 0);
+  const distR = Metric.ptToEmu(layout.distR ?? 0);
   const behindDoc = layout.behindDoc || layout.wrap === "behind" ? "1" : "0";
   const relH = layout.zOrder ?? 251658240;
   const horzRelFrom = HORZ_RELTO_DOCX[layout.horzRelTo ?? "column"] ?? "column";
@@ -6821,204 +6913,7 @@ var WRAP_DOCX = {
   behind: "<wp:wrapNone/>",
   front: "<wp:wrapNone/>"
 };
-function shouldEncodeGridAsSvgFallback(grid, dims) {
-  const layout = grid.props.layout;
-  if (!layout || layout.wrap === "inline") return false;
-  if (layout.vertRelTo !== "page" || layout.vertAlign !== "bottom") return false;
-  const widthPt = gridWidthPt(grid, dims);
-  const bodyWidthPt = Math.max(1, dims.wPt - dims.ml - dims.mr);
-  return grid.kids.length >= 4 || widthPt >= bodyWidthPt * 0.55;
-}
-function encodeGridAsSvgPicture(grid, ctx, dims) {
-  const widthPt = gridWidthPt(grid, dims);
-  const heightPt = svgFallbackHeightPt(grid);
-  const svg = renderGridSvg(grid, widthPt, heightPt);
-  const entry = registerSvgImage(svg, ctx);
-  const cx = Metric.ptToEmu(widthPt);
-  const cy = Metric.ptToEmu(heightPt);
-  const docPrId = ctx.nextId++;
-  const layout = grid.props.layout;
-  const bottomGapPt = Math.min(44, Math.max(32, dims.mb * 0.9));
-  const pictureLayout = {
-    ...layout,
-    wrap: "none",
-    horzRelTo: layout.horzRelTo === "para" ? "page" : layout.horzRelTo ?? "page",
-    vertRelTo: "page",
-    horzAlign: layout.horzAlign ?? "center",
-    vertAlign: "bottom",
-    yPt: layout.yPt ?? Math.max(0, dims.hPt - heightPt - bottomGapPt)
-  };
-  const graphic = `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="${escAttr(entry.name)}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${entry.rId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic>`;
-  return `    <w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr><w:r><w:drawing>${encodeAnchor({}, cx, cy, "Positioned table", docPrId, graphic, pictureLayout)}</w:drawing></w:r></w:p>`;
-}
-function gridWidthPt(grid, dims) {
-  const widths = grid.props.colWidths ?? [];
-  const total = widths.reduce((sum, w) => sum + Math.max(0, w), 0);
-  if (total > 0) return total;
-  return Math.max(1, dims.wPt - dims.ml - dims.mr);
-}
-function svgFallbackHeightPt(grid) {
-  const rowSum = grid.kids.reduce((sum, row) => sum + Math.max(0, row.heightPt ?? 0), 0);
-  const source = rowSum > 0 ? rowSum : minGridHeightPt(grid);
-  return Math.min(220, Math.max(140, source * 0.88));
-}
-function renderGridSvg(grid, widthPt, heightPt) {
-  const colCount = gridColumnCount(grid);
-  const sourceCols = [...grid.props.colWidths ?? []];
-  while (sourceCols.length < colCount) sourceCols.push(0);
-  sourceCols.length = colCount;
-  const known = sourceCols.filter((w) => w > 0).reduce((s, w) => s + w, 0);
-  const unknown = sourceCols.filter((w) => w <= 0).length;
-  const fill = unknown > 0 ? Math.max(1, (widthPt - known) / unknown) : 0;
-  const colWidths = sourceCols.map((w) => w > 0 ? w : fill);
-  const colScale = widthPt / Math.max(1, colWidths.reduce((s, w) => s + w, 0));
-  for (let i = 0; i < colWidths.length; i++) colWidths[i] *= colScale;
-  const sourceRows = grid.kids.map(
-    (row) => Math.max(row.heightPt ?? 0, row.kids.length > 0 ? 10 : 0)
-  );
-  const rowTotal = Math.max(1, sourceRows.reduce((s, h) => s + h, 0));
-  const drawableHeightPt = Math.max(1, heightPt - 34);
-  const rowHeights = sourceRows.map((h) => h / rowTotal * drawableHeightPt);
-  const colX = cumulativePositions(colWidths);
-  const rowY = cumulativePositions(rowHeights);
-  const occupied = Array.from({ length: grid.kids.length }, () => []);
-  const defs = [];
-  const body = [];
-  let clipId = 0;
-  for (let ri = 0; ri < grid.kids.length; ri++) {
-    let ci = 0;
-    for (const cell of grid.kids[ri].kids) {
-      while (occupied[ri]?.[ci]) ci++;
-      const cs = Math.max(1, cell.cs ?? 1);
-      const rs = Math.max(1, cell.rs ?? 1);
-      for (let rr = 0; rr < rs; rr++) {
-        for (let cc = 0; cc < cs; cc++) {
-          if (!occupied[ri + rr]) occupied[ri + rr] = [];
-          occupied[ri + rr][ci + cc] = true;
-        }
-      }
-      const x = colX[ci] ?? 0;
-      const y = rowY[ri] ?? 0;
-      const w = sumSlice(colWidths, ci, cs);
-      const h = sumSlice(rowHeights, ri, rs);
-      const cp = cell.props ?? {};
-      if (cp.bg) {
-        body.push(`<rect x="${fmt(x)}" y="${fmt(y)}" width="${fmt(w)}" height="${fmt(h)}" fill="#${escAttr(cp.bg)}"/>`);
-      }
-      drawSvgBorder(body, x, y, w, h, "top", cp.top ?? grid.props.defaultStroke);
-      drawSvgBorder(body, x, y, w, h, "bottom", cp.bot ?? grid.props.defaultStroke);
-      drawSvgBorder(body, x, y, w, h, "left", cp.left ?? grid.props.defaultStroke);
-      drawSvgBorder(body, x, y, w, h, "right", cp.right ?? grid.props.defaultStroke);
-      const lines = cellTextLines(cell);
-      if (lines.length > 0 && w > 1 && h > 1) {
-        const id = `c${clipId++}`;
-        defs.push(`<clipPath id="${id}"><rect x="${fmt(x + 0.5)}" y="${fmt(y + 0.5)}" width="${fmt(Math.max(0, w - 1))}" height="${fmt(Math.max(0, h - 1))}"/></clipPath>`);
-        body.push(renderSvgCellText(cell, lines, x, y, w, h, id));
-      }
-      ci += cs;
-    }
-  }
-  const defsXml = defs.length ? `<defs>${defs.join("")}</defs>` : "";
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${fmt(widthPt)}pt" height="${fmt(heightPt)}pt" viewBox="0 0 ${fmt(widthPt)} ${fmt(heightPt)}">` + defsXml + body.join("") + `</svg>`;
-}
-function gridColumnCount(grid) {
-  let max = grid.props.colWidths?.length ?? 0;
-  for (const row of grid.kids) {
-    let count = 0;
-    for (const cell of row.kids) count += Math.max(1, cell.cs ?? 1);
-    max = Math.max(max, count);
-  }
-  return Math.max(1, max);
-}
-function cumulativePositions(values) {
-  const positions = [];
-  let acc = 0;
-  for (const value of values) {
-    positions.push(acc);
-    acc += value;
-  }
-  return positions;
-}
-function sumSlice(values, start, count) {
-  let sum = 0;
-  for (let i = start; i < start + count && i < values.length; i++) sum += values[i];
-  return sum;
-}
-function drawSvgBorder(out, x, y, w, h, side, stroke) {
-  if (!stroke || stroke.kind === "none" || stroke.pt <= 0) return;
-  const color = escAttr((stroke.color ?? "000000").replace(/^#/, ""));
-  const sw = Math.max(0.4, stroke.pt);
-  const dash = stroke.kind === "dash" ? ` stroke-dasharray="${fmt(sw * 6)} ${fmt(sw * 3)}"` : stroke.kind === "dot" ? ` stroke-dasharray="${fmt(sw)} ${fmt(sw * 3)}"` : "";
-  const attrs = `stroke="#${color}" stroke-width="${fmt(sw)}"${dash} fill="none"`;
-  if (side === "top") out.push(`<line x1="${fmt(x)}" y1="${fmt(y)}" x2="${fmt(x + w)}" y2="${fmt(y)}" ${attrs}/>`);
-  else if (side === "bottom") out.push(`<line x1="${fmt(x)}" y1="${fmt(y + h)}" x2="${fmt(x + w)}" y2="${fmt(y + h)}" ${attrs}/>`);
-  else if (side === "left") out.push(`<line x1="${fmt(x)}" y1="${fmt(y)}" x2="${fmt(x)}" y2="${fmt(y + h)}" ${attrs}/>`);
-  else out.push(`<line x1="${fmt(x + w)}" y1="${fmt(y)}" x2="${fmt(x + w)}" y2="${fmt(y + h)}" ${attrs}/>`);
-}
-function renderSvgCellText(cell, lines, x, y, w, h, clipId) {
-  const fontPt = Math.max(4.8, Math.min(7.2, maxFontPtInCell(cell) * 0.75));
-  const step = fontPt * 1.18;
-  const totalTextH = lines.length * step;
-  const startY = y + Math.max(fontPt, (h - totalTextH) / 2 + fontPt * 0.85);
-  const pad = Math.min(3, Math.max(1.2, w * 0.04));
-  const align = firstParaAlign(cell);
-  const anchor = align === "center" ? "middle" : align === "right" ? "end" : "start";
-  const tx = align === "center" ? x + w / 2 : align === "right" ? x + w - pad : x + pad;
-  const text = lines.map(
-    (line, i) => `<text x="${fmt(tx)}" y="${fmt(startY + i * step)}" font-family="Malgun Gothic, Apple SD Gothic Neo, sans-serif" font-size="${fmt(fontPt)}" text-anchor="${anchor}" fill="#000000">${TextKit.escapeXml(line)}</text>`
-  ).join("");
-  return `<g clip-path="url(#${clipId})">${text}</g>`;
-}
-function cellTextLines(cell) {
-  const lines = [];
-  for (const kid of cell.kids ?? []) {
-    if (kid.tag !== "para") continue;
-    const text = paraPlainText(kid).trim();
-    if (text) lines.push(...text.split(/\r\n|\r|\n/).map((s) => s.trim()).filter(Boolean));
-  }
-  return lines;
-}
-function paraPlainText(para) {
-  let text = "";
-  const visit = (kids) => {
-    for (const kid of kids ?? []) {
-      if (kid.tag === "txt") text += kid.content ?? "";
-      else if (kid.tag === "br") text += "\n";
-      if (kid.kids) visit(kid.kids);
-    }
-  };
-  visit(para.kids);
-  return text;
-}
-function maxFontPtInCell(cell) {
-  let max = 9;
-  const visit = (kids) => {
-    for (const kid of kids ?? []) {
-      if (kid.tag === "span" && typeof kid.props?.pt === "number") max = Math.max(max, kid.props.pt);
-      if (kid.kids) visit(kid.kids);
-    }
-  };
-  for (const kid of cell.kids ?? []) {
-    if (kid.tag === "para") visit(kid.kids);
-  }
-  return max;
-}
-function firstParaAlign(cell) {
-  for (const kid of cell.kids ?? []) {
-    if (kid.tag === "para" && kid.props?.align) return kid.props.align;
-  }
-  return cell.props?.align ?? "left";
-}
-function fmt(value) {
-  return Number.isFinite(value) ? value.toFixed(2).replace(/\.?0+$/, "") : "0";
-}
-function escAttr(value) {
-  return TextKit.escapeXml(value);
-}
-function encodeGrid(grid, ctx, dims = A4) {
-  if (shouldEncodeGridAsSvgFallback(grid, dims)) {
-    return encodeGridAsSvgPicture(grid, ctx, dims);
-  }
+function encodeGrid(grid, ctx, dims = A4, maxWidthDxa) {
   const gp = grid.props;
   const look = gp.look;
   const firstRow = look?.firstRow ? "1" : "0";
@@ -7028,7 +6923,8 @@ function encodeGrid(grid, ctx, dims = A4) {
   const noHBand = look?.bandedRows ? "0" : "1";
   const noVBand = look?.bandedCols ? "0" : "1";
   const d = dims ?? A4;
-  const availDxa = Metric.ptToDxa(d.wPt - d.ml - d.mr);
+  const bodyDxa = Math.max(1, Metric.ptToDxa(d.wPt - d.ml - d.mr));
+  const availDxa = Math.max(1, Math.min(bodyDxa, maxWidthDxa ?? bodyDxa));
   const tableMap = Array.from(
     { length: grid.kids.length },
     () => []
@@ -7064,26 +6960,16 @@ function encodeGrid(grid, ctx, dims = A4) {
       if (!tableMap[ri][c]) tableMap[ri][c] = { type: "void" };
     }
   }
-  const defaultColDxa = Math.round(availDxa / colCount);
-  let colWidthsDxa = [];
-  if (grid.props.colWidths && grid.props.colWidths.length > 0) {
-    const srcPt = [...grid.props.colWidths];
-    while (srcPt.length < colCount) srcPt.push(0);
-    srcPt.length = colCount;
-    const knownTotalPt = srcPt.filter((w) => w > 0).reduce((s, w) => s + w, 0);
-    const zeroCount = srcPt.filter((w) => w <= 0).length;
-    const availPt = Metric.dxaToPt(availDxa);
-    const remainingPt = Math.max(0, availPt - knownTotalPt);
-    const zeroFillPt = zeroCount > 0 ? remainingPt / zeroCount : 0;
-    for (let i = 0; i < srcPt.length; i++) {
-      if (srcPt[i] <= 0) {
-        srcPt[i] = zeroFillPt > 0 ? zeroFillPt : 1;
-      }
-    }
-    colWidthsDxa = srcPt.map((w) => Math.round(Metric.ptToDxa(w)));
-  } else {
-    for (let c = 0; c < colCount; c++) colWidthsDxa.push(defaultColDxa);
-  }
+  const defaultColDxa = Math.max(1, Math.floor(availDxa / colCount));
+  const sourceWidthsDxa = (grid.props.colWidths ?? []).map(
+    (width) => width > 0 ? Metric.ptToDxa(width) : 0
+  );
+  const colWidthsDxa = fitColumnWidths(
+    sourceWidthsDxa,
+    colCount,
+    availDxa,
+    Math.min(100, defaultColDxa)
+  );
   const totalDxa = colWidthsDxa.reduce((s, w) => s + w, 0);
   const gridCols = colWidthsDxa.map((w) => `<w:gridCol w:w="${w}"/>`).join("");
   const rows = tableMap.map((rowMap, ri) => {
@@ -7148,9 +7034,17 @@ function encodeGrid(grid, ctx, dims = A4) {
           const parts = [];
           for (const kid of cell.kids) {
             if (kid.tag === "grid") {
-              parts.push(encodeGrid(kid, ctx));
+              const nestedLimit = Math.max(
+                1,
+                cw - (cPadL ?? 102) - (cPadR ?? 102)
+              );
+              parts.push(encodeGrid(kid, ctx, dims, nestedLimit));
             } else if (kid.tag === "para") {
-              parts.push(encodeParaInner(kid, ctx));
+              const textLimit = Math.max(
+                1,
+                cw - (cPadL ?? 102) - (cPadR ?? 102)
+              );
+              parts.push(encodeParaInner(kid, ctx, Metric.dxaToPt(textLimit)));
             }
           }
           const lastKid = cell.kids[cell.kids.length - 1];
@@ -7170,17 +7064,9 @@ function encodeGrid(grid, ctx, dims = A4) {
       trPrParts.push("<w:tblHeader/>");
     }
     const originalRow = grid.kids[ri];
-    let minRowHeightPt = 0;
-    for (const entry of rowMap) {
-      if (entry.type !== "real" || !entry.cell) continue;
-      const rs = Math.max(1, entry.cell.rs ?? 1);
-      minRowHeightPt = Math.max(minRowHeightPt, minCellHeightPt(entry.cell) / rs);
-    }
     if (originalRow?.heightPt != null && originalRow.heightPt > 0) {
-      const rowHeightPt = Math.max(originalRow.heightPt, minRowHeightPt);
-      const hDxa = Math.round(Metric.ptToDxa(rowHeightPt));
-      const hRule = !gp.layout && minRowHeightPt <= originalRow.heightPt + 1 ? "exact" : "atLeast";
-      trPrParts.push(`<w:trHeight w:val="${hDxa}" w:hRule="${hRule}"/>`);
+      const hDxa = Math.round(Metric.ptToDxa(originalRow.heightPt));
+      trPrParts.push(`<w:trHeight w:val="${hDxa}"/>`);
     }
     const trPr = trPrParts.length > 0 ? `<w:trPr>${trPrParts.join("")}</w:trPr>` : "";
     return `    <w:tr>${trPr}
@@ -7194,6 +7080,8 @@ ${cellXmls.join("\n")}
     dot: "dotted",
     double: "double",
     none: "none",
+    dashDot: "dotDash",
+    dashDotDot: "dotDotDash",
     dotDash: "dotDash",
     dotDotDash: "dotDotDash",
     triple: "triple",
@@ -7277,6 +7165,8 @@ function encodeCellBorders(cp) {
     dot: "dotted",
     double: "double",
     none: "none",
+    dashDot: "dotDash",
+    dashDotDot: "dotDotDash",
     dotDash: "dotDash",
     dotDotDash: "dotDotDash",
     triple: "triple"
@@ -7675,8 +7565,9 @@ var TAG_LIST_HEADER2 = T + 56;
 var TAG_PAGE_DEF2 = T + 57;
 var TAG_FOOTNOTE_SHAPE = T + 58;
 var TAG_PAGE_BORDER_FILL = T + 59;
+var TAG_SHAPE_COMPONENT = T + 60;
 var TAG_TABLE = T + 61;
-var TAG_SHAPE_COMPONENT_PICTURE = T + 69;
+var TAG_SHAPE_COMPONENT_PICTURE2 = T + 69;
 var TAG_CTRL_DATA = T + 71;
 var CTRL_TABLE2 = 1952607264;
 var CTRL_SECD2 = 1936024420;
@@ -7752,6 +7643,13 @@ var BufWriter = class {
   }
   i16(v) {
     return this.u16(v < 0 ? v + 65536 : v);
+  }
+  f64(v) {
+    const b = new Uint8Array(8);
+    new DataView(b.buffer).setFloat64(0, v, true);
+    this.chunks.push(b);
+    this._sz += 8;
+    return this;
   }
   bytes(d) {
     this.chunks.push(d);
@@ -8378,8 +8276,19 @@ function minCellHeightHwp(cell, innerWidthHwp) {
   const padB = cp.padB !== void 0 ? Metric.ptToHwp(cp.padB) : 141;
   let content = 0;
   for (const kid of cell.kids ?? []) {
-    if (kid.tag === "para") content += minParaHeightHwp(kid, innerWidthHwp);
-    else if (kid.tag === "grid")
+    if (kid.tag === "para") {
+      const images = flatImgNodes(kid.kids);
+      for (const image of images) {
+        content += imageDisplaySizeHwp(
+          image,
+          innerWidthHwp ?? Number.MAX_SAFE_INTEGER
+        ).h;
+      }
+      const textKids = kid.kids.filter((child) => child.tag !== "img");
+      if (textKids.length > 0 || images.length === 0) {
+        content += minParaHeightHwp({ ...kid, kids: textKids }, innerWidthHwp);
+      }
+    } else if (kid.tag === "grid")
       content += minGridHeightHwp(kid) + Metric.ptToHwp(6);
   }
   return Math.max(content, 1e3) + padT + padB;
@@ -8471,18 +8380,38 @@ function mkPicParaText() {
   const hi = CTRL_GSO2 >>> 16 & 65535;
   return new BufWriter().u16(11).u16(lo).u16(hi).u16(0).u16(0).u16(0).u16(0).u16(11).u16(13).build();
 }
-function mkShapeComponentPicture(binDataId, wHwp, hHwp) {
-  const w = new BufWriter();
-  w.u32(CTRL_PIC2).zeros(15);
-  w.u32(0).u32(0).u32(wHwp).u32(hHwp);
-  w.u32(0).u32(0).u32(wHwp).u32(hHwp);
-  w.zeros(36);
-  w.u16(binDataId).u8(0).u8(0).u8(0).zeros(5);
+function imageDisplaySizeHwp(imgNode, maxWidthHwp, maxHeightHwp = Number.MAX_SAFE_INTEGER) {
+  const rawData = TextKit.base64Decode(imgNode.b64);
+  const pixDims = readPixelDims2(rawData, imgNode.mime);
+  const sourceW = pixDims?.w ? Metric.ptToHwp(pixDims.w * 72 / 96) : Metric.ptToHwp(72);
+  const sourceH = pixDims?.h ? Metric.ptToHwp(pixDims.h * 72 / 96) : Metric.ptToHwp(72);
+  let w = Number.isFinite(imgNode.w) && imgNode.w > 0 ? Metric.ptToHwp(imgNode.w) : sourceW;
+  let h = Number.isFinite(imgNode.h) && imgNode.h > 0 ? Metric.ptToHwp(imgNode.h) : sourceH;
+  const scale = Math.min(
+    1,
+    Math.max(1, maxWidthHwp) / Math.max(1, w),
+    Math.max(1, maxHeightHwp) / Math.max(1, h)
+  );
+  w = Math.max(1, Math.round(w * scale));
+  h = Math.max(1, Math.round(h * scale));
+  return { w, h };
+}
+function writeIdentityMatrix(w) {
+  w.f64(1).f64(0).f64(0).f64(0).f64(1).f64(0);
+}
+function mkShapeComponent(wHwp, hHwp) {
+  const w = new BufWriter().u32(CTRL_PIC2).u32(CTRL_PIC2).i32(0).i32(0).u16(0).u16(1).u32(wHwp).u32(hHwp).u32(wHwp).u32(hHwp).u32(0).u16(0).i32(Math.round(wHwp / 2)).i32(Math.round(hHwp / 2)).u16(1);
+  writeIdentityMatrix(w);
+  writeIdentityMatrix(w);
+  writeIdentityMatrix(w);
   return w.build();
+}
+function mkShapeComponentPicture(binDataId, wHwp, hHwp, instanceId) {
+  return new BufWriter().u32(0).i32(0).u32(0).i32(0).i32(0).i32(wHwp).i32(0).i32(wHwp).i32(hHwp).i32(0).i32(hHwp).i32(0).i32(0).i32(wHwp).i32(hHwp).u16(0).u16(0).u16(0).u16(0).u8(0).u8(0).u8(0).u16(binDataId).u8(0).u32(instanceId).u32(0).u32(wHwp).u32(hHwp).u8(0).build();
 }
 function mkObjectCtrl(ctrlId, wHwp, hHwp, instanceId, layout) {
   let attr = 136978960;
-  if (ctrlId !== CTRL_GSO2 && layout?.wrap === "inline") attr |= 1 << 3;
+  if (!layout || layout.wrap === "inline") attr |= 1 | 1 << 2;
   return new BufWriter().u32(ctrlId).u32(attr).i32(layout?.yPt ? Metric.ptToHwp(layout.yPt) : 0).i32(layout?.xPt ? Metric.ptToHwp(layout.xPt) : 0).u32(wHwp).u32(hHwp).i32(layout?.zOrder ?? 0).u16(layout?.distL ? Metric.ptToHwp(layout.distL) : 0).u16(layout?.distR ? Metric.ptToHwp(layout.distR) : 0).u16(layout?.distT ? Metric.ptToHwp(layout.distT) : 0).u16(layout?.distB ? Metric.ptToHwp(layout.distB) : 0).u32(instanceId).i32(0).u16(0).build();
 }
 function mkFieldBeginCtrl(instanceId) {
@@ -8491,21 +8420,12 @@ function mkFieldBeginCtrl(instanceId) {
 function mkFieldEndCtrl(beginId) {
   return new BufWriter().u32(CTRL_FIELD_END).u32(0).zeros(28).u32(beginId).zeros(6).build();
 }
-function encodePicPara(imgNode, binDataId, bank, lv, idGen, availWidthHwp, divideSort = 0, vertPos = 0) {
-  const rawData = TextKit.base64Decode(imgNode.b64);
-  const pixDims = readPixelDims2(rawData, imgNode.mime);
-  let wHwp, hHwp;
-  if (pixDims && pixDims.w > 0 && pixDims.h > 0) {
-    wHwp = Metric.ptToHwp(pixDims.w * 72 / 96);
-    hHwp = Metric.ptToHwp(pixDims.h * 72 / 96);
-  } else {
-    wHwp = Metric.ptToHwp(imgNode.w);
-    hHwp = Metric.ptToHwp(imgNode.h);
-  }
-  if (wHwp > availWidthHwp) {
-    hHwp = Math.round(hHwp * availWidthHwp / wHwp);
-    wHwp = availWidthHwp;
-  }
+function encodePicPara(imgNode, binDataId, bank, lv, idGen, availWidthHwp, divideSort = 0, vertPos = 0, maxHeightHwp = Number.MAX_SAFE_INTEGER) {
+  const { w: wHwp, h: hHwp } = imageDisplaySizeHwp(
+    imgNode,
+    availWidthHwp,
+    maxHeightHwp
+  );
   const CTRL_MASK = 1 << 11;
   const instanceId = idGen();
   const psId = bank.addParaShape({});
@@ -8528,9 +8448,14 @@ function encodePicPara(imgNode, binDataId, bank, lv, idGen, availWidthHwp, divid
       mkObjectCtrl(CTRL_GSO2, wHwp, hHwp, idGen(), imgNode.layout)
     ),
     mkRec(
-      TAG_SHAPE_COMPONENT_PICTURE,
+      TAG_SHAPE_COMPONENT,
       lv + 2,
-      mkShapeComponentPicture(binDataId, wHwp, hHwp)
+      mkShapeComponent(wHwp, hHwp)
+    ),
+    mkRec(
+      TAG_SHAPE_COMPONENT_PICTURE2,
+      lv + 3,
+      mkShapeComponentPicture(binDataId, wHwp, hHwp, idGen())
     )
   ];
 }
@@ -8632,9 +8557,9 @@ function mkTableCtrl(wHwp, hHwp, instanceId, align = "left") {
   const alignFlags = { left: 0, center: 1, right: 2, justify: 3, distribute: 0, distribute_space: 0 }[align] ?? 0;
   return new BufWriter().u32(CTRL_TABLE2).u32(136978961).i32(0).i32(0).u32(wHwp).u32(hHwp).i32(7).u16(140).u16(140).u16(140).u16(140).u32(instanceId).i32(alignFlags).u16(0).build();
 }
-function mkTableRecord(rowCnt, colCnt, cellCountPerRow, bfId) {
+function mkTableRecord(rowCnt, colCnt, cellCountPerRow, bfId, repeatHeader) {
   const w = new BufWriter();
-  w.u32(67108870).u16(rowCnt).u16(colCnt).u16(0);
+  w.u32(67108865 | (repeatHeader ? 1 << 2 : 0)).u16(rowCnt).u16(colCnt).u16(0);
   w.u16(510).u16(510).u16(141).u16(141);
   for (const count of cellCountPerRow) w.u16(Math.max(1, count & 65535));
   w.u16(bfId).u16(0);
@@ -8644,7 +8569,7 @@ function mkCellListHeader(paraCount, row, col, rs, cs, wHwp, hHwp, bfId, padL = 
   return new BufWriter().u16(paraCount).u32(0).u16(0).u16(col).u16(row).u16(cs).u16(rs).u32(wHwp).u32(hHwp).u16(padL).u16(padR).u16(padT).u16(padB).u16(bfId).zeros(13).build();
 }
 var DEFAULT_ROW_HEIGHT_PT = 14;
-function encodeGrid4(grid, bank, lv, idGen, availWidthHwp) {
+function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
   const records = [];
   const rowCnt = grid.kids.length;
   const colCnt = Math.max(
@@ -8656,9 +8581,15 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp) {
       )
     )
   );
-  const cwPt = grid.props.colWidths ?? [];
-  const totalPt = cwPt.reduce((s, w) => s + w, 0) || 453;
-  const defColPt = totalPt / colCnt;
+  const sourceWidthsHwp = (grid.props.colWidths ?? []).map(
+    (width) => width > 0 ? Metric.ptToHwp(width) : 0
+  );
+  const colWidthsHwp = fitColumnWidths(
+    sourceWidthsHwp,
+    colCnt,
+    availWidthHwp,
+    Math.min(100, Math.floor(availWidthHwp / colCnt))
+  );
   const defStroke = grid.props.defaultStroke ?? bank.DEF_STROKE;
   const defBfId = bank.addBorderFill(defStroke);
   const rowHwp = grid.kids.map((row) => {
@@ -8667,17 +8598,17 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp) {
     let logicalCol = 0;
     for (const cell of row.kids ?? []) {
       const cs = Math.max(1, cell.cs ?? 1);
-      let cellWPt = 0;
+      let cellWidthHwp = 0;
       for (let sc = logicalCol; sc < logicalCol + cs; sc++) {
-        cellWPt += cwPt[sc] ?? defColPt;
+        cellWidthHwp += colWidthsHwp[sc] ?? 0;
       }
-      if (cellWPt <= 0) cellWPt = defColPt * cs;
+      if (cellWidthHwp <= 0) cellWidthHwp = Math.floor(availWidthHwp / colCnt) * cs;
       const cp = cell.props ?? {};
       const padL = cp.padL !== void 0 ? Metric.ptToHwp(cp.padL) : 510;
       const padR = cp.padR !== void 0 ? Metric.ptToHwp(cp.padR) : 510;
       const innerWidthHwp = Math.max(
         100,
-        Metric.ptToHwp(cellWPt) - padL - padR
+        cellWidthHwp - padL - padR
       );
       const span = Math.max(1, cell.rs ?? 1);
       minRow = Math.max(
@@ -8691,7 +8622,7 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp) {
   const cellCountPerRow = grid.kids.map(
     (row) => Math.max(1, row.kids.length)
   );
-  const tblWPt = cwPt.length > 0 ? cwPt.reduce((s, w) => s + w, 0) : totalPt;
+  const tblWidthHwp = colWidthsHwp.reduce((sum, width) => sum + width, 0);
   const tblHwp = rowHwp.reduce((s, h) => s + h, 0);
   const tblInstanceId = idGen();
   const tblAlign = grid.props.align ?? "left";
@@ -8700,7 +8631,7 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp) {
       TAG_CTRL_HEADER2,
       lv,
       mkTableCtrl(
-        Metric.ptToHwp(tblWPt),
+        tblWidthHwp,
         tblHwp,
         tblInstanceId,
         tblAlign
@@ -8711,7 +8642,7 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp) {
     mkRec(
       TAG_TABLE,
       lv + 1,
-      mkTableRecord(rowCnt, colCnt, cellCountPerRow, defBfId)
+      mkTableRecord(rowCnt, colCnt, cellCountPerRow, defBfId, !!grid.props.headerRow)
     )
   );
   for (let r = 0; r < grid.kids.length; r++) {
@@ -8719,13 +8650,12 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp) {
     for (let c = 0; c < grid.kids[r].kids.length; c++) {
       const cell = grid.kids[r].kids[c];
       const cs = Math.max(1, cell.cs ?? 1);
-      let cellWPt = 0;
+      let wHwp = 0;
       for (let sc = logicalCol; sc < logicalCol + cs; sc++) {
-        cellWPt += cwPt[sc] ?? defColPt;
+        wHwp += colWidthsHwp[sc] ?? 0;
       }
-      if (cellWPt <= 0) cellWPt = defColPt * cs;
-      const wHwp = Metric.ptToHwp(cellWPt);
-      const hHwp = rowHwp[r];
+      if (wHwp <= 0) wHwp = Math.floor(availWidthHwp / colCnt) * cs;
+      const hHwp = rowHwp.slice(r, Math.min(rowHwp.length, r + Math.max(1, cell.rs ?? 1))).reduce((sum, height) => sum + height, 0);
       const cp = cell.props;
       const hasPerSide = cp.top || cp.bot || cp.left || cp.right;
       const bfId = hasPerSide ? bank.addBorderFillPerSide(
@@ -8740,12 +8670,20 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp) {
       const padR = cp.padR !== void 0 ? Metric.ptToHwp(cp.padR) : 510;
       const padT = cp.padT !== void 0 ? Metric.ptToHwp(cp.padT) : 141;
       const padB = cp.padB !== void 0 ? Metric.ptToHwp(cp.padB) : 141;
+      const encodedCellParagraphs = cellKids.reduce((count, kid) => {
+        if (kid.tag === "grid") return count + 1;
+        const paraImages = flatImgNodes(kid.kids).filter(
+          (img) => images.some((bin) => b64Matches(bin, img.b64))
+        );
+        const textKids = kid.kids.filter((child) => child.tag !== "img");
+        return count + paraImages.length + (textKids.length > 0 || paraImages.length === 0 ? 1 : 0);
+      }, 0);
       records.push(
         mkRec(
           TAG_LIST_HEADER2,
           lv + 1,
           mkCellListHeader(
-            cellKids.length,
+            Math.max(1, encodedCellParagraphs),
             r,
             logicalCol,
             cell.rs,
@@ -8783,22 +8721,44 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp) {
               buildObjectLineSeg(cellWidthHwp, nestedGridHeight, cellVertPos)
             )
           );
-          records.push(...encodeGrid4(kid, bank, lv + 2, idGen, cellWidthHwp));
+          records.push(...encodeGrid4(kid, bank, lv + 2, idGen, cellWidthHwp, images));
           cellVertPos += nestedGridHeight + Metric.ptToHwp(6);
         } else {
           const para = kid;
-          records.push(
-            ...encodePara3(
-              para,
-              bank,
-              lv + 1,
-              idGen(),
-              cellWidthHwp,
-              0,
-              cellVertPos
-            )
-          );
-          cellVertPos += minParaHeightHwp(para, cellWidthHwp);
+          const paraImages = flatImgNodes(para.kids);
+          for (const img of paraImages) {
+            const binImg = images.find((bin) => b64Matches(bin, img.b64));
+            if (!binImg) continue;
+            records.push(
+              ...encodePicPara(
+                img,
+                binImg.id,
+                bank,
+                lv + 1,
+                idGen,
+                cellWidthHwp,
+                0,
+                cellVertPos
+              )
+            );
+            cellVertPos += imageDisplaySizeHwp(img, cellWidthHwp).h;
+          }
+          const textKids = para.kids.filter((child) => child.tag !== "img");
+          if (textKids.length > 0 || paraImages.length === 0) {
+            const textPara = { ...para, kids: textKids };
+            records.push(
+              ...encodePara3(
+                textPara,
+                bank,
+                lv + 1,
+                idGen(),
+                cellWidthHwp,
+                0,
+                cellVertPos
+              )
+            );
+            cellVertPos += minParaHeightHwp(textPara, cellWidthHwp);
+          }
         }
       }
       logicalCol += cs;
@@ -8963,7 +8923,7 @@ function buildBodyTextStream(doc, bank, images) {
               buildObjectLineSeg(availWidthHwp, gridHeight, vertPos)
             )
           );
-          for (const r of encodeGrid4(gridNode, bank, 1, idGen, availWidthHwp))
+          for (const r of encodeGrid4(gridNode, bank, 1, idGen, availWidthHwp, images))
             chunks.push(r);
           vertPos += Math.max(Metric.ptToHwp(20), gridHeight + Metric.ptToHwp(6));
           continue;
@@ -8978,7 +8938,11 @@ function buildBodyTextStream(doc, bank, images) {
           for (const img of imgNodes) {
             const binImg = images.find((b) => b64Matches(b, img.b64));
             if (binImg) {
-              const imageHeight = Metric.ptToHwp(img.h ?? 100);
+              const imageHeight = imageDisplaySizeHwp(
+                img,
+                availWidthHwp,
+                bodyHeightHwp
+              ).h;
               if (vertPos > 0 && vertPos + imageHeight > bodyHeightHwp) {
                 vertPos = 0;
               }
@@ -8992,7 +8956,8 @@ function buildBodyTextStream(doc, bank, images) {
                 idGen,
                 availWidthHwp,
                 imageDivideSort,
-                vertPos
+                vertPos,
+                bodyHeightHwp
               )) {
                 chunks.push(r);
               }
@@ -9081,7 +9046,8 @@ function buildBodyTextStream(doc, bank, images) {
           bank,
           1,
           idGen,
-          availWidthHwp
+          availWidthHwp,
+          images
         ))
           chunks.push(r);
         vertPos += Math.max(
@@ -9158,7 +9124,7 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
   });
   for (let i = 0; i < binImages.length; i++) {
     const img = binImages[i];
-    const name = `BIN${String(img.id).padStart(4, "0")}.${img.ext}`;
+    const name = `BIN${img.id.toString(16).toUpperCase().padStart(4, "0")}.${img.ext}`;
     streams.push({
       name,
       data: img.data,
@@ -9511,7 +9477,7 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
     const binTree = buildSiblingTree(
       binImages.map((img, i) => ({
         idx: 6 + i,
-        name: `BIN${String(img.id).padStart(4, "0")}.${img.ext}`
+        name: `BIN${img.id.toString(16).toUpperCase().padStart(4, "0")}.${img.ext}`
       }))
     );
     writeDirEntry(
@@ -9616,11 +9582,11 @@ var HwpEncoder = class extends BaseEncoder {
   async encode(doc) {
     try {
       let registerImg2 = function(img) {
-        const key = img.b64.substring(0, 50);
+        const key = String(img.b64 ?? "").replace(/\s/g, "");
         if (seenB64.has(key)) return;
         seenB64.add(key);
         const raw = TextKit.base64Decode(img.b64);
-        const ext = img.mime === "image/png" ? "png" : img.mime === "image/gif" ? "gif" : img.mime === "image/bmp" ? "bmp" : "jpg";
+        const ext = img.mime === "image/png" ? "png" : img.mime === "image/gif" ? "gif" : img.mime === "image/bmp" ? "bmp" : img.mime === "image/x-wmf" ? "wmf" : img.mime === "image/x-emf" ? "emf" : "jpg";
         images.push({ id: binIdCounter++, ext, data: new Uint8Array(raw) });
       }, collectImages3 = function(node) {
         if (node.tag === "para") {
@@ -9676,20 +9642,20 @@ var Pipeline = class _Pipeline {
     this.srcFmt = srcFmt;
   }
   /** 파일을 열고 포맷을 자동 감지하거나 명시 */
-  static open(input, fmt2) {
+  static open(input, fmt) {
     if (typeof input === "string") {
-      return new _Pipeline(new TextEncoder().encode(input), fmt2 ?? "md");
+      return new _Pipeline(new TextEncoder().encode(input), fmt ?? "md");
     }
-    return new _Pipeline(input, fmt2 ?? detectFormat(input));
+    return new _Pipeline(input, fmt ?? detectFormat(input));
   }
   /** File/Blob 비동기 입력 */
-  static async openAsync(input, fmt2) {
+  static async openAsync(input, fmt) {
     if (input instanceof Uint8Array || typeof input === "string") {
-      return _Pipeline.open(input, fmt2);
+      return _Pipeline.open(input, fmt);
     }
     const buf = await input.arrayBuffer();
     const data = new Uint8Array(buf);
-    const detectedFmt = fmt2 ?? (input instanceof File ? getExt(input.name) : void 0) ?? detectFormat(data);
+    const detectedFmt = fmt ?? (input instanceof File ? getExt(input.name) : void 0) ?? detectFormat(data);
     return new _Pipeline(data, detectedFmt);
   }
   /** 목표 포맷으로 변환 */

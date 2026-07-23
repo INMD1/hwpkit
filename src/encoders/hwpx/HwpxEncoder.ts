@@ -35,6 +35,7 @@ import { succeed, fail } from "../../contract/result";
 import { Metric, safeFontToKr } from "../../safety/StyleBridge";
 import { ArchiveKit } from "../../toolkit/ArchiveKit";
 import { TextKit } from "../../toolkit/TextKit";
+import { fitColumnWidths } from "../../toolkit/TableGeometry";
 import { registry } from "../../pipeline/registry";
 import { HWPX_MIME_TYPE } from "./constants";
 
@@ -383,7 +384,7 @@ interface ParaPrDef {
   prevHwp: number;
   nextHwp: number;
   lineSpacing: number;
-  lineSpacingFixed?: number; // HWPUNIT, emitted as AT_LEAST
+  lineSpacingFixed?: number; // paraPr 배율값(물리 HWPUNIT × 2), emitted as AT_LEAST
   listType?: string;
   listLevel?: number;
   verAlign?: string;
@@ -405,6 +406,11 @@ interface BinEntry {
 
 function charPrKey(p: TextProps): string {
   return `${p.b ? 1 : 0}|${p.i ? 1 : 0}|${p.u ? 1 : 0}|${p.s ? 1 : 0}|${p.pt ?? 10}|${p.color ?? "000000"}|${p.font ?? ""}|${p.bg ?? ""}`;
+}
+
+/** paraPr의 배율 저장값을 linesegarray가 사용하는 물리 HWPUNIT로 환산한다. */
+function paraShapeHwpToLayoutHwp(value: number): number {
+  return Math.round(value / 2);
 }
 
 /**
@@ -502,16 +508,19 @@ function registerParaPr(props: ParaProps, ctx: HwpxCtx): number {
     align: alignStr,
     verAlign: verAlignStr,
     lineWrap: lineWrapStr,
-    leftHwp: Metric.ptToHwp(props.indentPt ?? 0),
-    rightHwp: Metric.ptToHwp(props.indentRightPt ?? 0),
-    intentHwp: Metric.ptToHwp(props.firstLineIndentPt ?? 0),
-    prevHwp: Metric.ptToHwp(props.spaceBefore ?? 0),
-    nextHwp: Metric.ptToHwp(props.spaceAfter ?? 0),
+    leftHwp: Metric.ptToHwp(props.indentPt ?? 0) * 2,
+    rightHwp: Metric.ptToHwp(props.indentRightPt ?? 0) * 2,
+    intentHwp: Metric.ptToHwp(props.firstLineIndentPt ?? 0) * 2,
+    prevHwp: Metric.ptToHwp(props.spaceBefore ?? 0) * 2,
+    nextHwp: Metric.ptToHwp(props.spaceAfter ?? 0) * 2,
     lineSpacing: props.lineHeightFixed
       ? 0
       : (props.lineHeight ? Math.round(props.lineHeight * 100) : 160),
     lineSpacingFixed: props.lineHeightFixed
-      ? Math.max(Metric.ptToHwp(props.lineHeightFixed), Math.ceil(1000 * 1.15))
+      ? Math.max(
+          Metric.ptToHwp(props.lineHeightFixed),
+          Math.ceil(1000 * 1.15),
+        ) * 2
       : undefined,
   };
   if (props.listOrd !== undefined) {
@@ -529,6 +538,8 @@ function mimeToExt(mime: string): string {
   if (mime.includes("jpeg")) return "jpg";
   if (mime.includes("gif")) return "gif";
   if (mime.includes("bmp")) return "bmp";
+  if (mime.includes("wmf")) return "wmf";
+  if (mime.includes("emf")) return "emf";
   return "png";
 }
 
@@ -787,6 +798,10 @@ export class HwpxEncoder extends BaseEncoder {
               ? "image/jpeg"
               : ext === "gif"
                 ? "image/gif"
+                : ext === "wmf"
+                  ? "image/x-wmf"
+                  : ext === "emf"
+                    ? "image/x-emf"
                 : "image/bmp";
         entries.push({ name: `BinData/${bin.name}`, data: bin.data, mime: ct });
       }
@@ -857,6 +872,10 @@ function buildContentHpf(ctx: HwpxCtx, meta?: DocMeta): string {
           ? "image/jpeg"
           : ext === "gif"
             ? "image/gif"
+            : ext === "wmf"
+              ? "image/x-wmf"
+              : ext === "emf"
+                ? "image/x-emf"
             : "image/bmp";
     items += `<opf:item id="${bin.id}" href="BinData/${bin.name}" media-type="${ct}" isEmbeded="1"/>`;
   }
@@ -1039,7 +1058,7 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
       `<hp:switch>` +
       `<hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">` +
       `<hh:margin>` +
-      `<hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/>` +
+      `<hc:indent value="${pp.intentHwp}" unit="HWPUNIT"/>` +
       `<hc:left value="${pp.leftHwp}" unit="HWPUNIT"/>` +
       `<hc:right value="${pp.rightHwp}" unit="HWPUNIT"/>` +
       `<hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/>` +
@@ -1049,7 +1068,7 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
       `</hp:case>` +
       `<hp:default>` +
       `<hh:margin>` +
-      `<hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/>` +
+      `<hc:indent value="${pp.intentHwp}" unit="HWPUNIT"/>` +
       `<hc:left value="${pp.leftHwp}" unit="HWPUNIT"/>` +
       `<hc:right value="${pp.rightHwp}" unit="HWPUNIT"/>` +
       `<hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/>` +
@@ -1515,7 +1534,10 @@ function encodeParaPositioned(
   const paraPr = ctx.paraPrs[paraPrId];
   const lineSpacing = paraPr?.lineSpacing ?? 160;
   const lineHeightHwp = paraPr?.lineSpacingFixed !== undefined
-    ? Math.max(paraPr.lineSpacingFixed, Math.ceil(fontSize * 1.15))
+    ? Math.max(
+        paraShapeHwpToLayoutHwp(paraPr.lineSpacingFixed),
+        Math.ceil(fontSize * 1.15),
+      )
     : Math.max(fontSize, Math.round((fontSize * Math.max(100, lineSpacing)) / 100));
   const textHeight = Math.max(fontSize, inlineObjectHeightForPara(para, ctx));
   const effectiveLineHeight = textHeight + Math.max(0, lineHeightHwp - fontSize);
@@ -1552,12 +1574,18 @@ function encodeParaPositioned(
   if (!runsXml) runsXml = `<hp:run charPrIDRef="0" charTcId="0"><hp:t xml:space="preserve"> </hp:t></hp:run>`;
 
   const paraText = extractParaText(para);
-  const paraStart = vertPos + Math.max(0, paraPr?.prevHwp ?? 0);
+  const paraStart =
+    vertPos + Math.max(0, paraShapeHwpToLayoutHwp(paraPr?.prevHwp ?? 0));
   const firstHorzPos = Math.max(
     0,
-    (paraPr?.leftHwp ?? 0) + (paraPr?.intentHwp ?? 0),
+    paraShapeHwpToLayoutHwp(
+      (paraPr?.leftHwp ?? 0) + (paraPr?.intentHwp ?? 0),
+    ),
   );
-  const restHorzPos = Math.max(0, paraPr?.leftHwp ?? 0);
+  const restHorzPos = Math.max(
+    0,
+    paraShapeHwpToLayoutHwp(paraPr?.leftHwp ?? 0),
+  );
   const { xml: linesegXml, totalHeight } = buildLinesegarray(
     paraText,
     paraStart,
@@ -1569,7 +1597,10 @@ function encodeParaPositioned(
       textHeight,
       firstHorzPos,
       restHorzPos,
-      rightMargin: Math.max(0, paraPr?.rightHwp ?? 0),
+      rightMargin: Math.max(
+        0,
+        paraShapeHwpToLayoutHwp(paraPr?.rightHwp ?? 0),
+      ),
       indentFirst: (paraPr?.intentHwp ?? 0) !== 0,
       pageFirst,
     },
@@ -1588,7 +1619,10 @@ function encodeParaPositioned(
 
   return {
     xml,
-    nextVertPos: paraStart + totalHeight + Math.max(0, paraPr?.nextHwp ?? 0),
+    nextVertPos:
+      paraStart +
+      totalHeight +
+      Math.max(0, paraShapeHwpToLayoutHwp(paraPr?.nextHwp ?? 0)),
     hasPageBreak,
   };
 }
@@ -1670,7 +1704,7 @@ function encodeCodeBlockPositioned(
     `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0" paraTcId="0">` +
     secPr +
     `<hp:run charPrIDRef="0" charTcId="0">` +
-    `<hp:tbl id="${ctx.nextElementId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE" repeatHeader="0" rowCnt="1" colCnt="1" cellSpacing="0" borderFillIDRef="${codeBfId}" noAdjust="0">` +
+    `<hp:tbl id="${ctx.nextElementId++}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="0" rowCnt="1" colCnt="1" cellSpacing="0" borderFillIDRef="${codeBfId}" noAdjust="0">` +
     `<hp:sz width="${cellW}" widthRelTo="ABSOLUTE" height="0" heightRelTo="ABSOLUTE" protect="0"/>` +
     `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>` +
     `<hp:outMargin left="138" right="138" top="138" bottom="138"/>` +
@@ -2017,6 +2051,7 @@ function buildGridLayoutAttrs(
 function buildGridXml(
   grid: GridNode,
   ctx: HwpxCtx,
+  maxWidth = ctx.availableWidth,
 ): { xml: string; height: number } {
   const rowCount = grid.kids.length;
   // ... (기존 tableMap 생성 로직 동일)
@@ -2051,29 +2086,21 @@ function buildGridXml(
   if (colCount === 0) colCount = 1;
 
   // 컬럼 너비 계산 (Bug 6: 균등 배분 금지, 원본 보존)
-  const totalW = ctx.availableWidth;
-  const colWidths: number[] = [];
-
-  if (grid.props.colWidths && grid.props.colWidths.length === colCount) {
-    // pt -> HWPUNIT 변환하여 원본 값 보존
-    for (const wPt of grid.props.colWidths) {
-      colWidths.push(Metric.ptToHwp(wPt));
-    }
-  } else {
-    // 너비 정보가 없을 때만 균등 배분
-    const defW = Math.round(totalW / colCount);
-    for (let c = 0; c < colCount; c++) colWidths.push(defW);
-  }
-
-  // 본문 너비 초과 시에만 비율 축소 보정
-  const rawTotal = colWidths.reduce((s, w) => s + w, 0);
-  if (rawTotal > totalW && rawTotal > 0) {
-    const scale = totalW / rawTotal;
-    for (let i = 0; i < colWidths.length; i++) {
-      colWidths[i] = Math.max(100, Math.round(colWidths[i] * scale));
-    }
-  }
+  const totalW = Math.max(1, Math.min(ctx.availableWidth, maxWidth));
+  const sourceWidths = (grid.props.colWidths ?? []).map((width) =>
+    width > 0 ? Metric.ptToHwp(width) : 0,
+  );
+  const colWidths = fitColumnWidths(
+    sourceWidths,
+    colCount,
+    totalW,
+    Math.min(100, Math.floor(totalW / colCount)),
+  );
   const actualTotal = colWidths.reduce((s, w) => s + w, 0);
+  const tablePadL = Metric.ptToHwp(grid.props.cellPadL ?? 1.41);
+  const tablePadR = Metric.ptToHwp(grid.props.cellPadR ?? 1.41);
+  const tablePadT = Metric.ptToHwp(grid.props.cellPadT ?? 1.41);
+  const tablePadB = Metric.ptToHwp(grid.props.cellPadB ?? 1.41);
 
   // 행 높이 계산
   const rowHeights: number[] = [];
@@ -2088,8 +2115,8 @@ function buildGridXml(
         for (let sc = ci; sc < ci + cell.cs && sc < colWidths.length; sc++)
           cellW += colWidths[sc];
         if (!cellW) cellW = Math.round(totalW / colCount) * cell.cs;
-        const padL = cp.padL !== undefined ? Metric.ptToHwp(cp.padL) : 141;
-        const padR = cp.padR !== undefined ? Metric.ptToHwp(cp.padR) : 141;
+        const padL = cp.padL !== undefined ? Metric.ptToHwp(cp.padL) : tablePadL;
+        const padR = cp.padR !== undefined ? Metric.ptToHwp(cp.padR) : tablePadR;
         const innerW = Math.max(cellW - padL - padR, 100);
         const span = Math.max(1, cell.rs ?? 1);
         const h = estimateCellHeight(cell, ctx, innerW);
@@ -2135,11 +2162,10 @@ function buildGridXml(
 
       const subListId = ctx.nextElementId++;
 
-      // 셀 여백 (기본 141)
-      const padL = cp.padL !== undefined ? Metric.ptToHwp(cp.padL) : 141;
-      const padR = cp.padR !== undefined ? Metric.ptToHwp(cp.padR) : 141;
-      const padT = cp.padT !== undefined ? Metric.ptToHwp(cp.padT) : 141;
-      const padB = cp.padB !== undefined ? Metric.ptToHwp(cp.padB) : 141;
+      const padL = cp.padL !== undefined ? Metric.ptToHwp(cp.padL) : tablePadL;
+      const padR = cp.padR !== undefined ? Metric.ptToHwp(cp.padR) : tablePadR;
+      const padT = cp.padT !== undefined ? Metric.ptToHwp(cp.padT) : tablePadT;
+      const padB = cp.padB !== undefined ? Metric.ptToHwp(cp.padB) : tablePadB;
 
       const innerW = Math.max(cellW - padL - padR, 100);
       let parasXml = '';
@@ -2147,7 +2173,7 @@ function buildGridXml(
       if (cell.kids.length > 0) {
         for (const kid of cell.kids) {
           if (kid.tag === 'grid') {
-            const { xml: tblXml, height: nestedHeight } = buildGridXml(kid, ctx);
+            const { xml: tblXml, height: nestedHeight } = buildGridXml(kid, ctx, innerW);
             const pid = ctx.nextElementId++;
             const objectHeight = Math.max(1600, nestedHeight);
             const baseline = Math.round(objectHeight * 0.85);
@@ -2173,15 +2199,19 @@ function buildGridXml(
       const vAlign =
         cp.va === "mid" ? "CENTER" : cp.va === "bot" ? "BOTTOM" : "TOP";
 
+      const cellHeight = rowHeights
+        .slice(ri, Math.min(rowHeights.length, ri + Math.max(1, cell.rs)))
+        .reduce((sum, height) => sum + height, 0);
+
       cellsXml +=
         `<hp:tc name="" header="${cp.isHeader || (grid.props.headerRow && ri === 0) ? 1 : 0}" hasMargin="1" protect="0" editable="0" dirty="0" borderFillIDRef="${cellBfId}">` +
         `<hp:subList id="${subListId}" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="${vAlign}" ` +
-        `linkListIDRef="0" linkListNextIDRef="0" textWidth="${innerW}" textHeight="${Math.max(100, rowHeights[ri] - padT - padB)}" hasTextRef="0" hasNumRef="0">` +
+        `linkListIDRef="0" linkListNextIDRef="0" textWidth="${innerW}" textHeight="${Math.max(100, cellHeight - padT - padB)}" hasTextRef="0" hasNumRef="0">` +
         parasXml +
         `</hp:subList>` +
         `<hp:cellAddr colAddr="${ci}" rowAddr="${ri}"/>` +
         `<hp:cellSpan colSpan="${cell.cs}" rowSpan="${cell.rs}"/>` +
-        `<hp:cellSz width="${cellW}" height="${rowHeights[ri]}"/>` +
+        `<hp:cellSz width="${cellW}" height="${cellHeight}"/>` +
         `<hp:cellMargin left="${padL}" right="${padR}" top="${padT}" bottom="${padB}"/>` +
         `</hp:tc>`;
     }
@@ -2197,11 +2227,11 @@ function buildGridXml(
 
   const repeatHeader = grid.props.headerRow ? 1 : 0;
   const xml =
-    `<hp:tbl id="${ctx.nextElementId++}" zOrder="${layoutAttrs.zOrder}" numberingType="TABLE" textWrap="${layoutAttrs.textWrap}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="NONE" repeatHeader="${repeatHeader}" rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="${layoutAttrs.noAdjust}">` +
+    `<hp:tbl id="${ctx.nextElementId++}" zOrder="${layoutAttrs.zOrder}" numberingType="TABLE" textWrap="${layoutAttrs.textWrap}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="${repeatHeader}" rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="${layoutAttrs.noAdjust}">` +
     `<hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="${totalH}" heightRelTo="ABSOLUTE" protect="0"/>` +
     layoutAttrs.posXml +
     layoutAttrs.outMarginXml +
-    `<hp:inMargin left="0" right="0" top="0" bottom="0"/>` +
+    `<hp:inMargin left="${tablePadL}" right="${tablePadR}" top="${tablePadT}" bottom="${tablePadB}"/>` +
     rowsXml +
     `</hp:tbl>`;
 
@@ -2282,7 +2312,10 @@ function estimateCellHeight(
     const ppId = ctx.paraPrMap.get(paraPrKey(para.props));
     const pp = ppId !== undefined ? ctx.paraPrs[ppId] : null;
     const lineHeight = pp?.lineSpacingFixed !== undefined
-      ? Math.max(pp.lineSpacingFixed, Math.ceil(fs * 1.15))
+      ? Math.max(
+          paraShapeHwpToLayoutHwp(pp.lineSpacingFixed),
+          Math.ceil(fs * 1.15),
+        )
       : Math.max(fs, Math.round((fs * Math.max(100, pp?.lineSpacing ?? 160)) / 100));
     const textHeight = Math.max(fs, inlineObjectHeightForPara(para, ctx));
     const lineAdvance = textHeight + Math.max(0, lineHeight - fs);
@@ -2291,8 +2324,8 @@ function estimateCellHeight(
       fs,
       innerWidth,
     );
-    const before = pp?.prevHwp ?? 0;
-    const after = pp?.nextHwp ?? 0;
+    const before = paraShapeHwpToLayoutHwp(pp?.prevHwp ?? 0);
+    const after = paraShapeHwpToLayoutHwp(pp?.nextHwp ?? 0);
     h += lineAdvance * lineCount + before + after;
   }
   if (!h) h = Math.round(1000 * 1.6);

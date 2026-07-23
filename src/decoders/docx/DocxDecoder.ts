@@ -231,6 +231,8 @@ interface ParaStyleDef {
     spaceBefore?: number;
     spaceAfter?: number;
     lineHeight?: number;
+    lineHeightFixed?: number;
+    lineHeightRule?: 'exact' | 'atLeast';
     indentPt?: number;
     indentRightPt?: number;
     firstLineIndentPt?: number;
@@ -238,6 +240,11 @@ interface ParaStyleDef {
   basedOn?: string; // parent style id
   name?: string;
 }
+
+const DOCX_DEFAULT_STYLE_KEY = "__docx_defaults__";
+const WORD_DEFAULT_SPACE_BEFORE_PT = 0;
+const WORD_DEFAULT_SPACE_AFTER_PT = 8;
+const WORD_DEFAULT_LINE_HEIGHT = 1.15;
 
 type StylesMap = Map<string, TblStyleDef>; // styleId → table style defaults
 type ParaStyleMap = Map<string, ParaStyleDef>; // styleId → para/char style defaults
@@ -601,10 +608,18 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
     "";
 
   // Resolve paragraph style inheritance chain
-  const styleInherited = resolveParaStyle(
+  const documentDefaults = resolveParaStyle(
+    DOCX_DEFAULT_STYLE_KEY,
+    ctx.paraStyleMap,
+  );
+  const namedStyle = resolveParaStyle(
     headStyle || undefined,
     ctx.paraStyleMap,
   );
+  const styleInherited: ParaStyleDef = {
+    rPr: { ...documentDefaults.rPr, ...namedStyle.rPr },
+    pPr: { ...documentDefaults.pPr, ...namedStyle.pPr },
+  };
   const canonicalStyle = canonicalDocxStyleId(headStyle, ctx.paraStyleMap);
 
   const props: ParaProps = {
@@ -616,22 +631,36 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   // Spacing (before/after/line height) — inline pPr wins over style
   const spacingAttr =
     pPr?.["w:spacing"]?.[0]?._attr ?? pPr?.spacing?.[0]?._attr ?? {};
-  const beforeVal = Number(
-    spacingAttr?.["w:before"] ?? spacingAttr?.before ?? 0,
-  );
-  const afterVal = Number(spacingAttr?.["w:after"] ?? spacingAttr?.after ?? 0);
-  const lineVal = Number(spacingAttr?.["w:line"] ?? spacingAttr?.line ?? 0);
+  const beforeRaw = docxAttr(spacingAttr, "before");
+  const afterRaw = docxAttr(spacingAttr, "after");
+  const lineRaw = docxAttr(spacingAttr, "line");
+  const beforeVal = Number(beforeRaw);
+  const afterVal = Number(afterRaw);
+  const lineVal = Number(lineRaw);
   const lineRule =
-    spacingAttr?.["w:lineRule"] ?? spacingAttr?.lineRule ?? "auto";
-  if (beforeVal > 0) props.spaceBefore = Metric.dxaToPt(beforeVal);
-  else if (styleInherited.pPr?.spaceBefore)
-    props.spaceBefore = styleInherited.pPr.spaceBefore;
-  if (afterVal > 0) props.spaceAfter = Metric.dxaToPt(afterVal);
-  else if (styleInherited.pPr?.spaceAfter)
-    props.spaceAfter = styleInherited.pPr.spaceAfter;
-  if (lineVal > 0 && lineRule === "auto") props.lineHeight = lineVal / 240;
-  else if (styleInherited.pPr?.lineHeight)
-    props.lineHeight = styleInherited.pPr.lineHeight;
+    docxAttr(spacingAttr, "lineRule") ?? "auto";
+  props.spaceBefore =
+    beforeRaw !== undefined && Number.isFinite(beforeVal)
+      ? Metric.dxaToPt(Math.max(0, beforeVal))
+      : (styleInherited.pPr?.spaceBefore ?? WORD_DEFAULT_SPACE_BEFORE_PT);
+  props.spaceAfter =
+    afterRaw !== undefined && Number.isFinite(afterVal)
+      ? Metric.dxaToPt(Math.max(0, afterVal))
+      : (styleInherited.pPr?.spaceAfter ?? WORD_DEFAULT_SPACE_AFTER_PT);
+  if (lineRaw !== undefined && Number.isFinite(lineVal) && lineVal > 0) {
+    if (lineRule === "exact" || lineRule === "atLeast") {
+      props.lineHeightFixed = Metric.dxaToPt(lineVal);
+      props.lineHeightRule = lineRule;
+    } else {
+      props.lineHeight = lineVal / 240;
+    }
+  } else if (styleInherited.pPr?.lineHeightFixed !== undefined) {
+    props.lineHeightFixed = styleInherited.pPr.lineHeightFixed;
+    props.lineHeightRule = styleInherited.pPr.lineHeightRule;
+  } else {
+    props.lineHeight =
+      styleInherited.pPr?.lineHeight ?? WORD_DEFAULT_LINE_HEIGHT;
+  }
 
   // Indentation
   const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
@@ -919,6 +948,8 @@ function decodeDrawing(drawing: any, ctx: DecCtx): ImgNode | null {
       jpeg: "image/jpeg",
       gif: "image/gif",
       bmp: "image/bmp",
+      wmf: "image/x-wmf",
+      emf: "image/x-emf",
     };
     const mime = mimeMap[ext] ?? "image/png";
 
@@ -1151,6 +1182,54 @@ async function parseStylesMap(xml: string): Promise<StylesMap> {
   return map;
 }
 
+function docxAttr(attrs: any, name: string): any {
+  if (!attrs) return undefined;
+  return attrs[`w:${name}`] ?? attrs[name];
+}
+
+function parseDocxSpacingProps(
+  pPr: any,
+  includeWordDefaults = false,
+): NonNullable<ParaStyleDef["pPr"]> {
+  const parsed: NonNullable<ParaStyleDef["pPr"]> = includeWordDefaults
+    ? {
+        spaceBefore: WORD_DEFAULT_SPACE_BEFORE_PT,
+        spaceAfter: WORD_DEFAULT_SPACE_AFTER_PT,
+        lineHeight: WORD_DEFAULT_LINE_HEIGHT,
+      }
+    : {};
+  const spacingAttr =
+    pPr?.["w:spacing"]?.[0]?._attr ?? pPr?.spacing?.[0]?._attr;
+  if (!spacingAttr) return parsed;
+
+  const beforeRaw = docxAttr(spacingAttr, "before");
+  const afterRaw = docxAttr(spacingAttr, "after");
+  const lineRaw = docxAttr(spacingAttr, "line");
+  const lineRule = docxAttr(spacingAttr, "lineRule") ?? "auto";
+  const beforeVal = Number(beforeRaw);
+  const afterVal = Number(afterRaw);
+  const lineVal = Number(lineRaw);
+
+  if (beforeRaw !== undefined && Number.isFinite(beforeVal)) {
+    parsed.spaceBefore = Metric.dxaToPt(Math.max(0, beforeVal));
+  }
+  if (afterRaw !== undefined && Number.isFinite(afterVal)) {
+    parsed.spaceAfter = Metric.dxaToPt(Math.max(0, afterVal));
+  }
+  if (lineRaw !== undefined && Number.isFinite(lineVal) && lineVal > 0) {
+    if (lineRule === "exact" || lineRule === "atLeast") {
+      parsed.lineHeight = undefined;
+      parsed.lineHeightFixed = Metric.dxaToPt(lineVal);
+      parsed.lineHeightRule = lineRule;
+    } else {
+      parsed.lineHeight = lineVal / 240;
+      parsed.lineHeightFixed = undefined;
+      parsed.lineHeightRule = undefined;
+    }
+  }
+  return parsed;
+}
+
 /** Parse styles.xml and build a map of paragraph/character style defaults */
 async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
   const map: ParaStyleMap = new Map();
@@ -1159,6 +1238,12 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
   try {
     const obj: any = await XmlKit.parseStrict(trimmed);
     const stylesRoot = obj?.["w:styles"]?.[0] ?? obj?.styles?.[0] ?? obj;
+    const defaultsPPr =
+      stylesRoot?.["w:docDefaults"]?.[0]?.["w:pPrDefault"]?.[0]?.["w:pPr"]?.[0] ??
+      stylesRoot?.docDefaults?.[0]?.pPrDefault?.[0]?.pPr?.[0];
+    map.set(DOCX_DEFAULT_STYLE_KEY, {
+      pPr: parseDocxSpacingProps(defaultsPPr, true),
+    });
     const styleArr = toArr(stylesRoot?.["w:style"] ?? stylesRoot?.style);
     for (const style of styleArr) {
       const attr = style?._attr ?? {};
@@ -1216,19 +1301,7 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
       // pPr from paragraph properties
       const pPr = style?.["w:pPr"]?.[0] ?? style?.pPr?.[0];
       if (pPr) {
-        const spacingAttr =
-          pPr?.["w:spacing"]?.[0]?._attr ?? pPr?.spacing?.[0]?._attr ?? {};
-        const beforeVal = Number(
-          spacingAttr?.["w:before"] ?? spacingAttr?.before ?? 0,
-        );
-        const afterVal = Number(
-          spacingAttr?.["w:after"] ?? spacingAttr?.after ?? 0,
-        );
-        const lineVal = Number(
-          spacingAttr?.["w:line"] ?? spacingAttr?.line ?? 0,
-        );
-        const lineRule =
-          spacingAttr?.["w:lineRule"] ?? spacingAttr?.lineRule ?? "auto";
+        const spacingProps = parseDocxSpacingProps(pPr);
         const indAttr =
           pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
         const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
@@ -1243,11 +1316,8 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
           pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ??
           pPr?.["w:jc"]?.[0]?._attr?.val;
         def.pPr = {
+          ...spacingProps,
           align: alignVal,
-          spaceBefore: beforeVal > 0 ? Metric.dxaToPt(beforeVal) : undefined,
-          spaceAfter: afterVal > 0 ? Metric.dxaToPt(afterVal) : undefined,
-          lineHeight:
-            lineVal > 0 && lineRule === "auto" ? lineVal / 240 : undefined,
           indentPt: leftVal > 0 ? Metric.dxaToPt(leftVal) : undefined,
           indentRightPt: rightVal > 0 ? Metric.dxaToPt(rightVal) : undefined,
           firstLineIndentPt:
@@ -1365,6 +1435,23 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
   // defaultStroke for HWPX/HWP encoders: use insideH (inner horizontal border)
   const defaultStroke = tblBdr.insideH ?? tblBdr.top;
   const gridProps: GridProps = { look, defaultStroke };
+  const tblCellMar =
+    tblPr?.["w:tblCellMar"]?.[0] ?? tblPr?.tblCellMar?.[0];
+  if (tblCellMar) {
+    const readMarginPt = (side: string): number | undefined => {
+      const attrs =
+        tblCellMar?.[`w:${side}`]?.[0]?._attr ??
+        tblCellMar?.[side]?.[0]?._attr;
+      const value = Number(docxAttr(attrs, "w"));
+      return Number.isFinite(value) && value >= 0
+        ? Metric.dxaToPt(value)
+        : undefined;
+    };
+    gridProps.cellPadT = readMarginPt("top");
+    gridProps.cellPadB = readMarginPt("bottom");
+    gridProps.cellPadL = readMarginPt("left");
+    gridProps.cellPadR = readMarginPt("right");
+  }
   const layout = decodeFloatingTableLayout(tblPr);
   if (layout) gridProps.layout = layout;
 

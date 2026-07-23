@@ -49,6 +49,7 @@ export interface TextProps {
   spaceAfter?: number;
   lineHeight?: number;           // 줄 간격 배율 (예: 1.5 = 150%)
   lineHeightFixed?: number;      // 고정 줄 높이 (pt) — OWPML lineSpacing type="FIXED"
+  lineHeightRule?: 'exact' | 'atLeast'; // FIXED/AT_LEAST 의미를 출력까지 보존
   listLv?: number;
   listOrd?: boolean;
   listMark?: string;
@@ -89,6 +90,10 @@ export interface TableLook {
 export interface GridProps {
   widthPct?: number;
   colWidths?: number[];   // column widths in points
+  cellPadT?: number;      // table-level default cell padding (pt)
+  cellPadB?: number;
+  cellPadL?: number;
+  cellPadR?: number;
   defaultStroke?: Stroke;
   look?: TableLook;
   headerRow?: boolean;

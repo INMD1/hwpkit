@@ -30,6 +30,7 @@ import type {
   Stroke,
   PageDims,
   Align,
+  CellProps,
 } from "../../model/doc-props";
 import { succeed, fail } from "../../contract/result";
 import { Metric, safeFontToKr } from "../../safety/StyleBridge";
@@ -37,6 +38,7 @@ import { registry } from "../../pipeline/registry";
 import { A4 } from "../../model/doc-props";
 import pako from "pako";
 import { TextKit } from "../../toolkit/TextKit";
+import { fitColumnWidths } from "../../toolkit/TableGeometry";
 import { BaseEncoder } from "../../core/BaseEncoder";
 
 // ─── HWP 5.0 태그 ID ────────────────────────────────────────
@@ -63,6 +65,7 @@ const TAG_LIST_HEADER = T + 56; // 72
 const TAG_PAGE_DEF = T + 57; // 73
 const TAG_FOOTNOTE_SHAPE = T + 58; // 74
 const TAG_PAGE_BORDER_FILL = T + 59; // 75
+const TAG_SHAPE_COMPONENT = T + 60; // 76
 const TAG_TABLE = T + 61; // 77
 const TAG_SHAPE_COMPONENT_PICTURE = T + 69; // 85
 const TAG_CTRL_DATA = T + 71; // 87
@@ -134,6 +137,13 @@ class BufWriter {
   }
   i16(v: number): this {
     return this.u16(v < 0 ? v + 0x10000 : v);
+  }
+  f64(v: number): this {
+    const b = new Uint8Array(8);
+    new DataView(b.buffer).setFloat64(0, v, true);
+    this.chunks.push(b);
+    this._sz += 8;
+    return this;
   }
   bytes(d: Uint8Array): this {
     this.chunks.push(d);
@@ -682,8 +692,8 @@ function mkParaShape(p: ParaProps): Uint8Array {
   const lineSpaceValue =
     p.lineHeightFixed !== undefined
       ? Math.max(
-          Metric.ptToHwp(p.lineHeightFixed),
-          Math.ceil(Metric.ptToHwp(10) * 1.15),
+          Metric.ptToHwp(p.lineHeightFixed) * 2,
+          Math.ceil(Metric.ptToHwp(10) * 1.15) * 2,
         )
       : Math.max(100, p.lineHeight ? Math.round(p.lineHeight * 100) : 160);
   const paraShapeUnit = (pt: number) => Metric.ptToHwp(pt) * 2;
@@ -1035,7 +1045,19 @@ function minCellHeightHwp(cell: any, innerWidthHwp?: number): number {
   const padB = cp.padB !== undefined ? Metric.ptToHwp(cp.padB) : 141;
   let content = 0;
   for (const kid of cell.kids ?? []) {
-    if (kid.tag === "para") content += minParaHeightHwp(kid, innerWidthHwp);
+    if (kid.tag === "para") {
+      const images = flatImgNodes(kid.kids);
+      for (const image of images) {
+        content += imageDisplaySizeHwp(
+          image,
+          innerWidthHwp ?? Number.MAX_SAFE_INTEGER,
+        ).h;
+      }
+      const textKids = kid.kids.filter((child: any) => child.tag !== "img");
+      if (textKids.length > 0 || images.length === 0) {
+        content += minParaHeightHwp({ ...kid, kids: textKids }, innerWidthHwp);
+      }
+    }
     else if (kid.tag === "grid")
       content += minGridHeightHwp(kid) + Metric.ptToHwp(6);
   }
@@ -1262,18 +1284,78 @@ interface ImgLayout {
   distB?: number;
 }
 
+function imageDisplaySizeHwp(
+  imgNode: ImgNode,
+  maxWidthHwp: number,
+  maxHeightHwp = Number.MAX_SAFE_INTEGER,
+): { w: number; h: number } {
+  const rawData = TextKit.base64Decode(imgNode.b64);
+  const pixDims = readPixelDims(rawData, imgNode.mime);
+  const sourceW = pixDims?.w ? Metric.ptToHwp((pixDims.w * 72) / 96) : Metric.ptToHwp(72);
+  const sourceH = pixDims?.h ? Metric.ptToHwp((pixDims.h * 72) / 96) : Metric.ptToHwp(72);
+  let w = Number.isFinite(imgNode.w) && imgNode.w > 0 ? Metric.ptToHwp(imgNode.w) : sourceW;
+  let h = Number.isFinite(imgNode.h) && imgNode.h > 0 ? Metric.ptToHwp(imgNode.h) : sourceH;
+  const scale = Math.min(
+    1,
+    Math.max(1, maxWidthHwp) / Math.max(1, w),
+    Math.max(1, maxHeightHwp) / Math.max(1, h),
+  );
+  w = Math.max(1, Math.round(w * scale));
+  h = Math.max(1, Math.round(h * scale));
+  return { w, h };
+}
+
+function writeIdentityMatrix(w: BufWriter): void {
+  w.f64(1).f64(0).f64(0).f64(0).f64(1).f64(0);
+}
+
+/** HWP 5.0 spec tables 82-85: $pic shape component + three matrices. */
+function mkShapeComponent(wHwp: number, hHwp: number): Uint8Array {
+  const w = new BufWriter()
+    .u32(CTRL_PIC)
+    .u32(CTRL_PIC) // GenShapeObject records store the id twice
+    .i32(0)
+    .i32(0)
+    .u16(0)
+    .u16(1)
+    .u32(wHwp)
+    .u32(hHwp)
+    .u32(wHwp)
+    .u32(hHwp)
+    .u32(0)
+    .u16(0)
+    .i32(Math.round(wHwp / 2))
+    .i32(Math.round(hHwp / 2))
+    .u16(1);
+  writeIdentityMatrix(w);
+  writeIdentityMatrix(w);
+  writeIdentityMatrix(w);
+  return w.build();
+}
+
 function mkShapeComponentPicture(
   binDataId: number,
   wHwp: number,
   hHwp: number,
+  instanceId: number,
 ): Uint8Array {
-  const w = new BufWriter();
-  w.u32(CTRL_PIC).zeros(15);
-  w.u32(0).u32(0).u32(wHwp).u32(hHwp);
-  w.u32(0).u32(0).u32(wHwp).u32(hHwp);
-  w.zeros(36);
-  w.u16(binDataId).u8(0).u8(0).u8(0).zeros(5);
-  return w.build();
+  return new BufWriter()
+    .u32(0) // border color
+    .i32(0) // border thickness
+    .u32(0) // border attributes
+    // Four image rectangle points, serialized as x/y pairs.
+    .i32(0).i32(0)
+    .i32(wHwp).i32(0)
+    .i32(wHwp).i32(hHwp)
+    .i32(0).i32(hHwp)
+    .i32(0).i32(0).i32(wHwp).i32(hHwp) // crop rectangle
+    .u16(0).u16(0).u16(0).u16(0) // inner margins
+    .u8(0).u8(0).u8(0).u16(binDataId) // picture info
+    .u8(0) // border alpha
+    .u32(instanceId)
+    .u32(0) // no picture effects
+    .u32(wHwp).u32(hHwp).u8(0) // 5.1 source dimensions / alpha
+    .build();
 }
 
 function mkObjectCtrl(
@@ -1284,7 +1366,7 @@ function mkObjectCtrl(
   layout?: ImgLayout,
 ): Uint8Array {
   let attr = 0x082a2210;
-  if (ctrlId !== CTRL_GSO && layout?.wrap === "inline") attr |= 1 << 3;
+  if (!layout || layout.wrap === "inline") attr |= 1 | (1 << 2);
   return new BufWriter()
     .u32(ctrlId)
     .u32(attr)
@@ -1337,25 +1419,13 @@ function encodePicPara(
   availWidthHwp: number,
   divideSort = 0,
   vertPos = 0,
+  maxHeightHwp = Number.MAX_SAFE_INTEGER,
 ): Uint8Array[] {
-  // ANYTOHWP 방식: 픽셀 치수 추출 시도 → 실패 시 pt 기반으로 폴백
-  const rawData = TextKit.base64Decode(imgNode.b64);
-  const pixDims = readPixelDims(rawData, imgNode.mime);
-
-  let wHwp: number, hHwp: number;
-  if (pixDims && pixDims.w > 0 && pixDims.h > 0) {
-    wHwp = Metric.ptToHwp((pixDims.w * 72) / 96); // px → pt(96dpi) → hwpunit
-    hHwp = Metric.ptToHwp((pixDims.h * 72) / 96);
-  } else {
-    wHwp = Metric.ptToHwp(imgNode.w);
-    hHwp = Metric.ptToHwp(imgNode.h);
-  }
-
-  // 가용 너비 초과 방지
-  if (wHwp > availWidthHwp) {
-    hHwp = Math.round((hHwp * availWidthHwp) / wHwp);
-    wHwp = availWidthHwp;
-  }
+  const { w: wHwp, h: hHwp } = imageDisplaySizeHwp(
+    imgNode,
+    availWidthHwp,
+    maxHeightHwp,
+  );
 
   const CTRL_MASK = 1 << 11;
   const instanceId = idGen();
@@ -1380,9 +1450,14 @@ function encodePicPara(
       mkObjectCtrl(CTRL_GSO, wHwp, hHwp, idGen(), imgNode.layout),
     ),
     mkRec(
-      TAG_SHAPE_COMPONENT_PICTURE,
+      TAG_SHAPE_COMPONENT,
       lv + 2,
-      mkShapeComponentPicture(binDataId, wHwp, hHwp),
+      mkShapeComponent(wHwp, hHwp),
+    ),
+    mkRec(
+      TAG_SHAPE_COMPONENT_PICTURE,
+      lv + 3,
+      mkShapeComponentPicture(binDataId, wHwp, hHwp, idGen()),
     ),
   ];
 }
@@ -1549,10 +1624,19 @@ function mkTableRecord(
   colCnt: number,
   cellCountPerRow: number[],
   bfId: number,
+  repeatHeader: boolean,
+  padL: number,
+  padR: number,
+  padT: number,
+  padB: number,
 ): Uint8Array {
   const w = new BufWriter();
-  w.u32(0x04000006).u16(rowCnt).u16(colCnt).u16(0);
-  w.u16(510).u16(510).u16(141).u16(141);
+  // Spec table 76: bits 0-1 = 1 permits page breaks at cell boundaries.
+  w.u32(0x04000001 | (repeatHeader ? 1 << 2 : 0))
+    .u16(rowCnt)
+    .u16(colCnt)
+    .u16(0);
+  w.u16(padL).u16(padR).u16(padT).u16(padB);
   for (const count of cellCountPerRow) w.u16(Math.max(1, count & 0xffff));
   w.u16(bfId).u16(0);
   return w.build();
@@ -1571,11 +1655,13 @@ function mkCellListHeader(
   padR = 141,
   padT = 141,
   padB = 141,
+  va?: CellProps["va"],
 ): Uint8Array {
+  const verticalAlign = va === "mid" ? 1 : va === "bot" ? 2 : 0;
   return new BufWriter()
     .u16(paraCount)
-    .u32(0)
     .u16(0)
+    .u32(verticalAlign << 5)
     .u16(col)
     .u16(row)
     .u16(cs)
@@ -1599,6 +1685,7 @@ function encodeGrid(
   lv: number,
   idGen: () => number,
   availWidthHwp: number,
+  images: BinImage[],
 ): Uint8Array[] {
   const records: Uint8Array[] = [];
   const rowCnt = grid.kids.length;
@@ -1612,11 +1699,21 @@ function encodeGrid(
     ),
   );
 
-  const cwPt = (grid.props as any).colWidths ?? [];
-  const totalPt = cwPt.reduce((s: number, w: number) => s + w, 0) || 453;
-  const defColPt = totalPt / colCnt;
+  const sourceWidthsHwp = ((grid.props as any).colWidths ?? []).map(
+    (width: number) => width > 0 ? Metric.ptToHwp(width) : 0,
+  );
+  const colWidthsHwp = fitColumnWidths(
+    sourceWidthsHwp,
+    colCnt,
+    availWidthHwp,
+    Math.min(100, Math.floor(availWidthHwp / colCnt)),
+  );
   const defStroke = grid.props.defaultStroke ?? bank.DEF_STROKE;
   const defBfId = bank.addBorderFill(defStroke);
+  const tablePadL = Metric.ptToHwp(grid.props.cellPadL ?? 5.1);
+  const tablePadR = Metric.ptToHwp(grid.props.cellPadR ?? 5.1);
+  const tablePadT = Metric.ptToHwp(grid.props.cellPadT ?? 1.41);
+  const tablePadB = Metric.ptToHwp(grid.props.cellPadB ?? 1.41);
 
   const rowHwp = grid.kids.map((row: any) => {
     const base =
@@ -1627,17 +1724,17 @@ function encodeGrid(
     let logicalCol = 0;
     for (const cell of row.kids ?? []) {
       const cs = Math.max(1, cell.cs ?? 1);
-      let cellWPt = 0;
+      let cellWidthHwp = 0;
       for (let sc = logicalCol; sc < logicalCol + cs; sc++) {
-        cellWPt += cwPt[sc] ?? defColPt;
+        cellWidthHwp += colWidthsHwp[sc] ?? 0;
       }
-      if (cellWPt <= 0) cellWPt = defColPt * cs;
+      if (cellWidthHwp <= 0) cellWidthHwp = Math.floor(availWidthHwp / colCnt) * cs;
       const cp = cell.props ?? {};
-      const padL = cp.padL !== undefined ? Metric.ptToHwp(cp.padL) : 510;
-      const padR = cp.padR !== undefined ? Metric.ptToHwp(cp.padR) : 510;
+      const padL = cp.padL !== undefined ? Metric.ptToHwp(cp.padL) : tablePadL;
+      const padR = cp.padR !== undefined ? Metric.ptToHwp(cp.padR) : tablePadR;
       const innerWidthHwp = Math.max(
         100,
-        Metric.ptToHwp(cellWPt) - padL - padR,
+        cellWidthHwp - padL - padR,
       );
       const span = Math.max(1, cell.rs ?? 1);
       minRow = Math.max(
@@ -1652,8 +1749,7 @@ function encodeGrid(
     Math.max(1, row.kids.length),
   );
 
-  const tblWPt =
-    cwPt.length > 0 ? cwPt.reduce((s: number, w: number) => s + w, 0) : totalPt;
+  const tblWidthHwp = colWidthsHwp.reduce((sum, width) => sum + width, 0);
   const tblHwp = rowHwp.reduce((s: number, h: number) => s + h, 0);
   const tblInstanceId = idGen();
   const tblAlign = grid.props.align ?? "left";
@@ -1663,7 +1759,7 @@ function encodeGrid(
       TAG_CTRL_HEADER,
       lv,
       mkTableCtrl(
-        Metric.ptToHwp(tblWPt),
+        tblWidthHwp,
         tblHwp,
         tblInstanceId,
         tblAlign,
@@ -1674,7 +1770,17 @@ function encodeGrid(
     mkRec(
       TAG_TABLE,
       lv + 1,
-      mkTableRecord(rowCnt, colCnt, cellCountPerRow, defBfId),
+      mkTableRecord(
+        rowCnt,
+        colCnt,
+        cellCountPerRow,
+        defBfId,
+        !!grid.props.headerRow,
+        tablePadL,
+        tablePadR,
+        tablePadT,
+        tablePadB,
+      ),
     ),
   );
 
@@ -1683,13 +1789,14 @@ function encodeGrid(
     for (let c = 0; c < grid.kids[r].kids.length; c++) {
       const cell = grid.kids[r].kids[c];
       const cs = Math.max(1, cell.cs ?? 1);
-      let cellWPt = 0;
+      let wHwp = 0;
       for (let sc = logicalCol; sc < logicalCol + cs; sc++) {
-        cellWPt += cwPt[sc] ?? defColPt;
+        wHwp += colWidthsHwp[sc] ?? 0;
       }
-      if (cellWPt <= 0) cellWPt = defColPt * cs;
-      const wHwp = Metric.ptToHwp(cellWPt);
-      const hHwp = rowHwp[r];
+      if (wHwp <= 0) wHwp = Math.floor(availWidthHwp / colCnt) * cs;
+      const hHwp = rowHwp
+        .slice(r, Math.min(rowHwp.length, r + Math.max(1, cell.rs ?? 1)))
+        .reduce((sum, height) => sum + height, 0);
       const cp = cell.props;
       const hasPerSide = cp.top || cp.bot || cp.left || cp.right;
       const bfId = hasPerSide
@@ -1707,17 +1814,25 @@ function encodeGrid(
           ? cell.kids
           : [{ tag: "para" as const, props: {}, kids: [] }];
 
-      const padL = cp.padL !== undefined ? Metric.ptToHwp(cp.padL) : 510;
-      const padR = cp.padR !== undefined ? Metric.ptToHwp(cp.padR) : 510;
-      const padT = cp.padT !== undefined ? Metric.ptToHwp(cp.padT) : 141;
-      const padB = cp.padB !== undefined ? Metric.ptToHwp(cp.padB) : 141;
+      const padL = cp.padL !== undefined ? Metric.ptToHwp(cp.padL) : tablePadL;
+      const padR = cp.padR !== undefined ? Metric.ptToHwp(cp.padR) : tablePadR;
+      const padT = cp.padT !== undefined ? Metric.ptToHwp(cp.padT) : tablePadT;
+      const padB = cp.padB !== undefined ? Metric.ptToHwp(cp.padB) : tablePadB;
+      const encodedCellParagraphs = cellKids.reduce((count: number, kid: any) => {
+        if (kid.tag === "grid") return count + 1;
+        const paraImages = flatImgNodes(kid.kids).filter((img) =>
+          images.some((bin) => b64Matches(bin, img.b64)),
+        );
+        const textKids = kid.kids.filter((child: any) => child.tag !== "img");
+        return count + paraImages.length + (textKids.length > 0 || paraImages.length === 0 ? 1 : 0);
+      }, 0);
 
       records.push(
         mkRec(
           TAG_LIST_HEADER,
           lv + 1,
           mkCellListHeader(
-            cellKids.length,
+            Math.max(1, encodedCellParagraphs),
             r,
             logicalCol,
             cell.rs,
@@ -1729,6 +1844,7 @@ function encodeGrid(
             padR,
             padT,
             padB,
+            cp.va,
           ),
         ),
       );
@@ -1756,22 +1872,44 @@ function encodeGrid(
               buildObjectLineSeg(cellWidthHwp, nestedGridHeight, cellVertPos),
             ),
           );
-          records.push(...encodeGrid(kid, bank, lv + 2, idGen, cellWidthHwp));
+          records.push(...encodeGrid(kid, bank, lv + 2, idGen, cellWidthHwp, images));
           cellVertPos += nestedGridHeight + Metric.ptToHwp(6);
         } else {
           const para = kid as ParaNode;
-          records.push(
-            ...encodePara(
-              para,
-              bank,
-              lv + 1,
-              idGen(),
-              cellWidthHwp,
-              0,
-              cellVertPos,
-            ),
-          );
-          cellVertPos += minParaHeightHwp(para, cellWidthHwp);
+          const paraImages = flatImgNodes(para.kids);
+          for (const img of paraImages) {
+            const binImg = images.find((bin) => b64Matches(bin, img.b64));
+            if (!binImg) continue;
+            records.push(
+              ...encodePicPara(
+                img,
+                binImg.id,
+                bank,
+                lv + 1,
+                idGen,
+                cellWidthHwp,
+                0,
+                cellVertPos,
+              ),
+            );
+            cellVertPos += imageDisplaySizeHwp(img, cellWidthHwp).h;
+          }
+          const textKids = para.kids.filter((child: any) => child.tag !== "img");
+          if (textKids.length > 0 || paraImages.length === 0) {
+            const textPara: ParaNode = { ...para, kids: textKids as any };
+            records.push(
+              ...encodePara(
+                textPara,
+                bank,
+                lv + 1,
+                idGen(),
+                cellWidthHwp,
+                0,
+                cellVertPos,
+              ),
+            );
+            cellVertPos += minParaHeightHwp(textPara, cellWidthHwp);
+          }
         }
       }
       logicalCol += cs;
@@ -2005,7 +2143,7 @@ function buildBodyTextStream(
               buildObjectLineSeg(availWidthHwp, gridHeight, vertPos),
             ),
           );
-          for (const r of encodeGrid(gridNode, bank, 1, idGen, availWidthHwp))
+          for (const r of encodeGrid(gridNode, bank, 1, idGen, availWidthHwp, images))
             chunks.push(r);
           vertPos += Math.max(Metric.ptToHwp(20), gridHeight + Metric.ptToHwp(6));
           continue;
@@ -2021,7 +2159,11 @@ function buildBodyTextStream(
           for (const img of imgNodes) {
             const binImg = images.find((b) => b64Matches(b, img.b64));
             if (binImg) {
-              const imageHeight = Metric.ptToHwp(img.h ?? 100);
+              const imageHeight = imageDisplaySizeHwp(
+                img,
+                availWidthHwp,
+                bodyHeightHwp,
+              ).h;
               if (
                 vertPos > 0 &&
                 vertPos + imageHeight > bodyHeightHwp
@@ -2039,6 +2181,7 @@ function buildBodyTextStream(
                 availWidthHwp,
                 imageDivideSort,
                 vertPos,
+                bodyHeightHwp,
               )) {
                 // 첫 레코드가 PARA_HEADER인 경우 페이지 브레이크 마스크 적용
                 chunks.push(r);
@@ -2134,6 +2277,7 @@ function buildBodyTextStream(
           1,
           idGen,
           availWidthHwp,
+          images,
         ))
           chunks.push(r);
         vertPos += Math.max(
@@ -2265,7 +2409,7 @@ function buildHwpOle2(
 
   for (let i = 0; i < binImages.length; i++) {
     const img = binImages[i];
-    const name = `BIN${String(img.id).padStart(4, "0")}.${img.ext}`;
+    const name = `BIN${img.id.toString(16).toUpperCase().padStart(4, "0")}.${img.ext}`;
     streams.push({
       name,
       data: img.data,
@@ -2714,7 +2858,7 @@ function buildHwpOle2(
     const binTree = buildSiblingTree(
       binImages.map((img, i) => ({
         idx: 6 + i,
-        name: `BIN${String(img.id).padStart(4, "0")}.${img.ext}`,
+        name: `BIN${img.id.toString(16).toUpperCase().padStart(4, "0")}.${img.ext}`,
       })),
     );
     writeDirEntry(
@@ -2866,7 +3010,7 @@ export class HwpEncoder extends BaseEncoder {
       let binIdCounter = 1;
 
       function registerImg(img: any): void {
-        const key = img.b64.substring(0, 50);
+        const key = String(img.b64 ?? "").replace(/\s/g, "");
         if (seenB64.has(key)) return;
         seenB64.add(key);
         const raw = TextKit.base64Decode(img.b64);
@@ -2877,6 +3021,10 @@ export class HwpEncoder extends BaseEncoder {
               ? "gif"
               : img.mime === "image/bmp"
                 ? "bmp"
+                : img.mime === "image/x-wmf"
+                  ? "wmf"
+                  : img.mime === "image/x-emf"
+                    ? "emf"
                 : "jpg";
         images.push({ id: binIdCounter++, ext, data: new Uint8Array(raw) });
       }

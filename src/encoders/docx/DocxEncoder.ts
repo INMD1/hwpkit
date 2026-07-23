@@ -16,6 +16,7 @@ import { ArchiveKit } from "../../toolkit/ArchiveKit";
 import { TextKit } from "../../toolkit/TextKit";
 import { registry } from "../../pipeline/registry";
 import { BaseEncoder } from "../../core/BaseEncoder";
+import { fitColumnWidths } from "../../toolkit/TableGeometry";
 import rawFontMapping from "./font-mapping.json";
 
 interface ImageEntry {
@@ -54,6 +55,7 @@ export class DocxEncoder extends BaseEncoder {
       const images: ImageEntry[] = [];
       const ctx: EncCtx = {
         images,
+        dims,
         nextId: 10,
         nextImgNum: 1,
         warns: [],
@@ -142,11 +144,19 @@ export class DocxEncoder extends BaseEncoder {
           name: "word/header1.xml",
           data: this.stringToBytes(headerXml),
         });
+        entries.push({
+          name: "word/_rels/header1.xml.rels",
+          data: this.stringToBytes(imagePartRels(images)),
+        });
       }
       if (hasFooter) {
         entries.push({
           name: "word/footer1.xml",
           data: this.stringToBytes(footerXml),
+        });
+        entries.push({
+          name: "word/_rels/footer1.xml.rels",
+          data: this.stringToBytes(imagePartRels(images)),
         });
       }
 
@@ -166,6 +176,7 @@ export class DocxEncoder extends BaseEncoder {
 
 interface EncCtx {
   images: ImageEntry[];
+  dims: PageDims;
   nextId: number;
   nextImgNum: number;
   warns: string[];
@@ -178,6 +189,8 @@ function mimeToExt(mime: string): string {
   if (mime.includes("jpeg")) return "jpeg";
   if (mime.includes("gif")) return "gif";
   if (mime.includes("bmp")) return "bmp";
+  if (mime.includes("wmf")) return "wmf";
+  if (mime.includes("emf")) return "emf";
   return "png";
 }
 
@@ -206,12 +219,22 @@ function collectImagesFromPara(para: ParaNode, ctx: EncCtx): void {
 
 function registerImage(img: ImgNode, ctx: EncCtx): void {
   if (ctx.imgMap.has(img)) return;
-  const ext = mimeToExt(img.mime);
+  const data = TextKit.base64Decode(img.b64);
+  const ext = imageExtFromBytes(data) ?? mimeToExt(img.mime);
   const name = `image${ctx.nextImgNum++}.${ext}`;
   const rId = `rId${ctx.nextId++}`;
-  const data = TextKit.base64Decode(img.b64);
   ctx.images.push({ rId, name, data, ext });
   ctx.imgMap.set(img, rId);
+}
+
+function imageExtFromBytes(data: Uint8Array): string | undefined {
+  if (data.length >= 8 && data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47) return "png";
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return "jpeg";
+  if (data.length >= 6 && data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46) return "gif";
+  if (data.length >= 2 && data[0] === 0x42 && data[1] === 0x4d) return "bmp";
+  if (data.length >= 4 && data[0] === 0xd7 && data[1] === 0xcd && data[2] === 0xc6 && data[3] === 0x9a) return "wmf";
+  if (data.length >= 44 && data[40] === 0x20 && data[41] === 0x45 && data[42] === 0x4d && data[43] === 0x46) return "emf";
+  return undefined;
 }
 
 function registerSvgImage(svg: string, ctx: EncCtx): ImageEntry {
@@ -336,6 +359,10 @@ function contentTypes(
             ? "image/gif"
             : ext === "svg"
               ? "image/svg+xml"
+              : ext === "wmf"
+                ? "image/x-wmf"
+                : ext === "emf"
+                  ? "image/x-emf"
               : "image/bmp";
     defaults += `\n  <Default Extension="${ext}" ContentType="${ct}"/>`;
   }
@@ -405,6 +432,21 @@ function docRels(
 </Relationships>`;
 }
 
+/** Relationships are scoped to each OOXML part, so header/footer drawings
+ * cannot reuse image relationships declared only by document.xml. */
+function imagePartRels(images: ImageEntry[]): string {
+  const rels = images
+    .map(
+      (img) =>
+        `<Relationship Id="${img.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${img.name}"/>`,
+    )
+    .join("\n  ");
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  ${rels}
+</Relationships>`;
+}
+
 function appXml(): string {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">
@@ -428,12 +470,12 @@ function stylesXml(): string {
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:docDefaults>
     <w:rPrDefault><w:rPr>
-      <w:rFonts w:ascii="맑은 고딕" w:eastAsia="함초롬바탕" w:hAnsi="맑은 고딕" w:hint="eastAsia"/>
+      <w:rFonts w:ascii="함초롬바탕" w:eastAsia="함초롬바탕" w:hAnsi="함초롬바탕" w:hint="eastAsia"/>
       <w:sz w:val="20"/>
       <w:szCs w:val="20"/>
     </w:rPr></w:rPrDefault>
     <w:pPrDefault><w:pPr>
-      <w:spacing w:after="0" w:line="240" w:lineRule="auto"/>
+      <w:spacing w:after="0" w:line="384" w:lineRule="auto"/>
       <w:jc w:val="both"/>
     </w:pPr></w:pPrDefault>
   </w:docDefaults>
@@ -599,13 +641,13 @@ function encodeContent(
 ): string {
   return node.tag === "grid"
     ? encodeGrid(node, ctx, dims)
-    : encodeParaInner(node, ctx, { compactEmptyBodyPara: true });
+    : encodeParaInner(node, ctx);
 }
 
 function encodeParaInner(
   para: ParaNode,
   ctx: EncCtx,
-  opts: { compactEmptyBodyPara?: boolean } = {},
+  maxWidthPt?: number,
 ): string {
   const align = para.props.align;
   // P3: hwpStyleId(숫자 ID) 우선, 없으면 heading 스타일, 둘 다 없으면 빈 문자열
@@ -627,7 +669,7 @@ function encodeParaInner(
   // Spacing (before / after / line height) - ensure all values are non-negative
   // ECMA-376 §17.3.1.33 spacing: line은 1/240th of a line(auto) 또는 dxa(exact/atLeast)
   let spacingXml = "";
-  const { spaceBefore, spaceAfter, lineHeight, lineHeightFixed } = para.props;
+  const { spaceBefore, spaceAfter, lineHeight, lineHeightFixed, lineHeightRule } = para.props;
   if (
     spaceBefore !== undefined ||
     spaceAfter !== undefined ||
@@ -640,27 +682,16 @@ function encodeParaInner(
     if (spaceAfter !== undefined)
       parts.push(`w:after="${Math.max(0, Metric.ptToDxa(spaceAfter))}"`);
     if (lineHeightFixed !== undefined) {
-      // Fixed line heights from HWP/HWPX can be smaller than the run font.
-      // Emit a safe minimum as "atLeast" so Word/LibreOffice do not overlap text.
-      const fixedPt = safeFixedLineHeightPt(para, lineHeightFixed);
       parts.push(
-        `w:line="${Math.max(1, Metric.ptToDxa(fixedPt))}" w:lineRule="atLeast"`,
+        `w:line="${Math.max(1, Metric.ptToDxa(lineHeightFixed))}" w:lineRule="${lineHeightRule ?? "exact"}"`,
       );
     } else if (lineHeight !== undefined) {
       const ratio = docxLineHeightRatio(lineHeight);
       parts.push(
-        `w:line="${Math.round(ratio * 240)}" w:lineRule="auto"`,
+        `w:line="${Math.max(1, Math.floor(ratio * 240))}" w:lineRule="auto"`,
       );
     }
     spacingXml = `<w:spacing ${parts.join(" ")}/>`;
-  }
-  if (
-    opts.compactEmptyBodyPara &&
-    paraTextContent(para) === "" &&
-    !paraHasNonTextContent(para)
-  ) {
-    spacingXml =
-      '<w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/>';
   }
 
   // Indentation — ECMA-376 §17.3.1.12 ind
@@ -698,7 +729,7 @@ function encodeParaInner(
   const runs = para.kids
     .map((k) => {
       if (k.tag === "span") return encodeRun(k, ctx);
-      if (k.tag === "img") return encodeImage(k, ctx);
+      if (k.tag === "img") return encodeImage(k, ctx, maxWidthPt);
       // P9: PageNumNode가 para.kids에 직접 있는 경우 (머리말/꼬리말 등)
       if (k.tag === "pagenum") {
         const instr = k.format === "total" ? " NUMPAGES " : " PAGE ";
@@ -788,9 +819,7 @@ function minParaHeightPt(para: ParaNode): number {
 }
 
 function docxLineHeightRatio(lineHeight: number): number {
-  const ratio = Math.max(1, lineHeight);
-  if (ratio < 1.6) return ratio;
-  return Math.max(1.3, ratio * (14 / 17));
+  return Math.max(0.01, lineHeight);
 }
 
 function paraLineCount(para: ParaNode): number {
@@ -851,30 +880,18 @@ function cellHasVisibleContent(cell: any): boolean {
 function encodeRun(span: SpanNode, _ctx: EncCtx): string {
   const p = span.props;
   const rPr: string[] = [];
-  const omitDefaultTableText =
-    p.font === "한양신명조" &&
-    p.pt === 10 &&
-    !p.b &&
-    !p.i &&
-    !p.u &&
-    !p.s &&
-    !p.sup &&
-    !p.sub &&
-    !p.color &&
-    !p.bg;
-  const omitInheritedTenPointSize = p.pt === 10;
   if (p.b) rPr.push("<w:b/>");
   if (p.i) rPr.push("<w:i/>");
   if (p.u) rPr.push('<w:u w:val="single"/>');
   if (p.s) rPr.push("<w:strike/>");
   if (p.sup) rPr.push('<w:vertAlign w:val="superscript"/>');
   if (p.sub) rPr.push('<w:vertAlign w:val="subscript"/>');
-  if (p.pt && !omitDefaultTableText && !omitInheritedTenPointSize)
+  if (p.pt)
     rPr.push(
       `<w:sz w:val="${Metric.ptToHalfPt(p.pt)}"/><w:szCs w:val="${Metric.ptToHalfPt(p.pt)}"/>`,
     );
   if (p.color) rPr.push(`<w:color w:val="${p.color}"/>`);
-  if (p.font && !omitDefaultTableText)
+  if (p.font)
     rPr.push(
       `<w:rFonts w:ascii="${esc(p.font)}" w:hAnsi="${esc(p.font)}" w:eastAsia="${esc(p.font)}" w:hint="eastAsia"/>`,
     );
@@ -907,13 +924,21 @@ function encodeRun(span: SpanNode, _ctx: EncCtx): string {
   return parts.join("");
 }
 
-function encodeImage(img: ImgNode, ctx: EncCtx): string {
+function encodeImage(img: ImgNode, ctx: EncCtx, maxWidthPt?: number): string {
   const rId = ctx.imgMap.get(img);
   if (!rId) return "";
 
-  // Fallback to 72pt (1 inch) when w/h are 0 to prevent invisible images
-  const cx = Metric.ptToEmu(img.w > 0 ? img.w : 72);
-  const cy = Metric.ptToEmu(img.h > 0 ? img.h : 72);
+  // Keep drawings inside the page/cell while preserving their aspect ratio.
+  const bodyWidthPt = Math.max(1, ctx.dims.wPt - ctx.dims.ml - ctx.dims.mr);
+  const bodyHeightPt = Math.max(1, ctx.dims.hPt - ctx.dims.mt - ctx.dims.mb);
+  let widthPt = Number.isFinite(img.w) && img.w > 0 ? img.w : 72;
+  let heightPt = Number.isFinite(img.h) && img.h > 0 ? img.h : 72;
+  const widthLimit = Math.max(1, Math.min(bodyWidthPt, maxWidthPt ?? bodyWidthPt));
+  const scale = Math.min(1, widthLimit / widthPt, bodyHeightPt / heightPt);
+  widthPt *= scale;
+  heightPt *= scale;
+  const cx = Metric.ptToEmu(widthPt);
+  const cy = Metric.ptToEmu(heightPt);
   const alt = esc(img.alt ?? "");
   const docPrId = ctx.nextId++;
 
@@ -946,8 +971,8 @@ function encodeAnchor(
 ): string {
   const distT = Metric.ptToEmu(layout.distT ?? 0);
   const distB = Metric.ptToEmu(layout.distB ?? 0);
-  const distL = Metric.ptToEmu(layout.distL ?? 9144); // DOCX 기본 0.18pt
-  const distR = Metric.ptToEmu(layout.distR ?? 9144);
+  const distL = Metric.ptToEmu(layout.distL ?? 0);
+  const distR = Metric.ptToEmu(layout.distR ?? 0);
   const behindDoc = layout.behindDoc || layout.wrap === "behind" ? "1" : "0";
   const relH = layout.zOrder ?? 251658240;
 
@@ -1276,11 +1301,12 @@ function escAttr(value: string): string {
   return TextKit.escapeXml(value);
 }
 
-function encodeGrid(grid: GridNode, ctx: EncCtx, dims: PageDims = A4): string {
-  if (shouldEncodeGridAsSvgFallback(grid, dims)) {
-    return encodeGridAsSvgPicture(grid, ctx, dims);
-  }
-
+function encodeGrid(
+  grid: GridNode,
+  ctx: EncCtx,
+  dims: PageDims = A4,
+  maxWidthDxa?: number,
+): string {
   const gp = grid.props;
   const look = gp.look;
 
@@ -1293,7 +1319,12 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims: PageDims = A4): string {
   const noVBand = look?.bandedCols ? "0" : "1";
 
   const d = dims ?? A4;
-  const availDxa = Metric.ptToDxa(d.wPt - d.ml - d.mr);
+  const bodyDxa = Math.max(1, Metric.ptToDxa(d.wPt - d.ml - d.mr));
+  const availDxa = Math.max(1, Math.min(bodyDxa, maxWidthDxa ?? bodyDxa));
+  const tablePadT = Math.max(0, Math.round(Metric.ptToDxa(gp.cellPadT ?? 1.41)));
+  const tablePadB = Math.max(0, Math.round(Metric.ptToDxa(gp.cellPadB ?? 1.41)));
+  const tablePadL = Math.max(0, Math.round(Metric.ptToDxa(gp.cellPadL ?? 5.1)));
+  const tablePadR = Math.max(0, Math.round(Metric.ptToDxa(gp.cellPadR ?? 5.1)));
 
   // 1단계: 표의 가상 2D 맵핑 (Virtual Table Map) 생성
   // 'real': 데이터 셀, 'continue': 세로 병합 지속 셀, 'absorbed': 가로/세로 병합으로 흡수된 자리, 'void': 빈 공간
@@ -1353,31 +1384,16 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims: PageDims = A4): string {
   }
 
   // 2단계: 컬럼 너비(dxa) 계산
-  const defaultColDxa = Math.round(availDxa / colCount);
-  let colWidthsDxa: number[] = [];
-
-  if (grid.props.colWidths && grid.props.colWidths.length > 0) {
-    const srcPt = [...grid.props.colWidths];
-    while (srcPt.length < colCount) srcPt.push(0);
-    srcPt.length = colCount;
-
-    const knownTotalPt = srcPt.filter((w) => w > 0).reduce((s, w) => s + w, 0);
-    const zeroCount = srcPt.filter((w) => w <= 0).length;
-    const availPt = Metric.dxaToPt(availDxa);
-
-    const remainingPt = Math.max(0, availPt - knownTotalPt);
-    const zeroFillPt = zeroCount > 0 ? remainingPt / zeroCount : 0;
-
-    for (let i = 0; i < srcPt.length; i++) {
-      if (srcPt[i] <= 0) {
-        srcPt[i] = zeroFillPt > 0 ? zeroFillPt : 1;
-      }
-    }
-
-    colWidthsDxa = srcPt.map((w) => Math.round(Metric.ptToDxa(w)));
-  } else {
-    for (let c = 0; c < colCount; c++) colWidthsDxa.push(defaultColDxa);
-  }
+  const defaultColDxa = Math.max(1, Math.floor(availDxa / colCount));
+  const sourceWidthsDxa = (grid.props.colWidths ?? []).map((width) =>
+    width > 0 ? Metric.ptToDxa(width) : 0,
+  );
+  const colWidthsDxa = fitColumnWidths(
+    sourceWidthsDxa,
+    colCount,
+    availDxa,
+    Math.min(100, defaultColDxa),
+  );
 
   const totalDxa = colWidthsDxa.reduce((s, w) => s + w, 0);
   const gridCols = colWidthsDxa.map((w) => `<w:gridCol w:w="${w}"/>`).join("");
@@ -1466,10 +1482,10 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims: PageDims = A4): string {
               cPadL != null ||
               cPadR != null
             ) {
-              const t = cPadT ?? 28;
-              const b = cPadB ?? 28;
-              const l = cPadL ?? 72;
-              const r = cPadR ?? 72;
+              const t = cPadT ?? tablePadT;
+              const b = cPadB ?? tablePadB;
+              const l = cPadL ?? tablePadL;
+              const r = cPadR ?? tablePadR;
               tcPrParts.push(
                 `<w:tcMar><w:top w:w="${t}" w:type="dxa"/><w:left w:w="${l}" w:type="dxa"/><w:bottom w:w="${b}" w:type="dxa"/><w:right w:w="${r}" w:type="dxa"/></w:tcMar>`,
               );
@@ -1479,9 +1495,17 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims: PageDims = A4): string {
             const parts: string[] = [];
             for (const kid of cell.kids) {
               if (kid.tag === "grid") {
-                parts.push(encodeGrid(kid, ctx)); // dims 제거 — 중첩 표는 부모 dims 불필요
+                const nestedLimit = Math.max(
+                  1,
+                  cw - (cPadL ?? tablePadL) - (cPadR ?? tablePadR),
+                );
+                parts.push(encodeGrid(kid, ctx, dims, nestedLimit));
               } else if (kid.tag === "para") {
-                parts.push(encodeParaInner(kid, ctx));
+                const textLimit = Math.max(
+                  1,
+                  cw - (cPadL ?? tablePadL) - (cPadR ?? tablePadR),
+                );
+                parts.push(encodeParaInner(kid, ctx, Metric.dxaToPt(textLimit)));
               }
             }
             // DOCX 셀은 반드시 <w:p>로 끝나야 함
@@ -1506,18 +1530,11 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims: PageDims = A4): string {
       }
       // 원본 행 정보에서 높이 가져오기 (tableMap 과 grid.kids 는 같은 인덱스)
       const originalRow = grid.kids[ri];
-      let minRowHeightPt = 0;
-      for (const entry of rowMap) {
-        if (entry.type !== "real" || !entry.cell) continue;
-        const rs = Math.max(1, entry.cell.rs ?? 1);
-        minRowHeightPt = Math.max(minRowHeightPt, minCellHeightPt(entry.cell) / rs);
-      }
       if (originalRow?.heightPt != null && originalRow.heightPt > 0) {
-        const rowHeightPt = Math.max(originalRow.heightPt, minRowHeightPt);
-        const hDxa = Math.round(Metric.ptToDxa(rowHeightPt));
-        const hRule =
-          !gp.layout && minRowHeightPt <= originalRow.heightPt + 1 ? "exact" : "atLeast";
-        trPrParts.push(`<w:trHeight w:val="${hDxa}" w:hRule="${hRule}"/>`);
+        const hDxa = Math.round(Metric.ptToDxa(originalRow.heightPt));
+        // Omitted hRule is Word's atLeast default and matches Hancom's DOCX
+        // export while retaining the exact source minimum height.
+        trPrParts.push(`<w:trHeight w:val="${hDxa}"/>`);
       }
       const trPr =
         trPrParts.length > 0 ? `<w:trPr>${trPrParts.join("")}</w:trPr>` : "";
@@ -1534,6 +1551,8 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims: PageDims = A4): string {
     dot: "dotted",
     double: "double",
     none: "none",
+    dashDot: "dotDash",
+    dashDotDot: "dotDotDash",
     dotDash: "dotDash",
     dotDotDash: "dotDotDash",
     triple: "triple",
@@ -1573,7 +1592,7 @@ function encodeGrid(grid: GridNode, ctx: EncCtx, dims: PageDims = A4): string {
   const tblPosition = encodeFloatingTablePr(gp.layout);
 
   return `    <w:tbl>
-      <w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="${Math.round(totalDxa)}" w:type="dxa"/>${tblPosition}<w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="${firstRow}" w:lastRow="${lastRow}" w:firstColumn="${firstCol}" w:lastColumn="${lastCol}" w:noHBand="${noHBand}" w:noVBand="${noVBand}"/>${tblBorders}${tblJc}<w:tblCellMar><w:top w:w="28" w:type="dxa"/><w:left w:w="102" w:type="dxa"/><w:bottom w:w="28" w:type="dxa"/><w:right w:w="102" w:type="dxa"/></w:tblCellMar></w:tblPr>
+      <w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="${Math.round(totalDxa)}" w:type="dxa"/>${tblPosition}<w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="${firstRow}" w:lastRow="${lastRow}" w:firstColumn="${firstCol}" w:lastColumn="${lastCol}" w:noHBand="${noHBand}" w:noVBand="${noVBand}"/>${tblBorders}${tblJc}<w:tblCellMar><w:top w:w="${tablePadT}" w:type="dxa"/><w:left w:w="${tablePadL}" w:type="dxa"/><w:bottom w:w="${tablePadB}" w:type="dxa"/><w:right w:w="${tablePadR}" w:type="dxa"/></w:tblCellMar></w:tblPr>
       <w:tblGrid>${gridCols}</w:tblGrid>
 ${rows}
     </w:tbl>`;
@@ -1634,6 +1653,8 @@ function encodeCellBorders(cp: CellProps): string {
     dot: "dotted",
     double: "double",
     none: "none",
+    dashDot: "dotDash",
+    dashDotDot: "dotDotDash",
     dotDash: "dotDash",
     dotDotDash: "dotDotDash",
     triple: "triple",
