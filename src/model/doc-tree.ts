@@ -20,7 +20,7 @@ export interface PageNumNode {
 export interface ImgNode {
   tag: 'img';
   b64: string;
-  mime: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/bmp';
+  mime: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/bmp' | 'image/x-wmf' | 'image/x-emf';
   w: number;
   h: number;
   alt?: string;

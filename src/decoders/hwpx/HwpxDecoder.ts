@@ -47,6 +47,7 @@ import {
 import { ArchiveKit } from "../../toolkit/ArchiveKit";
 import { XmlKit } from "../../toolkit/XmlKit";
 import { TextKit } from "../../toolkit/TextKit";
+import { inferColumnWidths } from "../../toolkit/TableGeometry";
 import { registry } from "../../pipeline/registry";
 import { BaseDecoder } from "../../core/BaseDecoder";
 import { HWPX_MIME_TYPE } from "../../encoders/hwpx/constants";
@@ -80,6 +81,7 @@ interface ParaPrInfo {
   spaceAfter?: number;
   lineHeight?: number;
   lineHeightFixed?: number; // FIXED 행 높이 (pt)
+  lineHeightRule?: "exact" | "atLeast";
 }
 
 interface DecCtx {
@@ -244,6 +246,43 @@ function extractDims(headObj: any): PageDims | null {
       headObj?.["hh:HEAD"]?.[0] ??
       headObj?.HEAD?.[0] ??
       headObj;
+
+    const modernSecPr =
+      root?.["hh:secPrList"]?.[0]?.["hh:secPr"]?.[0] ??
+      root?.["hh:SECPRLST"]?.[0]?.["hh:SECPR"]?.[0];
+    const modernPagePr =
+      modernSecPr?.["hh:pagePr"]?.[0]?._attr ??
+      modernSecPr?.["hh:PAGEPR"]?.[0]?._attr;
+    if (modernPagePr) {
+      const margin =
+        modernSecPr?.["hh:pagePr"]?.[0]?.["hh:margin"]?.[0]?._attr ??
+        modernSecPr?.["hh:PAGEPR"]?.[0]?.["hh:MARGIN"]?.[0]?._attr ??
+        {};
+      let ew = Number(modernPagePr.width ?? modernPagePr.Width ?? 59528);
+      let eh = Number(modernPagePr.height ?? modernPagePr.Height ?? 84188);
+      const landscape = String(modernPagePr.landscape ?? "").toUpperCase();
+      if ((landscape === "NARROWLY" || landscape === "LANDSCAPE") && ew < eh) {
+        [ew, eh] = [eh, ew];
+      }
+      const mt = Number(margin.top ?? margin.TopMargin ?? 5670);
+      const mb = Number(margin.bottom ?? margin.BottomMargin ?? 4252);
+      const ml = Number(margin.left ?? margin.LeftMargin ?? 8504);
+      const mr = Number(margin.right ?? margin.RightMargin ?? 8504);
+      const header = Number(margin.header ?? margin.HeaderMargin ?? 0);
+      const footer = Number(margin.footer ?? margin.FooterMargin ?? 0);
+      return {
+        wPt: Metric.hwpToPt(ew),
+        hPt: Metric.hwpToPt(eh),
+        mt: Metric.hwpToPt(mt + Math.max(0, header)),
+        mb: Metric.hwpToPt(mb + Math.max(0, footer)),
+        ml: Metric.hwpToPt(ml),
+        mr: Metric.hwpToPt(mr),
+        headerPt: Metric.hwpToPt(Math.max(0, mt)),
+        footerPt: Metric.hwpToPt(Math.max(0, mb)),
+        orient: ew > eh ? "landscape" : "portrait",
+      };
+    }
+
     const refList =
       root?.["hh:refList"]?.[0] ??
       root?.["hh:REFLIST"]?.[0] ??
@@ -262,13 +301,21 @@ function extractDims(headObj: any): PageDims | null {
 
     const ew = Number(pa.Width ?? 59528);
     const eh = Number(pa.Height ?? 84188);
+    const mt = Number(pa.TopMargin ?? 5670);
+    const mb = Number(pa.BottomMargin ?? 4252);
+    const ml = Number(pa.LeftMargin ?? 8504);
+    const mr = Number(pa.RightMargin ?? 8504);
+    const header = Number(pa.HeaderMargin ?? 0);
+    const footer = Number(pa.FooterMargin ?? 0);
     return {
       wPt: Metric.hwpToPt(ew),
       hPt: Metric.hwpToPt(eh),
-      mt: Metric.hwpToPt(Number(pa.TopMargin ?? 5670)),
-      mb: Metric.hwpToPt(Number(pa.BottomMargin ?? 4252)),
-      ml: Metric.hwpToPt(Number(pa.LeftMargin ?? 8504)),
-      mr: Metric.hwpToPt(Number(pa.RightMargin ?? 8504)),
+      mt: Metric.hwpToPt(mt + Math.max(0, header)),
+      mb: Metric.hwpToPt(mb + Math.max(0, footer)),
+      ml: Metric.hwpToPt(ml),
+      mr: Metric.hwpToPt(mr),
+      headerPt: Metric.hwpToPt(Math.max(0, mt)),
+      footerPt: Metric.hwpToPt(Math.max(0, mb)),
       orient: ew > eh ? "landscape" : "portrait",
     };
   } catch {
@@ -428,7 +475,7 @@ function extractCharPrs(headObj: any): Map<number, CharPrInfo> {
       if (attr.height) info.pt = Metric.hHeightToPt(Number(attr.height));
 
       // textColor
-      if (attr.textColor) info.color = safeHex(attr.textColor);
+      if (attr.textColor) info.color = normalizeHwpxTextColor(attr.textColor);
 
       // bold
       if (cp?.["hh:bold"]?.[0] != null) info.b = true;
@@ -528,23 +575,25 @@ function extractParaPrs(headObj: any): Map<number, ParaPrInfo> {
         const prevVal = Number(prevEl?._attr?.value ?? 0);
         const nextVal = Number(nextEl?._attr?.value ?? 0);
 
-        if (leftVal !== 0) indentPt = Metric.hwpToPt(leftVal);
-        if (rightVal !== 0) indentRightPt = Metric.hwpToPt(rightVal);
-        if (indentVal !== 0) firstLineIndentPt = Metric.hwpToPt(indentVal);
-        if (prevVal > 0) spaceBefore = Metric.hwpToPt(prevVal);
-        if (nextVal > 0) spaceAfter = Metric.hwpToPt(nextVal);
+        // HWPX paraPr 여백 값은 HWP 바이너리 PARA_SHAPE와 동일하게
+        // 물리 HWPUNIT의 2배로 기록된다.
+        if (leftVal !== 0) indentPt = Metric.hwpToPt(leftVal / 2);
+        if (rightVal !== 0) indentRightPt = Metric.hwpToPt(rightVal / 2);
+        if (indentVal !== 0) firstLineIndentPt = Metric.hwpToPt(indentVal / 2);
+        if (prevVal > 0) spaceBefore = Metric.hwpToPt(prevVal / 2);
+        if (nextVal > 0) spaceAfter = Metric.hwpToPt(nextVal / 2);
       }
 
       if (lineSpEl) {
         const lsAttr = lineSpEl._attr ?? {};
         const lsType = lsAttr.type ?? "PERCENT";
         const lsVal = Number(lsAttr.value ?? 160);
-        // OWPML §7.5.4.6: PERCENT(비율), FIXED(고정), BETWEEN_LINE(줄간격), AT_LEAST(최소)
-        if (lsType === "PERCENT" && lsVal > 0 && lsVal !== 160) {
+        // OWPML §7.5.4.6: PERCENT(비율), FIXED(고정), BETWEEN_LINES(줄간격), AT_LEAST(최소)
+        if (lsType === "PERCENT" && lsVal > 0) {
           lineHeight = lsVal / 100;
-        } else if (lsType === "FIXED" && lsVal > 0) {
-          // FIXED: 값이 HWPUNIT 단위의 고정 줄 높이
-          lineHeightFixed = Metric.hwpToPt(lsVal);
+        } else if ((lsType === "FIXED" || lsType === "AT_LEAST") && lsVal > 0) {
+          // FIXED/AT_LEAST도 paraPr 저장 단위(물리 HWPUNIT의 2배)를 사용한다.
+          lineHeightFixed = Metric.hwpToPt(lsVal / 2);
         }
       }
 
@@ -553,10 +602,14 @@ function extractParaPrs(headObj: any): Map<number, ParaPrInfo> {
         indentPt,
         indentRightPt,
         firstLineIndentPt,
-        spaceBefore,
-        spaceAfter,
-        lineHeight,
+        spaceBefore: spaceBefore ?? 0,
+        spaceAfter: spaceAfter ?? 0,
+        lineHeight: lineHeightFixed === undefined ? (lineHeight ?? 1.6) : undefined,
         lineHeightFixed,
+        lineHeightRule:
+          lineHeightFixed !== undefined
+            ? (lineSpEl?._attr?.type === "AT_LEAST" ? "atLeast" : "exact")
+            : undefined,
       });
     }
   } catch {
@@ -570,26 +623,23 @@ function extractParaPrs(headObj: any): Map<number, ParaPrInfo> {
 function addParaItems(p: any, items: { type: string; node: any }[]): void {
   // Check if this paragraph contains a table in its runs
   const runs = getTag(p, "hp:run", "hp:RUN");
-  let hasTable = false;
   for (const run of runs) {
     const tbls = getTag(run, "hp:tbl", "hp:TABLE");
     if (tbls.length > 0) {
       for (const tbl of tbls) {
         items.push({ type: "table", node: tbl });
       }
-      hasTable = true;
     }
   }
-  // 테이블을 포함한 단락은 일반 단락으로 다시 추가하지 않음 (중복 방지)
-  if (!hasTable) {
-    items.push({ type: "para", node: p });
-  }
+  // A table-only HWPX paragraph is still its positioning/flow anchor.  Hancom
+  // exports the table first and keeps this paragraph immediately afterwards.
+  items.push({ type: "para", node: p });
 }
 
 function decodeSection(sec: any, dims: PageDims, ctx: DecCtx) {
   // Try to extract dims from first paragraph's secPr
   const firstParas = getTag(sec, "hp:p", "hp:P");
-  const pageDims = extractSecPrDims(firstParas[0]) ?? dims;
+  const pageDims = extractSectionDims(sec) ?? extractSecPrDims(firstParas[0]) ?? dims;
 
   // Build items list preserving document order via _childOrder
   const items: { type: string; node: any }[] = [];
@@ -660,17 +710,38 @@ function parseSecPrDims(secPr: any): PageDims | null {
     secPr?.["hp:pagePr"]?.[0]?.["hp:margin"]?.[0]?._attr ??
     secPr?.["hp:PAGEPR"]?.[0]?.["hp:MARGIN"]?.[0]?._attr ??
     {};
-  const pw = Number(pagePr.width ?? 59528);
-  const ph = Number(pagePr.height ?? 84188);
+  let pw = Number(pagePr.width ?? 59528);
+  let ph = Number(pagePr.height ?? 84188);
+  const landscape = String(pagePr.landscape ?? "").toUpperCase();
+  if ((landscape === "NARROWLY" || landscape === "LANDSCAPE") && pw < ph) {
+    [pw, ph] = [ph, pw];
+  }
+  const mt = Number(margin.top ?? 5670);
+  const mb = Number(margin.bottom ?? 4252);
+  const ml = Number(margin.left ?? 8504);
+  const mr = Number(margin.right ?? 8504);
+  const header = Number(margin.header ?? 0);
+  const footer = Number(margin.footer ?? 0);
   return {
     wPt: Metric.hwpToPt(pw),
     hPt: Metric.hwpToPt(ph),
-    mt: Metric.hwpToPt(Number(margin.top ?? 5670)),
-    mb: Metric.hwpToPt(Number(margin.bottom ?? 4252)),
-    ml: Metric.hwpToPt(Number(margin.left ?? 8504)),
-    mr: Metric.hwpToPt(Number(margin.right ?? 8504)),
+    mt: Metric.hwpToPt(mt + Math.max(0, header)),
+    mb: Metric.hwpToPt(mb + Math.max(0, footer)),
+    ml: Metric.hwpToPt(ml),
+    mr: Metric.hwpToPt(mr),
+    headerPt: Metric.hwpToPt(Math.max(0, mt)),
+    footerPt: Metric.hwpToPt(Math.max(0, mb)),
     orient: pw > ph ? "landscape" : "portrait",
   };
+}
+
+function extractSectionDims(sec: any): PageDims | null {
+  try {
+    const secPr = sec?.["hp:secPr"]?.[0] ?? sec?.["hp:SECPR"]?.[0];
+    return secPr ? parseSecPrDims(secPr) : null;
+  } catch {
+    return null;
+  }
 }
 
 function extractSecPrDims(p: any): PageDims | null {
@@ -730,6 +801,7 @@ function decodeHeaderFooter(
 function decodePara(p: any, ctx: DecCtx): ParaNode {
   const pAttr = p?._attr ?? {};
   const paraPrIdRef = Number(pAttr.paraPrIDRef ?? -1);
+  const styleIdRef = Number(pAttr.styleIDRef ?? pAttr.styleIdRef ?? pAttr.styleID ?? pAttr.styleId);
 
   // Resolve paraPr from IDRef or inline
   let align: string | undefined;
@@ -749,7 +821,13 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   }
 
   const inlineAttr = inlineParaPr?._attr ?? {};
-  const props: ParaProps = { align: safeAlign(align) };
+  const props: ParaProps = {
+    align: safeAlign(align === "JUSTIFY" ? "LEFT" : align),
+    spaceBefore: 0,
+    spaceAfter: 0,
+    lineHeight: 1.6,
+  };
+  if (Number.isFinite(styleIdRef) && styleIdRef >= 0) props.hwpStyleId = styleIdRef;
 
   // Apply spacing/indent/lineHeight from paraPr definition
   if (paraPrDef) {
@@ -764,8 +842,12 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
       props.spaceAfter = paraPrDef.spaceAfter;
     if (paraPrDef.lineHeight !== undefined)
       props.lineHeight = paraPrDef.lineHeight;
-    if (paraPrDef.lineHeightFixed !== undefined)
+    if (paraPrDef.lineHeightFixed !== undefined) {
+      props.lineHeight = undefined;
       props.lineHeightFixed = paraPrDef.lineHeightFixed;
+    }
+    if (paraPrDef.lineHeightRule !== undefined)
+      props.lineHeightRule = paraPrDef.lineHeightRule;
   }
 
   // List support (from inline attr)
@@ -837,7 +919,7 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
 
     // Only push text span when there's actual content and no image already pushed for this run
     if (content !== "" || (runPics.length === 0 && pageNums.length === 0)) {
-      const spanProps = resolveCharPr(run, ctx);
+      const spanProps = content === "" ? {} : resolveCharPr(run, ctx);
       kids.push(buildSpan(content, spanProps));
     }
   }
@@ -892,9 +974,14 @@ function resolveCharPr(run: any, ctx: DecCtx): TextProps {
     s: sVal && sVal !== "NONE" && sVal !== "3D" ? true : undefined,
     font: fontName ? safeFont(fontName) : undefined,
     pt: heightVal ? Metric.hHeightToPt(Number(heightVal)) : undefined,
-    color: safeHex(ca.TextColor ?? ca.textColor),
+    color: normalizeHwpxTextColor(ca.TextColor ?? ca.textColor),
     bg: safeHex(ca.BgColor ?? ca.bgColor),
   };
+}
+
+function normalizeHwpxTextColor(raw: string | number | null | undefined): string | undefined {
+  const color = safeHex(raw);
+  return color === "000000" ? undefined : color;
 }
 
 // ─── Image decoding ────────────────────────────────────────
@@ -934,6 +1021,8 @@ function decodePic(pic: any, ctx: DecCtx): ImgNode | null {
       jpeg: "image/jpeg",
       gif: "image/gif",
       bmp: "image/bmp",
+      wmf: "image/x-wmf",
+      emf: "image/x-emf",
     };
 
     // ── hp:pos에서 layout 추출 ───────────────────────────────
@@ -954,13 +1043,27 @@ function decodePic(pic: any, ctx: DecCtx): ImgNode | null {
 }
 
 function extractHwpxLayout(posAttr: any, pic: any): ImgLayout {
+  const textWrap: string =
+    pic?._attr?.textWrap ?? pic?.pic?.[0]?._attr?.textWrap ?? "TOP_AND_BOTTOM";
+  const layout = extractHwpxObjectLayout(posAttr, textWrap);
+  applyHwpxOutMargin(layout, pic);
+  return layout;
+}
+
+function extractHwpxTableLayout(tbl: any): ImgLayout | undefined {
+  const posAttr = tbl?.["hp:pos"]?.[0]?._attr ?? tbl?.pos?.[0]?._attr ?? {};
+  const textWrap: string = tbl?._attr?.textWrap ?? "TOP_AND_BOTTOM";
+  const layout = extractHwpxObjectLayout(posAttr, textWrap);
+  if (layout.wrap === "inline") return undefined;
+  applyHwpxOutMargin(layout, tbl);
+  return layout;
+}
+
+function extractHwpxObjectLayout(posAttr: any, textWrap: string): ImgLayout {
   const treatAsChar =
     posAttr.treatAsChar === "1" || posAttr.treatAsChar === "true";
   if (treatAsChar) return { wrap: "inline" };
 
-  // textWrap → wrap (direct attribute of hp:pic element)
-  const textWrap: string =
-    pic?._attr?.textWrap ?? pic?.pic?.[0]?._attr?.textWrap ?? "TOP_AND_BOTTOM";
   // OWPML §7.5.8.1 textWrap → ImgWrap 매핑
   // TOP_AND_BOTTOM: 텍스트가 이미지 위아래로만 흐름 → DOCX wrapTopAndBottom (float anchor)
   const wrapMap: Record<string, ImgWrap> = {
@@ -974,6 +1077,7 @@ function extractHwpxLayout(posAttr: any, pic: any): ImgLayout {
     LARGEST_ONLY: "tight",
     BEHIND_TEXT: "behind",
     FRONT_TEXT: "front",
+    IN_FRONT_OF_TEXT: "front",
   };
   const wrap: ImgWrap = wrapMap[textWrap] ?? "square";
 
@@ -1017,16 +1121,56 @@ function extractHwpxLayout(posAttr: any, pic: any): ImgLayout {
   return { wrap, horzAlign, vertAlign, horzRelTo, vertRelTo, xPt, yPt };
 }
 
+function applyHwpxOutMargin(layout: ImgLayout, obj: any): void {
+  const outMargin = obj?.["hp:outMargin"]?.[0]?._attr ?? obj?.outMargin?.[0]?._attr;
+  if (!outMargin) return;
+  const assign = (
+    attr: string,
+    key: "distT" | "distB" | "distL" | "distR",
+  ) => {
+    const raw = outMargin[attr];
+    if (raw === undefined) return;
+    const value = Number(raw);
+    if (Number.isFinite(value) && value >= 0) layout[key] = Metric.hwpToPt(value);
+  };
+  assign("top", "distT");
+  assign("bottom", "distB");
+  assign("left", "distL");
+  assign("right", "distR");
+}
+
 // ─── Table decoding ────────────────────────────────────────
+
+function validHwpxCellPadding(value: unknown): number | undefined {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed < 0xffff
+    ? parsed
+    : undefined;
+}
 
 function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
   const tblAttr = tbl?._attr ?? {};
   const borderFillId = Number(tblAttr.borderFillIDRef ?? 0);
   const borderFill = ctx.borderFills.get(borderFillId);
   const headerRow = tblAttr.repeatHeader === "1";
+  const inMarginAttr = tbl?.["hp:inMargin"]?.[0]?._attr ?? {};
+  const tablePadding = {
+    left: validHwpxCellPadding(inMarginAttr.left) ?? 510,
+    right: validHwpxCellPadding(inMarginAttr.right) ?? 510,
+    top: validHwpxCellPadding(inMarginAttr.top) ?? 141,
+    bottom: validHwpxCellPadding(inMarginAttr.bottom) ?? 141,
+  };
 
-  const gridProps: GridProps = { headerRow: headerRow || undefined };
+  const gridProps: GridProps = {
+    headerRow: headerRow || undefined,
+    cellPadL: Metric.hwpToPt(tablePadding.left),
+    cellPadR: Metric.hwpToPt(tablePadding.right),
+    cellPadT: Metric.hwpToPt(tablePadding.top),
+    cellPadB: Metric.hwpToPt(tablePadding.bottom),
+  };
   if (borderFill?.stroke) gridProps.defaultStroke = borderFill.stroke;
+  const layout = extractHwpxTableLayout(tbl);
+  if (layout) gridProps.layout = layout;
 
   // 표 정렬 — <hp:pos horzAlign="..."> 에서 읽음 (OWPML CAbstractShapeObjectType)
   const posAttr = tbl?.["hp:pos"]?.[0]?._attr ?? {};
@@ -1039,69 +1183,37 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
   }
 
   const rowArr = getTag(tbl, "hp:tr", "hp:ROW");
-
-  // Read column widths: first try a row where ALL cells have cs=1
+  // Every merged cell contributes a linear width constraint.  Solving all of
+  // them together recovers the underlying columns; equal splitting loses the
+  // asymmetric widths used by Hancom forms.
+  let detectedCols = Math.max(0, Number(tblAttr.colCnt ?? tblAttr.ColCnt ?? 0));
+  const widthConstraints: { start: number; span: number; width: number }[] = [];
   for (const row of rowArr) {
-    const cells = getTag(row, "hp:tc", "hp:CELL");
-    const rowWidths: number[] = [];
-    let allSingle = true;
-    for (const cell of cells) {
-      const cellSpanAttr = cell?.["hp:cellSpan"]?.[0]?._attr ?? {};
-      const cs = Number(cellSpanAttr.colSpan ?? cell?._attr?.ColSpan ?? 1);
-      if (cs > 1) {
-        allSingle = false;
-        break;
-      }
-      const szAttr = cell?.["hp:cellSz"]?.[0]?._attr ?? {};
-      const w = Number(szAttr.width ?? 0);
-      rowWidths.push(Metric.hwpToPt(w));
-    }
-    if (allSingle && rowWidths.length > 0 && rowWidths.some((w) => w > 0)) {
-      gridProps.colWidths = rowWidths;
-      break;
+    let sequentialCol = 0;
+    for (const cell of getTag(row, "hp:tc", "hp:CELL")) {
+      const spanAttr = cell?.["hp:cellSpan"]?.[0]?._attr ?? {};
+      const addrAttr = cell?.["hp:cellAddr"]?.[0]?._attr ?? {};
+      const span = Math.max(1, Number(spanAttr.colSpan ?? cell?._attr?.ColSpan ?? 1));
+      const address = Number(addrAttr.colAddr ?? sequentialCol);
+      const start = Number.isFinite(address) && address >= 0 ? address : sequentialCol;
+      const width = Number(cell?.["hp:cellSz"]?.[0]?._attr?.width ?? 0);
+      if (width > 0) widthConstraints.push({ start, span, width });
+      detectedCols = Math.max(detectedCols, start + span);
+      sequentialCol = start + span;
     }
   }
-
-  // Fallback: proportional distribution when no all-single row exists
-  if (!gridProps.colWidths) {
-    // Determine colCount first: max column index reached across all rows
-    let detectedCols = 0;
-    for (const row of rowArr) {
-      let ci = 0;
-      for (const cell of getTag(row, "hp:tc", "hp:CELL")) {
-        const csEl = cell?.["hp:cellSpan"]?.[0]?._attr ?? {};
-        ci += Number(csEl.colSpan ?? cell?._attr?.ColSpan ?? 1);
-      }
-      if (ci > detectedCols) detectedCols = ci;
-    }
-    if (detectedCols > 0) {
-      const sums = new Float64Array(detectedCols);
-      const counts = new Int32Array(detectedCols);
-      for (const row of rowArr) {
-        let ci = 0;
-        for (const cell of getTag(row, "hp:tc", "hp:CELL")) {
-          const csEl = cell?.["hp:cellSpan"]?.[0]?._attr ?? {};
-          const cs = Number(csEl.colSpan ?? cell?._attr?.ColSpan ?? 1);
-          const szAttr = cell?.["hp:cellSz"]?.[0]?._attr ?? {};
-          const w = Number(szAttr.width ?? 0);
-          if (w > 0 && cs > 0) {
-            const perCol = w / cs;
-            for (let k = 0; k < cs && ci + k < detectedCols; k++) {
-              sums[ci + k] += perCol;
-              counts[ci + k]++;
-            }
-          }
-          ci += cs;
-        }
-      }
-      const estimated = Array.from(sums).map((s, i) =>
-        counts[i] > 0 ? Metric.hwpToPt(s / counts[i]) : 0,
-      );
-      if (estimated.some((w) => w > 0)) gridProps.colWidths = estimated;
+  if (detectedCols > 0) {
+    const inferred = inferColumnWidths(detectedCols, widthConstraints);
+    if (inferred.some((width) => width > 0)) {
+      gridProps.colWidths = inferred.map(Metric.hwpToPt);
     }
   }
   const rowNodes = rowArr.map((row: any) => {
-    const cellArr = getTag(row, "hp:tc", "hp:CELL");
+    const cellArr = [...getTag(row, "hp:tc", "hp:CELL")].sort((a, b) => {
+      const aa = Number(a?.["hp:cellAddr"]?.[0]?._attr?.colAddr ?? 0);
+      const ba = Number(b?.["hp:cellAddr"]?.[0]?._attr?.colAddr ?? 0);
+      return aa - ba;
+    });
     const cellNodes = cellArr.map((cell: any) => {
       const ca = cell?._attr ?? {};
 
@@ -1137,14 +1249,14 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
       // subList 속성이 아닌 <hp:cellMargin> 자식 요소에서 읽어야 함
       const cellMarginAttr =
         cell?.["hp:cellMargin"]?.[0]?._attr ?? {};
-      const mL = cellMarginAttr.left !== undefined ? Number(cellMarginAttr.left) : -1;
-      const mR = cellMarginAttr.right !== undefined ? Number(cellMarginAttr.right) : -1;
-      const mT = cellMarginAttr.top !== undefined ? Number(cellMarginAttr.top) : -1;
-      const mB = cellMarginAttr.bottom !== undefined ? Number(cellMarginAttr.bottom) : -1;
-      if (mL >= 0) cellProps.padL = Metric.hwpToPt(mL);
-      if (mR >= 0) cellProps.padR = Metric.hwpToPt(mR);
-      if (mT >= 0) cellProps.padT = Metric.hwpToPt(mT);
-      if (mB >= 0) cellProps.padB = Metric.hwpToPt(mB);
+      const mL = validHwpxCellPadding(cellMarginAttr.left);
+      const mR = validHwpxCellPadding(cellMarginAttr.right);
+      const mT = validHwpxCellPadding(cellMarginAttr.top);
+      const mB = validHwpxCellPadding(cellMarginAttr.bottom);
+      if (mL !== undefined && mL !== tablePadding.left) cellProps.padL = Metric.hwpToPt(mL);
+      if (mR !== undefined && mR !== tablePadding.right) cellProps.padR = Metric.hwpToPt(mR);
+      if (mT !== undefined && mT !== tablePadding.top) cellProps.padT = Metric.hwpToPt(mT);
+      if (mB !== undefined && mB !== tablePadding.bottom) cellProps.padB = Metric.hwpToPt(mB);
 
       // Colspan/rowspan from cellSpan element or attributes
       const cellSpan = cell?.["hp:cellSpan"]?.[0]?._attr ?? {};
@@ -1159,7 +1271,6 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
         try {
           // Check if this paragraph contains a nested table in its runs
           const runs = getTag(sp, "hp:run", "hp:RUN");
-          let hasNestedTable = false;
           for (const run of runs) {
             const nestedTbls = getTag(run, "hp:tbl", "hp:TABLE");
             for (const nestedTbl of nestedTbls) {
@@ -1168,12 +1279,11 @@ function decodeGrid(tbl: any, ctx: DecCtx): GridNode {
               } catch {
                 /* skip malformed nested table */
               }
-              hasNestedTable = true;
             }
           }
-          if (!hasNestedTable) {
-            cellKids.push(decodePara(sp, ctx));
-          }
+          // Preserve the source anchor paragraph after nested tables as well;
+          // the DOCX cell requires it and its spacing/style affects cell size.
+          cellKids.push(decodePara(sp, ctx));
         } catch {
           /* skip corrupted para in cell */
         }
