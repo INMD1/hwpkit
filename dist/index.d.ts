@@ -42,11 +42,11 @@ interface ParaProps {
     indentPt?: number;
     indentRightPt?: number;
     firstLineIndentPt?: number;
-    leftMargin?: number;
     spaceBefore?: number;
     spaceAfter?: number;
     lineHeight?: number;
     lineHeightFixed?: number;
+    lineHeightRule?: 'exact' | 'atLeast';
     listLv?: number;
     listOrd?: boolean;
     listMark?: string;
@@ -84,10 +84,15 @@ interface TableLook {
 interface GridProps {
     widthPct?: number;
     colWidths?: number[];
+    cellPadT?: number;
+    cellPadB?: number;
+    cellPadL?: number;
+    cellPadR?: number;
     defaultStroke?: Stroke;
     look?: TableLook;
     headerRow?: boolean;
     align?: Align;
+    layout?: ImgLayout;
 }
 interface PageDims {
     wPt: number;
@@ -139,7 +144,7 @@ interface PageNumNode {
 interface ImgNode {
     tag: 'img';
     b64: string;
-    mime: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/bmp';
+    mime: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/bmp' | 'image/x-wmf' | 'image/x-emf';
     w: number;
     h: number;
     alt?: string;
