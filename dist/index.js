@@ -1224,11 +1224,11 @@ function extractParaPrs(headObj) {
         const indentVal = Number(indentEl?._attr?.value ?? 0);
         const prevVal = Number(prevEl?._attr?.value ?? 0);
         const nextVal = Number(nextEl?._attr?.value ?? 0);
-        if (leftVal !== 0) indentPt = Metric.hwpToPt(leftVal);
-        if (rightVal !== 0) indentRightPt = Metric.hwpToPt(rightVal);
-        if (indentVal !== 0) firstLineIndentPt = Metric.hwpToPt(indentVal);
-        if (prevVal > 0) spaceBefore = Metric.hwpToPt(prevVal);
-        if (nextVal > 0) spaceAfter = Metric.hwpToPt(nextVal);
+        if (leftVal !== 0) indentPt = Metric.hwpToPt(leftVal / 2);
+        if (rightVal !== 0) indentRightPt = Metric.hwpToPt(rightVal / 2);
+        if (indentVal !== 0) firstLineIndentPt = Metric.hwpToPt(indentVal / 2);
+        if (prevVal > 0) spaceBefore = Metric.hwpToPt(prevVal / 2);
+        if (nextVal > 0) spaceAfter = Metric.hwpToPt(nextVal / 2);
       }
       if (lineSpEl) {
         const lsAttr = lineSpEl._attr ?? {};
@@ -1237,7 +1237,7 @@ function extractParaPrs(headObj) {
         if (lsType === "PERCENT" && lsVal > 0) {
           lineHeight = lsVal / 100;
         } else if ((lsType === "FIXED" || lsType === "AT_LEAST") && lsVal > 0) {
-          lineHeightFixed = Metric.hwpToPt(lsVal);
+          lineHeightFixed = Metric.hwpToPt(lsVal / 2);
         }
       }
       map.set(id, {
@@ -1245,9 +1245,9 @@ function extractParaPrs(headObj) {
         indentPt,
         indentRightPt,
         firstLineIndentPt,
-        spaceBefore,
-        spaceAfter,
-        lineHeight,
+        spaceBefore: spaceBefore ?? 0,
+        spaceAfter: spaceAfter ?? 0,
+        lineHeight: lineHeightFixed === void 0 ? lineHeight ?? 1.6 : void 0,
         lineHeightFixed,
         lineHeightRule: lineHeightFixed !== void 0 ? lineSpEl?._attr?.type === "AT_LEAST" ? "atLeast" : "exact" : void 0
       });
@@ -1403,7 +1403,12 @@ function decodePara(p, ctx) {
     if (alignNode?.horizontal) align = alignNode.horizontal;
   }
   const inlineAttr = inlineParaPr?._attr ?? {};
-  const props = { align: safeAlign(align === "JUSTIFY" ? "LEFT" : align) };
+  const props = {
+    align: safeAlign(align === "JUSTIFY" ? "LEFT" : align),
+    spaceBefore: 0,
+    spaceAfter: 0,
+    lineHeight: 1.6
+  };
   if (Number.isFinite(styleIdRef) && styleIdRef >= 0) props.hwpStyleId = styleIdRef;
   if (paraPrDef) {
     if (paraPrDef.indentPt !== void 0) props.indentPt = paraPrDef.indentPt;
@@ -1417,8 +1422,10 @@ function decodePara(p, ctx) {
       props.spaceAfter = paraPrDef.spaceAfter;
     if (paraPrDef.lineHeight !== void 0)
       props.lineHeight = paraPrDef.lineHeight;
-    if (paraPrDef.lineHeightFixed !== void 0)
+    if (paraPrDef.lineHeightFixed !== void 0) {
+      props.lineHeight = void 0;
       props.lineHeightFixed = paraPrDef.lineHeightFixed;
+    }
     if (paraPrDef.lineHeightRule !== void 0)
       props.lineHeightRule = paraPrDef.lineHeightRule;
   }
@@ -1628,12 +1635,29 @@ function applyHwpxOutMargin(layout, obj) {
   assign("left", "distL");
   assign("right", "distR");
 }
+function validHwpxCellPadding(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed < 65535 ? parsed : void 0;
+}
 function decodeGrid(tbl, ctx) {
   const tblAttr = tbl?._attr ?? {};
   const borderFillId = Number(tblAttr.borderFillIDRef ?? 0);
   const borderFill = ctx.borderFills.get(borderFillId);
   const headerRow = tblAttr.repeatHeader === "1";
-  const gridProps = { headerRow: headerRow || void 0 };
+  const inMarginAttr = tbl?.["hp:inMargin"]?.[0]?._attr ?? {};
+  const tablePadding = {
+    left: validHwpxCellPadding(inMarginAttr.left) ?? 510,
+    right: validHwpxCellPadding(inMarginAttr.right) ?? 510,
+    top: validHwpxCellPadding(inMarginAttr.top) ?? 141,
+    bottom: validHwpxCellPadding(inMarginAttr.bottom) ?? 141
+  };
+  const gridProps = {
+    headerRow: headerRow || void 0,
+    cellPadL: Metric.hwpToPt(tablePadding.left),
+    cellPadR: Metric.hwpToPt(tablePadding.right),
+    cellPadT: Metric.hwpToPt(tablePadding.top),
+    cellPadB: Metric.hwpToPt(tablePadding.bottom)
+  };
   if (borderFill?.stroke) gridProps.defaultStroke = borderFill.stroke;
   const layout = extractHwpxTableLayout(tbl);
   if (layout) gridProps.layout = layout;
@@ -1701,14 +1725,14 @@ function decodeGrid(tbl, ctx) {
         cellProps.va = vaMap[subAttr.vertAlign];
       }
       const cellMarginAttr = cell?.["hp:cellMargin"]?.[0]?._attr ?? {};
-      const mL = cellMarginAttr.left !== void 0 ? Number(cellMarginAttr.left) : -1;
-      const mR = cellMarginAttr.right !== void 0 ? Number(cellMarginAttr.right) : -1;
-      const mT = cellMarginAttr.top !== void 0 ? Number(cellMarginAttr.top) : -1;
-      const mB = cellMarginAttr.bottom !== void 0 ? Number(cellMarginAttr.bottom) : -1;
-      if (mL >= 0) cellProps.padL = Metric.hwpToPt(mL);
-      if (mR >= 0) cellProps.padR = Metric.hwpToPt(mR);
-      if (mT >= 0) cellProps.padT = Metric.hwpToPt(mT);
-      if (mB >= 0) cellProps.padB = Metric.hwpToPt(mB);
+      const mL = validHwpxCellPadding(cellMarginAttr.left);
+      const mR = validHwpxCellPadding(cellMarginAttr.right);
+      const mT = validHwpxCellPadding(cellMarginAttr.top);
+      const mB = validHwpxCellPadding(cellMarginAttr.bottom);
+      if (mL !== void 0 && mL !== tablePadding.left) cellProps.padL = Metric.hwpToPt(mL);
+      if (mR !== void 0 && mR !== tablePadding.right) cellProps.padR = Metric.hwpToPt(mR);
+      if (mT !== void 0 && mT !== tablePadding.top) cellProps.padT = Metric.hwpToPt(mT);
+      if (mB !== void 0 && mB !== tablePadding.bottom) cellProps.padB = Metric.hwpToPt(mB);
       const cellSpan = cell?.["hp:cellSpan"]?.[0]?._attr ?? {};
       const cs = Number(cellSpan.colSpan ?? ca.ColSpan ?? 1);
       const rs = Number(cellSpan.rowSpan ?? ca.RowSpan ?? 1);
@@ -2050,9 +2074,12 @@ var ALIGN_TBL = { 0: "justify", 1: "left", 2: "right", 3: "center", 4: "distribu
 function parseParaShape(d) {
   if (d.length < 4) return { align: "justify", spaceBefore: 0, spaceAfter: 0, lineSpacing: 160, lineSpacingType: 0, leftMargin: 0, rightMargin: 0, indent: 0 };
   const attr = BinaryKit.readU32LE(d, 0);
-  const lineSpacingType = attr & 3;
+  const legacyLineSpacingType = attr & 3;
+  const extendedLineSpacingType = d.length >= 54 ? BinaryKit.readU32LE(d, 46) & 31 : -1;
+  const lineSpacingType = extendedLineSpacingType >= 0 && extendedLineSpacingType <= 3 ? extendedLineSpacingType : legacyLineSpacingType;
+  const lineSpacing = d.length >= 54 ? BinaryKit.readU32LE(d, 50) : d.length >= 28 ? i32(d, 24) : 160;
   const align = ALIGN_TBL[attr >> 2 & 7] ?? "justify";
-  const vVal = attr >> 18 & 3;
+  const vVal = attr >> 20 & 3;
   const verAlign = vVal === 1 ? "top" : vVal === 2 ? "center" : vVal === 3 ? "bottom" : "baseline";
   const lineWrap = "break";
   return {
@@ -2066,7 +2093,7 @@ function parseParaShape(d) {
     // offset 12: 첫 줄 들여쓰기 (HWPUNIT * 2)
     spaceBefore: d.length >= 20 ? i32(d, 16) : 0,
     spaceAfter: d.length >= 24 ? i32(d, 20) : 0,
-    lineSpacing: d.length >= 28 ? i32(d, 24) : 160,
+    lineSpacing,
     verAlign,
     lineWrap
   };
@@ -2442,6 +2469,12 @@ function firstAvailableFont(di, names) {
 function appendLatinAwareSpans(out, text, props, _latinFont) {
   out.push(buildSpan(text, props));
 }
+var HWP_DEFAULT_CELL_PADDING = {
+  left: 510,
+  right: 510,
+  top: 141,
+  bottom: 141
+};
 function parseTableCtrl(recs, ctrlIdx, di, shield, gsoCtx) {
   const ctrlLv = recs[ctrlIdx].level;
   let i = ctrlIdx + 1;
@@ -2485,12 +2518,18 @@ function parseTableCtrl(recs, ctrlIdx, di, shield, gsoCtx) {
   if (!tblData || cells.length === 0) return { grid: null, next: i };
   const rowCnt = Math.max(1, tblData.length >= 6 ? BinaryKit.readU16LE(tblData, 4) : 1);
   const colCnt = Math.max(1, tblData.length >= 8 ? BinaryKit.readU16LE(tblData, 6) : 1);
+  const tablePadding = tblData.length >= 18 ? {
+    left: inheritedHwpPadding(BinaryKit.readU16LE(tblData, 10), HWP_DEFAULT_CELL_PADDING.left),
+    right: inheritedHwpPadding(BinaryKit.readU16LE(tblData, 12), HWP_DEFAULT_CELL_PADDING.right),
+    top: inheritedHwpPadding(BinaryKit.readU16LE(tblData, 14), HWP_DEFAULT_CELL_PADDING.top),
+    bottom: inheritedHwpPadding(BinaryKit.readU16LE(tblData, 16), HWP_DEFAULT_CELL_PADDING.bottom)
+  } : HWP_DEFAULT_CELL_PADDING;
   const parsed = [];
   for (let ci = 0; ci < cells.length; ci++) {
     const c = cells[ci];
     const seqIdx = ci;
     const pc = shield.guard(
-      () => parseCellRec(c.data, c.tag, recs, c.cStart, c.cEnd, di, shield, seqIdx, colCnt, gsoCtx),
+      () => parseCellRec(c.data, c.tag, recs, c.cStart, c.cEnd, di, shield, seqIdx, colCnt, gsoCtx, tablePadding),
       { row: Math.floor(ci / (colCnt || 1)), col: ci % (colCnt || 1), cs: 1, rs: 1, widthHwp: 0, heightHwp: void 0, props: {}, cellChildren: [buildPara([buildSpan("")])] },
       `hwp:cell@${c.cStart}`
     );
@@ -2549,23 +2588,25 @@ function parseTableCtrl(recs, ctrlIdx, di, shield, gsoCtx) {
   }
   const gp = {};
   if (defStroke) gp.defaultStroke = defStroke;
+  gp.cellPadL = Metric.hwpToPt(tablePadding.left);
+  gp.cellPadR = Metric.hwpToPt(tablePadding.right);
+  gp.cellPadT = Metric.hwpToPt(tablePadding.top);
+  gp.cellPadB = Metric.hwpToPt(tablePadding.bottom);
   const hasWidths = colWidthsPt.some((w) => w > 0);
   if (hasWidths) gp.colWidths = colWidthsPt;
   const tableLayout = parseObjectLayout(recs[ctrlIdx].data);
   if (tableLayout && tableLayout.wrap !== "inline") gp.layout = tableLayout;
   return { grid: buildGrid(rows, gp), next: i };
 }
-function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gsoCtx) {
+function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gsoCtx, tablePadding) {
   let col, row, cs = 1, rs = 1;
   let widthHwp = 0;
   let heightHwp = 0;
   const props = {};
-  const attr = d.length >= 6 ? BinaryKit.readU32LE(d, 2) : 0;
-  const va = attr >> 6 & 3;
+  const attr = tag === TAG_LIST_HEADER ? d.length >= 8 ? BinaryKit.readU32LE(d, 4) : 0 : d.length >= 6 ? BinaryKit.readU32LE(d, 2) : 0;
+  const va = attr >> 5 & 3;
   if (va === 1) props.va = "mid";
   else if (va === 2) props.va = "bot";
-  const HWP_PAD_LR_DEFAULT = 510;
-  const HWP_PAD_TB_DEFAULT = 141;
   if (tag === TAG_LIST_HEADER && d.length >= 22) {
     col = BinaryKit.readU16LE(d, 8);
     row = BinaryKit.readU16LE(d, 10);
@@ -2578,10 +2619,10 @@ function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gs
       const pR = BinaryKit.readU16LE(d, 26);
       const pT = BinaryKit.readU16LE(d, 28);
       const pB = BinaryKit.readU16LE(d, 30);
-      if (pL !== HWP_PAD_LR_DEFAULT) props.padL = Metric.hwpToPt(pL);
-      if (pR !== HWP_PAD_LR_DEFAULT) props.padR = Metric.hwpToPt(pR);
-      if (pT !== HWP_PAD_TB_DEFAULT) props.padT = Metric.hwpToPt(pT);
-      if (pB !== HWP_PAD_TB_DEFAULT) props.padB = Metric.hwpToPt(pB);
+      if (isCellPaddingOverride(pL, tablePadding.left)) props.padL = Metric.hwpToPt(pL);
+      if (isCellPaddingOverride(pR, tablePadding.right)) props.padR = Metric.hwpToPt(pR);
+      if (isCellPaddingOverride(pT, tablePadding.top)) props.padT = Metric.hwpToPt(pT);
+      if (isCellPaddingOverride(pB, tablePadding.bottom)) props.padB = Metric.hwpToPt(pB);
     }
     const bfId = d.length >= 34 ? BinaryKit.readU16LE(d, 32) : 0;
     if (bfId > 0 && bfId <= di.borderFills.length) applyCellBorderFill(di.borderFills[bfId - 1], props);
@@ -2597,10 +2638,10 @@ function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gs
       const pR = BinaryKit.readU16LE(d, 24);
       const pT = BinaryKit.readU16LE(d, 26);
       const pB = BinaryKit.readU16LE(d, 28);
-      if (pL !== HWP_PAD_LR_DEFAULT) props.padL = Metric.hwpToPt(pL);
-      if (pR !== HWP_PAD_LR_DEFAULT) props.padR = Metric.hwpToPt(pR);
-      if (pT !== HWP_PAD_TB_DEFAULT) props.padT = Metric.hwpToPt(pT);
-      if (pB !== HWP_PAD_TB_DEFAULT) props.padB = Metric.hwpToPt(pB);
+      if (isCellPaddingOverride(pL, tablePadding.left)) props.padL = Metric.hwpToPt(pL);
+      if (isCellPaddingOverride(pR, tablePadding.right)) props.padR = Metric.hwpToPt(pR);
+      if (isCellPaddingOverride(pT, tablePadding.top)) props.padT = Metric.hwpToPt(pT);
+      if (isCellPaddingOverride(pB, tablePadding.bottom)) props.padB = Metric.hwpToPt(pB);
     }
     const bfId = d.length >= 32 ? BinaryKit.readU16LE(d, 30) : 0;
     if (bfId > 0 && bfId <= di.borderFills.length) applyCellBorderFill(di.borderFills[bfId - 1], props);
@@ -2725,6 +2766,12 @@ function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gs
     cellChildren: cellChildren.length ? cellChildren : [buildPara([buildSpan("")])]
   };
 }
+function inheritedHwpPadding(value, fallback) {
+  return value === 65535 ? fallback : value;
+}
+function isCellPaddingOverride(value, inherited) {
+  return value !== 65535 && value !== inherited;
+}
 function parsePageDef(d) {
   if (d.length < 24) return A4;
   const w = BinaryKit.readU32LE(d, 0);
@@ -2777,18 +2824,18 @@ function strokeFromBF(bfId, di) {
 }
 function buildParaProps(ps, hwpStyleId) {
   const p = hwpStyleId !== void 0 ? { hwpStyleId } : {};
-  if (!ps) return p;
+  if (!ps) return { ...p, spaceBefore: 0, spaceAfter: 0, lineHeight: 1.6 };
   if (ps.align && ps.align !== "justify") p.align = ps.align;
   if (hwpStyleId === 18 && !p.align) p.align = "justify";
-  if (ps.spaceBefore > 0) p.spaceBefore = Metric.hwpToPt(ps.spaceBefore / 2);
-  if (ps.spaceAfter > 0) p.spaceAfter = Metric.hwpToPt(ps.spaceAfter / 2);
+  p.spaceBefore = Math.max(0, Metric.hwpToPt(ps.spaceBefore / 2));
+  p.spaceAfter = Math.max(0, Metric.hwpToPt(ps.spaceAfter / 2));
   if (ps.lineSpacingType === 1 || ps.lineSpacingType === 3) {
     if (ps.lineSpacing > 0) {
-      p.lineHeightFixed = Metric.hwpToPt(ps.lineSpacing);
+      p.lineHeightFixed = Metric.hwpToPt(ps.lineSpacing / 2);
       p.lineHeightRule = ps.lineSpacingType === 3 ? "atLeast" : "exact";
     }
   } else {
-    if (ps.lineSpacing > 0) p.lineHeight = ps.lineSpacing / 100;
+    p.lineHeight = ps.lineSpacing > 0 ? ps.lineSpacing / 100 : 1.6;
   }
   const leftMarginPt = Math.max(0, Metric.hwpToPt(ps.leftMargin / 2));
   if (leftMarginPt > 0) p.indentPt = leftMarginPt;
@@ -3154,6 +3201,10 @@ var DocxDecoder = class extends BaseDecoder {
     }
   }
 };
+var DOCX_DEFAULT_STYLE_KEY = "__docx_defaults__";
+var WORD_DEFAULT_SPACE_BEFORE_PT = 0;
+var WORD_DEFAULT_SPACE_AFTER_PT = 8;
+var WORD_DEFAULT_LINE_HEIGHT = 1.15;
 function toArr2(v) {
   return v == null ? [] : Array.isArray(v) ? v : [v];
 }
@@ -3412,10 +3463,18 @@ function decodePara2(p, ctx) {
   const pPr = p?.["w:pPr"]?.[0] ?? {};
   const alignVal = pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ?? pPr?.["w:jc"]?.[0]?._attr?.val;
   const headStyle = pPr?.["w:pStyle"]?.[0]?._attr?.["w:val"] ?? pPr?.["w:pStyle"]?.[0]?._attr?.val ?? "";
-  const styleInherited = resolveParaStyle(
+  const documentDefaults = resolveParaStyle(
+    DOCX_DEFAULT_STYLE_KEY,
+    ctx.paraStyleMap
+  );
+  const namedStyle = resolveParaStyle(
     headStyle || void 0,
     ctx.paraStyleMap
   );
+  const styleInherited = {
+    rPr: { ...documentDefaults.rPr, ...namedStyle.rPr },
+    pPr: { ...documentDefaults.pPr, ...namedStyle.pPr }
+  };
   const canonicalStyle = canonicalDocxStyleId(headStyle, ctx.paraStyleMap);
   const props = {
     align: safeAlign(alignVal),
@@ -3423,21 +3482,28 @@ function decodePara2(p, ctx) {
     styleId: canonicalStyle
   };
   const spacingAttr = pPr?.["w:spacing"]?.[0]?._attr ?? pPr?.spacing?.[0]?._attr ?? {};
-  const beforeVal = Number(
-    spacingAttr?.["w:before"] ?? spacingAttr?.before ?? 0
-  );
-  const afterVal = Number(spacingAttr?.["w:after"] ?? spacingAttr?.after ?? 0);
-  const lineVal = Number(spacingAttr?.["w:line"] ?? spacingAttr?.line ?? 0);
-  const lineRule = spacingAttr?.["w:lineRule"] ?? spacingAttr?.lineRule ?? "auto";
-  if (beforeVal > 0) props.spaceBefore = Metric.dxaToPt(beforeVal);
-  else if (styleInherited.pPr?.spaceBefore)
-    props.spaceBefore = styleInherited.pPr.spaceBefore;
-  if (afterVal > 0) props.spaceAfter = Metric.dxaToPt(afterVal);
-  else if (styleInherited.pPr?.spaceAfter)
-    props.spaceAfter = styleInherited.pPr.spaceAfter;
-  if (lineVal > 0 && lineRule === "auto") props.lineHeight = lineVal / 240;
-  else if (styleInherited.pPr?.lineHeight)
-    props.lineHeight = styleInherited.pPr.lineHeight;
+  const beforeRaw = docxAttr(spacingAttr, "before");
+  const afterRaw = docxAttr(spacingAttr, "after");
+  const lineRaw = docxAttr(spacingAttr, "line");
+  const beforeVal = Number(beforeRaw);
+  const afterVal = Number(afterRaw);
+  const lineVal = Number(lineRaw);
+  const lineRule = docxAttr(spacingAttr, "lineRule") ?? "auto";
+  props.spaceBefore = beforeRaw !== void 0 && Number.isFinite(beforeVal) ? Metric.dxaToPt(Math.max(0, beforeVal)) : styleInherited.pPr?.spaceBefore ?? WORD_DEFAULT_SPACE_BEFORE_PT;
+  props.spaceAfter = afterRaw !== void 0 && Number.isFinite(afterVal) ? Metric.dxaToPt(Math.max(0, afterVal)) : styleInherited.pPr?.spaceAfter ?? WORD_DEFAULT_SPACE_AFTER_PT;
+  if (lineRaw !== void 0 && Number.isFinite(lineVal) && lineVal > 0) {
+    if (lineRule === "exact" || lineRule === "atLeast") {
+      props.lineHeightFixed = Metric.dxaToPt(lineVal);
+      props.lineHeightRule = lineRule;
+    } else {
+      props.lineHeight = lineVal / 240;
+    }
+  } else if (styleInherited.pPr?.lineHeightFixed !== void 0) {
+    props.lineHeightFixed = styleInherited.pPr.lineHeightFixed;
+    props.lineHeightRule = styleInherited.pPr.lineHeightRule;
+  } else {
+    props.lineHeight = styleInherited.pPr?.lineHeight ?? WORD_DEFAULT_LINE_HEIGHT;
+  }
   const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
   const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
   const rightVal = Number(indAttr?.["w:right"] ?? indAttr?.right ?? 0);
@@ -3819,6 +3885,44 @@ async function parseStylesMap(xml) {
   }
   return map;
 }
+function docxAttr(attrs, name) {
+  if (!attrs) return void 0;
+  return attrs[`w:${name}`] ?? attrs[name];
+}
+function parseDocxSpacingProps(pPr, includeWordDefaults = false) {
+  const parsed = includeWordDefaults ? {
+    spaceBefore: WORD_DEFAULT_SPACE_BEFORE_PT,
+    spaceAfter: WORD_DEFAULT_SPACE_AFTER_PT,
+    lineHeight: WORD_DEFAULT_LINE_HEIGHT
+  } : {};
+  const spacingAttr = pPr?.["w:spacing"]?.[0]?._attr ?? pPr?.spacing?.[0]?._attr;
+  if (!spacingAttr) return parsed;
+  const beforeRaw = docxAttr(spacingAttr, "before");
+  const afterRaw = docxAttr(spacingAttr, "after");
+  const lineRaw = docxAttr(spacingAttr, "line");
+  const lineRule = docxAttr(spacingAttr, "lineRule") ?? "auto";
+  const beforeVal = Number(beforeRaw);
+  const afterVal = Number(afterRaw);
+  const lineVal = Number(lineRaw);
+  if (beforeRaw !== void 0 && Number.isFinite(beforeVal)) {
+    parsed.spaceBefore = Metric.dxaToPt(Math.max(0, beforeVal));
+  }
+  if (afterRaw !== void 0 && Number.isFinite(afterVal)) {
+    parsed.spaceAfter = Metric.dxaToPt(Math.max(0, afterVal));
+  }
+  if (lineRaw !== void 0 && Number.isFinite(lineVal) && lineVal > 0) {
+    if (lineRule === "exact" || lineRule === "atLeast") {
+      parsed.lineHeight = void 0;
+      parsed.lineHeightFixed = Metric.dxaToPt(lineVal);
+      parsed.lineHeightRule = lineRule;
+    } else {
+      parsed.lineHeight = lineVal / 240;
+      parsed.lineHeightFixed = void 0;
+      parsed.lineHeightRule = void 0;
+    }
+  }
+  return parsed;
+}
 async function parseParaStyleMap(xml) {
   const map = /* @__PURE__ */ new Map();
   const trimmed = xml.trim();
@@ -3826,6 +3930,10 @@ async function parseParaStyleMap(xml) {
   try {
     const obj = await XmlKit.parseStrict(trimmed);
     const stylesRoot = obj?.["w:styles"]?.[0] ?? obj?.styles?.[0] ?? obj;
+    const defaultsPPr = stylesRoot?.["w:docDefaults"]?.[0]?.["w:pPrDefault"]?.[0]?.["w:pPr"]?.[0] ?? stylesRoot?.docDefaults?.[0]?.pPrDefault?.[0]?.pPr?.[0];
+    map.set(DOCX_DEFAULT_STYLE_KEY, {
+      pPr: parseDocxSpacingProps(defaultsPPr, true)
+    });
     const styleArr = toArr2(stylesRoot?.["w:style"] ?? stylesRoot?.style);
     for (const style of styleArr) {
       const attr = style?._attr ?? {};
@@ -3864,17 +3972,7 @@ async function parseParaStyleMap(xml) {
       }
       const pPr = style?.["w:pPr"]?.[0] ?? style?.pPr?.[0];
       if (pPr) {
-        const spacingAttr = pPr?.["w:spacing"]?.[0]?._attr ?? pPr?.spacing?.[0]?._attr ?? {};
-        const beforeVal = Number(
-          spacingAttr?.["w:before"] ?? spacingAttr?.before ?? 0
-        );
-        const afterVal = Number(
-          spacingAttr?.["w:after"] ?? spacingAttr?.after ?? 0
-        );
-        const lineVal = Number(
-          spacingAttr?.["w:line"] ?? spacingAttr?.line ?? 0
-        );
-        const lineRule = spacingAttr?.["w:lineRule"] ?? spacingAttr?.lineRule ?? "auto";
+        const spacingProps = parseDocxSpacingProps(pPr);
         const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
         const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
         const rightVal = Number(indAttr?.["w:right"] ?? indAttr?.right ?? 0);
@@ -3886,10 +3984,8 @@ async function parseParaStyleMap(xml) {
         );
         const alignVal = pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ?? pPr?.["w:jc"]?.[0]?._attr?.val;
         def.pPr = {
+          ...spacingProps,
           align: alignVal,
-          spaceBefore: beforeVal > 0 ? Metric.dxaToPt(beforeVal) : void 0,
-          spaceAfter: afterVal > 0 ? Metric.dxaToPt(afterVal) : void 0,
-          lineHeight: lineVal > 0 && lineRule === "auto" ? lineVal / 240 : void 0,
           indentPt: leftVal > 0 ? Metric.dxaToPt(leftVal) : void 0,
           indentRightPt: rightVal > 0 ? Metric.dxaToPt(rightVal) : void 0,
           firstLineIndentPt: firstLineVal > 0 ? Metric.dxaToPt(firstLineVal) : hangingVal > 0 ? -Metric.dxaToPt(hangingVal) : void 0
@@ -3960,6 +4056,18 @@ function decodeGrid2(tbl, ctx) {
   }
   const defaultStroke = tblBdr.insideH ?? tblBdr.top;
   const gridProps = { look, defaultStroke };
+  const tblCellMar = tblPr?.["w:tblCellMar"]?.[0] ?? tblPr?.tblCellMar?.[0];
+  if (tblCellMar) {
+    const readMarginPt = (side) => {
+      const attrs = tblCellMar?.[`w:${side}`]?.[0]?._attr ?? tblCellMar?.[side]?.[0]?._attr;
+      const value = Number(docxAttr(attrs, "w"));
+      return Number.isFinite(value) && value >= 0 ? Metric.dxaToPt(value) : void 0;
+    };
+    gridProps.cellPadT = readMarginPt("top");
+    gridProps.cellPadB = readMarginPt("bottom");
+    gridProps.cellPadL = readMarginPt("left");
+    gridProps.cellPadR = readMarginPt("right");
+  }
   const layout = decodeFloatingTableLayout(tblPr);
   if (layout) gridProps.layout = layout;
   const tblGrid = tbl?.["w:tblGrid"]?.[0] ?? tbl?.tblGrid?.[0];
@@ -5081,6 +5189,9 @@ function readPixelDims(b64, mime) {
 function charPrKey(p) {
   return `${p.b ? 1 : 0}|${p.i ? 1 : 0}|${p.u ? 1 : 0}|${p.s ? 1 : 0}|${p.pt ?? 10}|${p.color ?? "000000"}|${p.font ?? ""}|${p.bg ?? ""}`;
 }
+function paraShapeHwpToLayoutHwp(value) {
+  return Math.round(value / 2);
+}
 function paraPrKey(p) {
   return `${p.align ?? "left"}|${p.verAlign ?? "baseline"}|${p.lineWrap ?? "break"}|${p.listOrd ?? ""}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.indentRightPt ?? 0}|${p.firstLineIndentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}|${p.lineHeightFixed ?? 0}|${p.styleId ?? ""}`;
 }
@@ -5143,13 +5254,16 @@ function registerParaPr(props, ctx) {
     align: alignStr,
     verAlign: verAlignStr,
     lineWrap: lineWrapStr,
-    leftHwp: Metric.ptToHwp(props.indentPt ?? 0),
-    rightHwp: Metric.ptToHwp(props.indentRightPt ?? 0),
-    intentHwp: Metric.ptToHwp(props.firstLineIndentPt ?? 0),
-    prevHwp: Metric.ptToHwp(props.spaceBefore ?? 0),
-    nextHwp: Metric.ptToHwp(props.spaceAfter ?? 0),
+    leftHwp: Metric.ptToHwp(props.indentPt ?? 0) * 2,
+    rightHwp: Metric.ptToHwp(props.indentRightPt ?? 0) * 2,
+    intentHwp: Metric.ptToHwp(props.firstLineIndentPt ?? 0) * 2,
+    prevHwp: Metric.ptToHwp(props.spaceBefore ?? 0) * 2,
+    nextHwp: Metric.ptToHwp(props.spaceAfter ?? 0) * 2,
     lineSpacing: props.lineHeightFixed ? 0 : props.lineHeight ? Math.round(props.lineHeight * 100) : 160,
-    lineSpacingFixed: props.lineHeightFixed ? Math.max(Metric.ptToHwp(props.lineHeightFixed), Math.ceil(1e3 * 1.15)) : void 0
+    lineSpacingFixed: props.lineHeightFixed ? Math.max(
+      Metric.ptToHwp(props.lineHeightFixed),
+      Math.ceil(1e3 * 1.15)
+    ) * 2 : void 0
   };
   if (props.listOrd !== void 0) {
     def.listType = props.listOrd ? "DIGIT" : "BULLET";
@@ -5434,7 +5548,7 @@ function buildHeaderXml(dims, meta, ctx) {
     const wrap = pp.lineWrap ?? "BREAK";
     const lsType = pp.lineSpacingFixed !== void 0 ? "AT_LEAST" : "PERCENT";
     const lsValue = pp.lineSpacingFixed !== void 0 ? pp.lineSpacingFixed : pp.lineSpacing;
-    paraPrXml += `<hh:paraPr id="${pp.id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="0" suppressLineNumbers="0" checked="0"><hh:align horizontal="${pp.align}" vertical="${ver}"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="${wrap}"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/><hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar"><hh:margin><hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="${pp.rightHwp}" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/></hp:case><hp:default><hh:margin><hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="${pp.rightHwp}" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/></hp:default></hp:switch><hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>`;
+    paraPrXml += `<hh:paraPr id="${pp.id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="0" suppressLineNumbers="0" checked="0"><hh:align horizontal="${pp.align}" vertical="${ver}"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="${wrap}"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/><hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar"><hh:margin><hc:indent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="${pp.rightHwp}" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/></hp:case><hp:default><hh:margin><hc:indent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="${pp.rightHwp}" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/></hp:default></hp:switch><hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>`;
   }
   const borderFillXml = ctx.borderFillBank.toXml();
   const denseStyles = materializeContiguousStyles(ctx.hwpxStyles);
@@ -5702,7 +5816,10 @@ function encodeParaPositioned(para, ctx, vertPos, secPr = "", availWidth, hfRun 
   const fontSize = fontSizeForPara(para, ctx);
   const paraPr = ctx.paraPrs[paraPrId];
   const lineSpacing = paraPr?.lineSpacing ?? 160;
-  const lineHeightHwp = paraPr?.lineSpacingFixed !== void 0 ? Math.max(paraPr.lineSpacingFixed, Math.ceil(fontSize * 1.15)) : Math.max(fontSize, Math.round(fontSize * Math.max(100, lineSpacing) / 100));
+  const lineHeightHwp = paraPr?.lineSpacingFixed !== void 0 ? Math.max(
+    paraShapeHwpToLayoutHwp(paraPr.lineSpacingFixed),
+    Math.ceil(fontSize * 1.15)
+  ) : Math.max(fontSize, Math.round(fontSize * Math.max(100, lineSpacing) / 100));
   const textHeight = Math.max(fontSize, inlineObjectHeightForPara(para, ctx));
   const effectiveLineHeight = textHeight + Math.max(0, lineHeightHwp - fontSize);
   const spacing = Math.max(0, effectiveLineHeight - textHeight);
@@ -5726,12 +5843,17 @@ function encodeParaPositioned(para, ctx, vertPos, secPr = "", availWidth, hfRun 
   let runsXml = encodeParaKids(para.kids, ctx);
   if (!runsXml) runsXml = `<hp:run charPrIDRef="0" charTcId="0"><hp:t xml:space="preserve"> </hp:t></hp:run>`;
   const paraText2 = extractParaText(para);
-  const paraStart = vertPos + Math.max(0, paraPr?.prevHwp ?? 0);
+  const paraStart = vertPos + Math.max(0, paraShapeHwpToLayoutHwp(paraPr?.prevHwp ?? 0));
   const firstHorzPos = Math.max(
     0,
-    (paraPr?.leftHwp ?? 0) + (paraPr?.intentHwp ?? 0)
+    paraShapeHwpToLayoutHwp(
+      (paraPr?.leftHwp ?? 0) + (paraPr?.intentHwp ?? 0)
+    )
   );
-  const restHorzPos = Math.max(0, paraPr?.leftHwp ?? 0);
+  const restHorzPos = Math.max(
+    0,
+    paraShapeHwpToLayoutHwp(paraPr?.leftHwp ?? 0)
+  );
   const { xml: linesegXml, totalHeight } = buildLinesegarray(
     paraText2,
     paraStart,
@@ -5743,7 +5865,10 @@ function encodeParaPositioned(para, ctx, vertPos, secPr = "", availWidth, hfRun 
       textHeight,
       firstHorzPos,
       restHorzPos,
-      rightMargin: Math.max(0, paraPr?.rightHwp ?? 0),
+      rightMargin: Math.max(
+        0,
+        paraShapeHwpToLayoutHwp(paraPr?.rightHwp ?? 0)
+      ),
       indentFirst: (paraPr?.intentHwp ?? 0) !== 0,
       pageFirst
     }
@@ -5752,7 +5877,7 @@ function encodeParaPositioned(para, ctx, vertPos, secPr = "", availWidth, hfRun 
   const xml = `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="${paraPrId}" styleIDRef="${styleIDRef}" pageBreak="${hasPageBreak ? 1 : 0}" columnBreak="0" merged="0" paraTcId="0">` + secPr + hfRun + runsXml + linesegXml + `</hp:p>`;
   return {
     xml,
-    nextVertPos: paraStart + totalHeight + Math.max(0, paraPr?.nextHwp ?? 0),
+    nextVertPos: paraStart + totalHeight + Math.max(0, paraShapeHwpToLayoutHwp(paraPr?.nextHwp ?? 0)),
     hasPageBreak
   };
 }
@@ -6017,6 +6142,10 @@ function buildGridXml(grid, ctx, maxWidth = ctx.availableWidth) {
     Math.min(100, Math.floor(totalW / colCount))
   );
   const actualTotal = colWidths.reduce((s, w) => s + w, 0);
+  const tablePadL = Metric.ptToHwp(grid.props.cellPadL ?? 1.41);
+  const tablePadR = Metric.ptToHwp(grid.props.cellPadR ?? 1.41);
+  const tablePadT = Metric.ptToHwp(grid.props.cellPadT ?? 1.41);
+  const tablePadB = Metric.ptToHwp(grid.props.cellPadB ?? 1.41);
   const rowHeights = [];
   for (let ri = 0; ri < rowCount; ri++) {
     let minRowH = 0;
@@ -6029,8 +6158,8 @@ function buildGridXml(grid, ctx, maxWidth = ctx.availableWidth) {
         for (let sc = ci; sc < ci + cell.cs && sc < colWidths.length; sc++)
           cellW += colWidths[sc];
         if (!cellW) cellW = Math.round(totalW / colCount) * cell.cs;
-        const padL = cp.padL !== void 0 ? Metric.ptToHwp(cp.padL) : 141;
-        const padR = cp.padR !== void 0 ? Metric.ptToHwp(cp.padR) : 141;
+        const padL = cp.padL !== void 0 ? Metric.ptToHwp(cp.padL) : tablePadL;
+        const padR = cp.padR !== void 0 ? Metric.ptToHwp(cp.padR) : tablePadR;
         const innerW = Math.max(cellW - padL - padR, 100);
         const span = Math.max(1, cell.rs ?? 1);
         const h = estimateCellHeight(cell, ctx, innerW);
@@ -6061,10 +6190,10 @@ function buildGridXml(grid, ctx, maxWidth = ctx.availableWidth) {
         cellW += colWidths[sc];
       if (!cellW) cellW = Math.round(totalW / colCount) * cell.cs;
       const subListId = ctx.nextElementId++;
-      const padL = cp.padL !== void 0 ? Metric.ptToHwp(cp.padL) : 141;
-      const padR = cp.padR !== void 0 ? Metric.ptToHwp(cp.padR) : 141;
-      const padT = cp.padT !== void 0 ? Metric.ptToHwp(cp.padT) : 141;
-      const padB = cp.padB !== void 0 ? Metric.ptToHwp(cp.padB) : 141;
+      const padL = cp.padL !== void 0 ? Metric.ptToHwp(cp.padL) : tablePadL;
+      const padR = cp.padR !== void 0 ? Metric.ptToHwp(cp.padR) : tablePadR;
+      const padT = cp.padT !== void 0 ? Metric.ptToHwp(cp.padT) : tablePadT;
+      const padB = cp.padB !== void 0 ? Metric.ptToHwp(cp.padB) : tablePadB;
       const innerW = Math.max(cellW - padL - padR, 100);
       let parasXml = "";
       let localVertPos = 0;
@@ -6102,7 +6231,7 @@ function buildGridXml(grid, ctx, maxWidth = ctx.availableWidth) {
   const horzAlign = alignMap[grid.props.align ?? "left"] ?? "LEFT";
   const layoutAttrs = buildGridLayoutAttrs(grid.props.layout, horzAlign);
   const repeatHeader = grid.props.headerRow ? 1 : 0;
-  const xml = `<hp:tbl id="${ctx.nextElementId++}" zOrder="${layoutAttrs.zOrder}" numberingType="TABLE" textWrap="${layoutAttrs.textWrap}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="${repeatHeader}" rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="${layoutAttrs.noAdjust}"><hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="${totalH}" heightRelTo="ABSOLUTE" protect="0"/>` + layoutAttrs.posXml + layoutAttrs.outMarginXml + `<hp:inMargin left="0" right="0" top="0" bottom="0"/>` + rowsXml + `</hp:tbl>`;
+  const xml = `<hp:tbl id="${ctx.nextElementId++}" zOrder="${layoutAttrs.zOrder}" numberingType="TABLE" textWrap="${layoutAttrs.textWrap}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="${repeatHeader}" rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="${layoutAttrs.noAdjust}"><hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="${totalH}" heightRelTo="ABSOLUTE" protect="0"/>` + layoutAttrs.posXml + layoutAttrs.outMarginXml + `<hp:inMargin left="${tablePadL}" right="${tablePadR}" top="${tablePadT}" bottom="${tablePadB}"/>` + rowsXml + `</hp:tbl>`;
   return { xml, height: totalH };
 }
 function estimateLineCountForWidth(text, fontSize, horzSize) {
@@ -6163,7 +6292,10 @@ function estimateCellHeight(cell, ctx, innerWidth) {
     const fs = fontSizeForPara(para, ctx);
     const ppId = ctx.paraPrMap.get(paraPrKey(para.props));
     const pp = ppId !== void 0 ? ctx.paraPrs[ppId] : null;
-    const lineHeight = pp?.lineSpacingFixed !== void 0 ? Math.max(pp.lineSpacingFixed, Math.ceil(fs * 1.15)) : Math.max(fs, Math.round(fs * Math.max(100, pp?.lineSpacing ?? 160) / 100));
+    const lineHeight = pp?.lineSpacingFixed !== void 0 ? Math.max(
+      paraShapeHwpToLayoutHwp(pp.lineSpacingFixed),
+      Math.ceil(fs * 1.15)
+    ) : Math.max(fs, Math.round(fs * Math.max(100, pp?.lineSpacing ?? 160) / 100));
     const textHeight = Math.max(fs, inlineObjectHeightForPara(para, ctx));
     const lineAdvance = textHeight + Math.max(0, lineHeight - fs);
     const lineCount = estimateLineCountForWidth(
@@ -6171,8 +6303,8 @@ function estimateCellHeight(cell, ctx, innerWidth) {
       fs,
       innerWidth
     );
-    const before = pp?.prevHwp ?? 0;
-    const after = pp?.nextHwp ?? 0;
+    const before = paraShapeHwpToLayoutHwp(pp?.prevHwp ?? 0);
+    const after = paraShapeHwpToLayoutHwp(pp?.nextHwp ?? 0);
     h += lineAdvance * lineCount + before + after;
   }
   if (!h) h = Math.round(1e3 * 1.6);
@@ -6726,7 +6858,7 @@ function encodeParaInner(para, ctx, maxWidthPt) {
     } else if (lineHeight !== void 0) {
       const ratio = docxLineHeightRatio(lineHeight);
       parts.push(
-        `w:line="${Math.round(ratio * 240)}" w:lineRule="auto"`
+        `w:line="${Math.max(1, Math.floor(ratio * 240))}" w:lineRule="auto"`
       );
     }
     spacingXml = `<w:spacing ${parts.join(" ")}/>`;
@@ -6925,6 +7057,10 @@ function encodeGrid(grid, ctx, dims = A4, maxWidthDxa) {
   const d = dims ?? A4;
   const bodyDxa = Math.max(1, Metric.ptToDxa(d.wPt - d.ml - d.mr));
   const availDxa = Math.max(1, Math.min(bodyDxa, maxWidthDxa ?? bodyDxa));
+  const tablePadT = Math.max(0, Math.round(Metric.ptToDxa(gp.cellPadT ?? 1.41)));
+  const tablePadB = Math.max(0, Math.round(Metric.ptToDxa(gp.cellPadB ?? 1.41)));
+  const tablePadL = Math.max(0, Math.round(Metric.ptToDxa(gp.cellPadL ?? 5.1)));
+  const tablePadR = Math.max(0, Math.round(Metric.ptToDxa(gp.cellPadR ?? 5.1)));
   const tableMap = Array.from(
     { length: grid.kids.length },
     () => []
@@ -7023,10 +7159,10 @@ function encodeGrid(grid, ctx, dims = A4, maxWidthDxa) {
           const cPadL = cp.padL != null ? Math.round(Metric.ptToDxa(cp.padL)) : null;
           const cPadR = cp.padR != null ? Math.round(Metric.ptToDxa(cp.padR)) : null;
           if (cPadT != null || cPadB != null || cPadL != null || cPadR != null) {
-            const t = cPadT ?? 28;
-            const b = cPadB ?? 28;
-            const l = cPadL ?? 72;
-            const r = cPadR ?? 72;
+            const t = cPadT ?? tablePadT;
+            const b = cPadB ?? tablePadB;
+            const l = cPadL ?? tablePadL;
+            const r = cPadR ?? tablePadR;
             tcPrParts.push(
               `<w:tcMar><w:top w:w="${t}" w:type="dxa"/><w:left w:w="${l}" w:type="dxa"/><w:bottom w:w="${b}" w:type="dxa"/><w:right w:w="${r}" w:type="dxa"/></w:tcMar>`
             );
@@ -7036,13 +7172,13 @@ function encodeGrid(grid, ctx, dims = A4, maxWidthDxa) {
             if (kid.tag === "grid") {
               const nestedLimit = Math.max(
                 1,
-                cw - (cPadL ?? 102) - (cPadR ?? 102)
+                cw - (cPadL ?? tablePadL) - (cPadR ?? tablePadR)
               );
               parts.push(encodeGrid(kid, ctx, dims, nestedLimit));
             } else if (kid.tag === "para") {
               const textLimit = Math.max(
                 1,
-                cw - (cPadL ?? 102) - (cPadR ?? 102)
+                cw - (cPadL ?? tablePadL) - (cPadR ?? tablePadR)
               );
               parts.push(encodeParaInner(kid, ctx, Metric.dxaToPt(textLimit)));
             }
@@ -7111,7 +7247,7 @@ ${cellXmls.join("\n")}
   const tblJc = gp.align ? `<w:jc w:val="${tblAlignMap[gp.align] ?? "start"}"/>` : "";
   const tblPosition = encodeFloatingTablePr(gp.layout);
   return `    <w:tbl>
-      <w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="${Math.round(totalDxa)}" w:type="dxa"/>${tblPosition}<w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="${firstRow}" w:lastRow="${lastRow}" w:firstColumn="${firstCol}" w:lastColumn="${lastCol}" w:noHBand="${noHBand}" w:noVBand="${noVBand}"/>${tblBorders}${tblJc}<w:tblCellMar><w:top w:w="28" w:type="dxa"/><w:left w:w="102" w:type="dxa"/><w:bottom w:w="28" w:type="dxa"/><w:right w:w="102" w:type="dxa"/></w:tblCellMar></w:tblPr>
+      <w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="${Math.round(totalDxa)}" w:type="dxa"/>${tblPosition}<w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="${firstRow}" w:lastRow="${lastRow}" w:firstColumn="${firstCol}" w:lastColumn="${lastCol}" w:noHBand="${noHBand}" w:noVBand="${noVBand}"/>${tblBorders}${tblJc}<w:tblCellMar><w:top w:w="${tablePadT}" w:type="dxa"/><w:left w:w="${tablePadL}" w:type="dxa"/><w:bottom w:w="${tablePadB}" w:type="dxa"/><w:right w:w="${tablePadR}" w:type="dxa"/></w:tblCellMar></w:tblPr>
       <w:tblGrid>${gridCols}</w:tblGrid>
 ${rows}
     </w:tbl>`;
@@ -8059,8 +8195,8 @@ function mkParaShape(p) {
   const lineSpacingType = p.lineHeightFixed !== void 0 ? 3 : 0;
   const attr1 = lineSpacingType & 3 | (alignVal & 7) << 2;
   const lineSpaceValue = p.lineHeightFixed !== void 0 ? Math.max(
-    Metric.ptToHwp(p.lineHeightFixed),
-    Math.ceil(Metric.ptToHwp(10) * 1.15)
+    Metric.ptToHwp(p.lineHeightFixed) * 2,
+    Math.ceil(Metric.ptToHwp(10) * 1.15) * 2
   ) : Math.max(100, p.lineHeight ? Math.round(p.lineHeight * 100) : 160);
   const paraShapeUnit = (pt) => Metric.ptToHwp(pt) * 2;
   return new BufWriter().u32(attr1).i32(paraShapeUnit(p.indentPt ?? 0)).i32(paraShapeUnit(p.indentRightPt ?? 0)).i32(paraShapeUnit(p.firstLineIndentPt ?? 0)).i32(paraShapeUnit(p.spaceBefore ?? 0)).i32(paraShapeUnit(p.spaceAfter ?? 0)).i32(lineSpaceValue).u16(0).u16(0).u16(0).i16(0).i16(0).i16(0).i16(0).u32(0).u32(lineSpacingType).u32(lineSpaceValue).u32(0).build();
@@ -8557,16 +8693,17 @@ function mkTableCtrl(wHwp, hHwp, instanceId, align = "left") {
   const alignFlags = { left: 0, center: 1, right: 2, justify: 3, distribute: 0, distribute_space: 0 }[align] ?? 0;
   return new BufWriter().u32(CTRL_TABLE2).u32(136978961).i32(0).i32(0).u32(wHwp).u32(hHwp).i32(7).u16(140).u16(140).u16(140).u16(140).u32(instanceId).i32(alignFlags).u16(0).build();
 }
-function mkTableRecord(rowCnt, colCnt, cellCountPerRow, bfId, repeatHeader) {
+function mkTableRecord(rowCnt, colCnt, cellCountPerRow, bfId, repeatHeader, padL, padR, padT, padB) {
   const w = new BufWriter();
   w.u32(67108865 | (repeatHeader ? 1 << 2 : 0)).u16(rowCnt).u16(colCnt).u16(0);
-  w.u16(510).u16(510).u16(141).u16(141);
+  w.u16(padL).u16(padR).u16(padT).u16(padB);
   for (const count of cellCountPerRow) w.u16(Math.max(1, count & 65535));
   w.u16(bfId).u16(0);
   return w.build();
 }
-function mkCellListHeader(paraCount, row, col, rs, cs, wHwp, hHwp, bfId, padL = 141, padR = 141, padT = 141, padB = 141) {
-  return new BufWriter().u16(paraCount).u32(0).u16(0).u16(col).u16(row).u16(cs).u16(rs).u32(wHwp).u32(hHwp).u16(padL).u16(padR).u16(padT).u16(padB).u16(bfId).zeros(13).build();
+function mkCellListHeader(paraCount, row, col, rs, cs, wHwp, hHwp, bfId, padL = 141, padR = 141, padT = 141, padB = 141, va) {
+  const verticalAlign = va === "mid" ? 1 : va === "bot" ? 2 : 0;
+  return new BufWriter().u16(paraCount).u16(0).u32(verticalAlign << 5).u16(col).u16(row).u16(cs).u16(rs).u32(wHwp).u32(hHwp).u16(padL).u16(padR).u16(padT).u16(padB).u16(bfId).zeros(13).build();
 }
 var DEFAULT_ROW_HEIGHT_PT = 14;
 function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
@@ -8592,6 +8729,10 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
   );
   const defStroke = grid.props.defaultStroke ?? bank.DEF_STROKE;
   const defBfId = bank.addBorderFill(defStroke);
+  const tablePadL = Metric.ptToHwp(grid.props.cellPadL ?? 5.1);
+  const tablePadR = Metric.ptToHwp(grid.props.cellPadR ?? 5.1);
+  const tablePadT = Metric.ptToHwp(grid.props.cellPadT ?? 1.41);
+  const tablePadB = Metric.ptToHwp(grid.props.cellPadB ?? 1.41);
   const rowHwp = grid.kids.map((row) => {
     const base = row.heightPt != null && row.heightPt > 0 ? Metric.ptToHwp(row.heightPt) : Metric.ptToHwp(DEFAULT_ROW_HEIGHT_PT);
     let minRow = 0;
@@ -8604,8 +8745,8 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
       }
       if (cellWidthHwp <= 0) cellWidthHwp = Math.floor(availWidthHwp / colCnt) * cs;
       const cp = cell.props ?? {};
-      const padL = cp.padL !== void 0 ? Metric.ptToHwp(cp.padL) : 510;
-      const padR = cp.padR !== void 0 ? Metric.ptToHwp(cp.padR) : 510;
+      const padL = cp.padL !== void 0 ? Metric.ptToHwp(cp.padL) : tablePadL;
+      const padR = cp.padR !== void 0 ? Metric.ptToHwp(cp.padR) : tablePadR;
       const innerWidthHwp = Math.max(
         100,
         cellWidthHwp - padL - padR
@@ -8642,7 +8783,17 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
     mkRec(
       TAG_TABLE,
       lv + 1,
-      mkTableRecord(rowCnt, colCnt, cellCountPerRow, defBfId, !!grid.props.headerRow)
+      mkTableRecord(
+        rowCnt,
+        colCnt,
+        cellCountPerRow,
+        defBfId,
+        !!grid.props.headerRow,
+        tablePadL,
+        tablePadR,
+        tablePadT,
+        tablePadB
+      )
     )
   );
   for (let r = 0; r < grid.kids.length; r++) {
@@ -8666,10 +8817,10 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
         cp.bg
       ) : bank.addBorderFill(defStroke, cp.bg);
       const cellKids = cell.kids.length > 0 ? cell.kids : [{ tag: "para", props: {}, kids: [] }];
-      const padL = cp.padL !== void 0 ? Metric.ptToHwp(cp.padL) : 510;
-      const padR = cp.padR !== void 0 ? Metric.ptToHwp(cp.padR) : 510;
-      const padT = cp.padT !== void 0 ? Metric.ptToHwp(cp.padT) : 141;
-      const padB = cp.padB !== void 0 ? Metric.ptToHwp(cp.padB) : 141;
+      const padL = cp.padL !== void 0 ? Metric.ptToHwp(cp.padL) : tablePadL;
+      const padR = cp.padR !== void 0 ? Metric.ptToHwp(cp.padR) : tablePadR;
+      const padT = cp.padT !== void 0 ? Metric.ptToHwp(cp.padT) : tablePadT;
+      const padB = cp.padB !== void 0 ? Metric.ptToHwp(cp.padB) : tablePadB;
       const encodedCellParagraphs = cellKids.reduce((count, kid) => {
         if (kid.tag === "grid") return count + 1;
         const paraImages = flatImgNodes(kid.kids).filter(
@@ -8694,7 +8845,8 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
             padL,
             padR,
             padT,
-            padB
+            padB,
+            cp.va
           )
         )
       );
