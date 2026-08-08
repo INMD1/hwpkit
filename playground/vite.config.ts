@@ -13,4 +13,7 @@ export default defineConfig({
     'process.env': {},
     global: 'globalThis',
   },
+  server: {
+    allowedHosts: ['hwpkitdev.devmultid.org'],
+  },
 });
