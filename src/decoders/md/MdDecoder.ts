@@ -48,6 +48,7 @@ export class MdDecoder extends BaseDecoder {
           kids.push(buildPara(parseInline(listMatch[3]), {
             listLv: Math.floor(listMatch[1].length / 2),
             listOrd: /\d+\./.test(listMatch[2]),
+            listMark: listMatch[2],
           }));
           i++; continue;
         }
@@ -156,7 +157,25 @@ function parseInline(text: string): (SpanNode | ImgNode)[] {
 }
 
 function parseMdTable(lines: string[], startLine: number): { node: any; nextLine: number } | null {
-  const parse = (line: string) => line.split('|').map(c => c.trim()).filter((c, i, arr) => i > 0 || c !== '');
+  const parse = (line: string) => {
+    const cells: string[] = [];
+    let cell = '';
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === '\\' && line[i + 1] === '|') {
+        cell += '|';
+        i++;
+      } else if (line[i] === '|') {
+        cells.push(cell.trim());
+        cell = '';
+      } else {
+        cell += line[i];
+      }
+    }
+    cells.push(cell.trim());
+    if (cells[0] === '') cells.shift();
+    if (cells[cells.length - 1] === '') cells.pop();
+    return cells;
+  };
   const headers = parse(lines[startLine]);
 
   let cur = startLine + 2;

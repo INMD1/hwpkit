@@ -52,6 +52,8 @@ const TAG_FACE_NAME = T + 3; // 19
 const TAG_BORDER_FILL = T + 4; // 20
 const TAG_CHAR_SHAPE = T + 5; // 21
 const TAG_TAB_DEF = T + 6; // 22
+const TAG_NUMBERING = T + 7; // 23
+const TAG_BULLET = T + 8; // 24
 const TAG_PARA_SHAPE = T + 9; // 25
 const TAG_STYLE = T + 10; // 26
 const TAG_DOC_DATA = T + 11; // 27
@@ -71,7 +73,6 @@ const TAG_PAGE_BORDER_FILL = T + 59; // 75
 const TAG_SHAPE_COMPONENT = T + 60; // 76
 const TAG_TABLE = T + 61; // 77
 const TAG_SHAPE_COMPONENT_PICTURE = T + 69; // 85
-const TAG_CTRL_DATA = T + 71; // 87
 
 // Control ID (LE UINT32)
 const CTRL_TABLE = 0x74626c20; // 'tbl '
@@ -251,6 +252,7 @@ function isKoreanFont(face: string): boolean {
 }
 
 class HwpStyleBank {
+  readonly NONE_STROKE: Stroke = { kind: "none", pt: 0, color: "000000" };
   readonly DEF_STROKE: Stroke = { kind: "solid", pt: 0.5, color: "000000" };
 
   // 언어별 독립 폰트 목록 (ANYTOHWP langFontFaces)
@@ -271,6 +273,9 @@ class HwpStyleBank {
   readonly bfData: BfEntry[] = [];
   private bfIdx = new Map<string, number>();
   private maxStyleId = 0;
+  private styleParaShapeIds = new Map<number, number>([[0, 0]]);
+  private hasNumbering = false;
+  private hasBullet = false;
 
   // charShape마다 언어별 fontId를 기록
   readonly csFontIds: number[][] = [[0, 0, 0, 0, 0, 0, 0]]; // id=0 → 모두 0
@@ -278,7 +283,7 @@ class HwpStyleBank {
   constructor() {
     // 기본 폰트 등록 (ANYTOHWP: 함초롬바탕)
     for (const g of LANG_GROUPS) this._registerLangFont(g, "함초롬바탕");
-    this.addBorderFill(this.DEF_STROKE); // bfId=1
+    this.addBorderFill(this.NONE_STROKE); // bfId=1 (테두리 없음)
   }
 
   private _registerLangFont(lang: LangGroup, face: string): number {
@@ -337,14 +342,37 @@ class HwpStyleBank {
     return id;
   }
 
-  registerStyleId(styleId: number | undefined): void {
+  registerStyleId(
+    styleId: number | undefined,
+    paraShapeId?: number,
+  ): void {
     if (styleId === undefined) return;
     if (!Number.isInteger(styleId) || styleId < 0 || styleId > 255) return;
     this.maxStyleId = Math.max(this.maxStyleId, styleId);
+    if (paraShapeId !== undefined && !this.styleParaShapeIds.has(styleId)) {
+      this.styleParaShapeIds.set(styleId, paraShapeId);
+    }
   }
 
   getStyleCount(): number {
     return this.maxStyleId + 1;
+  }
+
+  getStyleParaShapeId(styleId: number): number {
+    return this.styleParaShapeIds.get(styleId) ?? 0;
+  }
+
+  registerList(p: ParaProps): void {
+    if (p.listOrd === true) this.hasNumbering = true;
+    if (p.listOrd === false) this.hasBullet = true;
+  }
+
+  getNumberingCount(): number {
+    return this.hasNumbering ? 1 : 0;
+  }
+
+  getBulletCount(): number {
+    return this.hasBullet ? 1 : 0;
   }
 
   addBorderFill(s: Stroke, bg?: string): number {
@@ -391,6 +419,9 @@ function csKey(p: TextProps): string {
 function psKey(p: ParaProps): string {
   return [
     p.align ?? "left",
+    p.heading ?? 0,
+    p.listOrd === undefined ? "" : p.listOrd ? "number" : "bullet",
+    p.listLv ?? 0,
     p.indentPt ?? 0,
     p.indentRightPt ?? 0,
     p.firstLineIndentPt ?? 0,
@@ -410,6 +441,7 @@ function hwpStyleIdForPara(p: ParaProps): number | undefined {
     const id = Number(p.styleId);
     if (Number.isInteger(id) && id >= 0 && id <= 255) return id;
   }
+  if (p.heading !== undefined) return p.heading + 1;
   return undefined;
 }
 
@@ -435,8 +467,9 @@ type BfEntry =
 
 function collectNode(node: ContentNode, bank: HwpStyleBank): void {
   if (node.tag === "para") {
-    bank.registerStyleId(hwpStyleIdForPara(node.props));
-    bank.addParaShape(node.props);
+    const paraShapeId = bank.addParaShape(node.props);
+    bank.registerStyleId(hwpStyleIdForPara(node.props), paraShapeId);
+    bank.registerList(node.props);
     for (const kid of node.kids) {
       if (kid.tag === "span") bank.addCharShape((kid as SpanNode).props);
     }
@@ -555,8 +588,8 @@ function mkIdMappings(bank: HwpStyleBank, nBinData = 0): Uint8Array {
   w.u32(bank.bfData.length); // [8]
   w.u32(bank.csProps.length); // [9]
   w.u32(1); // [10] tabDef
-  w.u32(0); // [11] numbering
-  w.u32(0); // [12] bullet
+  w.u32(bank.getNumberingCount()); // [11] numbering
+  w.u32(bank.getBulletCount()); // [12] bullet
   w.u32(bank.psProps.length); // [13]
   w.u32(bank.getStyleCount()); // [14] style
   w.u32(0); // [15]
@@ -570,6 +603,7 @@ function mkStyle(
   engName: string,
   paraPrId: number,
   charPrId: number,
+  nextStyleId = 0,
 ): Uint8Array {
   return new BufWriter()
     .u16(name.length)
@@ -577,7 +611,7 @@ function mkStyle(
     .u16(engName.length)
     .utf16(engName)
     .u8(0) // paragraph style
-    .u8(0) // next style id
+    .u8(nextStyleId)
     .i16(1042) // ko-KR
     .u16(paraPrId)
     .u16(charPrId)
@@ -589,19 +623,73 @@ function mkTabDef(): Uint8Array {
   return new Uint8Array(8);
 }
 
+function writeNumberingLevel(
+  writer: BufWriter,
+  attr: number,
+  format: string,
+): void {
+  writer
+    .u32(attr)
+    .u16(0) // 너비 보정값
+    .u16(50) // 본문과의 거리
+    .u32(0xffffffff) // 글자 모양은 문단 글자 모양을 따름
+    .u16(format.length)
+    .utf16(format);
+}
+
+function mkNumbering(): Uint8Array {
+  const writer = new BufWriter();
+  const levels = [
+    [0x00c, "^1."],
+    [0x10c, "^2."],
+    [0x00c, "^3)"],
+    [0x10c, "^4)"],
+    [0x00c, "(^5)"],
+    [0x10c, "(^6)"],
+    [0x02c, "^7"],
+  ] as const;
+  for (const [attr, format] of levels) {
+    writeNumberingLevel(writer, attr, format);
+  }
+  writer.u16(0); // 공통 시작 번호
+  for (let level = 0; level < 7; level++) writer.u32(1);
+
+  // HWP 5.1 확장 수준(8~10). 1~3수준만 사용해도 레코드 구조는 완결한다.
+  writeNumberingLevel(writer, 0x12c, "^8");
+  writeNumberingLevel(writer, 0x14c, "");
+  writeNumberingLevel(writer, 0x06c, "");
+  for (let level = 0; level < 3; level++) writer.u32(1);
+  return writer.build();
+}
+
+function mkBullet(): Uint8Array {
+  return new BufWriter()
+    .u32(0x00c) // 왼쪽 정렬, 실제 너비 사용, 자동 내어쓰기
+    .u16(0) // 너비 보정값
+    .u16(50) // 본문과의 거리
+    .u16(0x2022) // BULLET(•)
+    .i32(0) // 이미지 글머리표 아님
+    .u8(0) // 대비
+    .u8(0) // 밝기
+    .u8(0) // 효과
+    .u8(0) // 이미지 BinData ID
+    .u16(0) // 체크 글머리표 문자 없음
+    .build();
+}
+
 const HWP_STYLE_NAMES: Array<[string, string]> = [
   ["바탕글", "Normal"],
-  ["본문", "Body Text"],
-  ["개요 1", "Heading 1"],
-  ["개요 2", "Heading 2"],
-  ["개요 3", "Heading 3"],
-  ["개요 4", "Heading 4"],
-  ["개요 5", "Heading 5"],
-  ["개요 6", "Heading 6"],
-  ["개요 7", "Heading 7"],
-  ["개요 8", "Heading 8"],
-  ["개요 9", "Heading 9"],
-  ["개요 10", "Heading 10"],
+  ["본문", "Body"],
+  ["개요 1", "Outline 1"],
+  ["개요 2", "Outline 2"],
+  ["개요 3", "Outline 3"],
+  ["개요 4", "Outline 4"],
+  ["개요 5", "Outline 5"],
+  ["개요 6", "Outline 6"],
+  ["개요 7", "Outline 7"],
+  ["개요 8", "Outline 8"],
+  ["개요 9", "Outline 9"],
+  ["개요 10", "Outline 10"],
   ["쪽 번호", "Page Number"],
   ["머리말", "Header"],
   ["각주", "Footnote"],
@@ -611,7 +699,7 @@ const HWP_STYLE_NAMES: Array<[string, string]> = [
   ["차례 1", "TOC 1"],
   ["차례 2", "TOC 2"],
   ["차례 3", "TOC 3"],
-  ["본문 제목", "Body Title"],
+  ["캡션", "Caption"],
   ["그림", "Figure"],
   ["표", "Table"],
   ["수식", "Equation"],
@@ -752,7 +840,14 @@ function mkCharShape(fontIds: number[], p: TextProps): Uint8Array {
 function mkParaShape(p: ParaProps): Uint8Array {
   const alignVal = ALIGN_CODE[p.align ?? "left"] ?? 1;
   const lineSpacingType = p.lineHeightFixed !== undefined ? 3 : 0;
-  const attr1 = (lineSpacingType & 0x3) | ((alignVal & 0x7) << 2);
+  let attr1 = (lineSpacingType & 0x3) | ((alignVal & 0x7) << 2);
+  if (p.heading !== undefined) {
+    attr1 |= 1 << 23; // 문단 머리 모양=개요
+    attr1 |= (p.heading - 1) << 25; // HWP 수준 필드는 0-based
+  } else if (p.listOrd !== undefined) {
+    attr1 |= (p.listOrd ? 2 : 3) << 23;
+    attr1 |= Math.max(0, Math.min(6, p.listLv ?? 0)) << 25;
+  }
   const lineSpaceValue =
     p.lineHeightFixed !== undefined
       ? Math.max(
@@ -770,7 +865,7 @@ function mkParaShape(p: ParaProps): Uint8Array {
     .i32(paraShapeUnit(p.spaceAfter ?? 0))
     .i32(lineSpaceValue)
     .u16(0)
-    .u16(0)
+    .u16(p.listOrd === undefined ? 0 : 1)
     .u16(0)
     .i16(0)
     .i16(0)
@@ -839,14 +934,36 @@ function buildDocInfoStream(
 
   chunks.push(mkRec(TAG_TAB_DEF, 1, mkTabDef()));
 
+  if (bank.getNumberingCount() > 0) {
+    chunks.push(mkRec(TAG_NUMBERING, 1, mkNumbering()));
+  }
+  if (bank.getBulletCount() > 0) {
+    chunks.push(mkRec(TAG_BULLET, 1, mkBullet()));
+  }
+
   for (const p of bank.psProps) {
     chunks.push(mkRec(TAG_PARA_SHAPE, 1, mkParaShape(p)));
   }
 
   for (let i = 0; i < bank.getStyleCount(); i++) {
     const [name, engName] = styleNameForId(i);
-    chunks.push(mkRec(TAG_STYLE, 1, mkStyle(name, engName, 0, 0)));
+    chunks.push(
+      mkRec(
+        TAG_STYLE,
+        1,
+        mkStyle(
+          name,
+          engName,
+          bank.getStyleParaShapeId(i),
+          0,
+          i === 0 ? 0 : i,
+        ),
+      ),
+    );
   }
+
+  chunks.push(mkRec(TAG_COMPATIBLE_DOCUMENT, 0, new Uint8Array(4)));
+  chunks.push(mkRec(TAG_LAYOUT_COMPATIBILITY, 1, new Uint8Array(20)));
 
   return concatU8(chunks);
 }
@@ -883,7 +1000,8 @@ function mkParaHeader(
   divideSort = 0,
 ): Uint8Array {
   return new BufWriter()
-    .u32(nchars)
+    // HWP 5.0 PARA_HEADER는 글자 수의 최상위 비트를 유효 플래그로 요구한다.
+    .u32((nchars >>> 0) | 0x80000000)
     .u32(ctrlMask)
     .u16(psId)
     .u8(Math.max(0, Math.min(255, Math.trunc(styleId))))
@@ -2012,30 +2130,9 @@ function mkPageBorderFill(): Uint8Array {
     .build();
 }
 
-const SECTION_CTRL_DATA_HEX =
-  "1b020100000019020080190203000000024009000100000000400900000000006602008066020f000000094001800a00" +
-  "000005000000000005006400000005000000000005000000000005000000000005000000000005000000000005000000" +
-  "0000050000000000050000000000084001800a00000005000000ff000500000000000500000000000500000000000500" +
-  "000000000500000000000500000000000500000000000500000000000500000000000a40060032000000074005000200" +
-  "000006400500640000000340050000000000054005000000000004400500320000000240050001000000014009000400" +
-  "00001e40028000002140020000000000224002000000000020400500000000002440050005000000";
-
-function bytesFromHex(hex: string): Uint8Array {
-  const out = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < out.length; i++) {
-    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return out;
-}
-
-function mkSectionCtrlData(): Uint8Array {
-  return bytesFromHex(SECTION_CTRL_DATA_HEX);
-}
-
 function buildSectionControlRecords(dims: PageDims, level: number): Uint8Array[] {
   return [
     mkRec(TAG_CTRL_HEADER, level, mkSectionCtrl()),
-    mkRec(TAG_CTRL_DATA, level + 1, mkSectionCtrlData()),
     mkRec(TAG_PAGE_DEF, level + 1, mkPageDef(dims)),
     mkRec(TAG_FOOTNOTE_SHAPE, level + 1, new Uint8Array(28)),
     mkRec(TAG_FOOTNOTE_SHAPE, level + 1, new Uint8Array(28)),

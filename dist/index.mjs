@@ -1896,7 +1896,10 @@ var HWPTAG_BEGIN = 16;
 var TAG_FACE_NAME = HWPTAG_BEGIN + 3;
 var TAG_BORDER_FILL = HWPTAG_BEGIN + 4;
 var TAG_CHAR_SHAPE = HWPTAG_BEGIN + 5;
+var TAG_NUMBERING = HWPTAG_BEGIN + 7;
+var TAG_BULLET = HWPTAG_BEGIN + 8;
 var TAG_PARA_SHAPE = HWPTAG_BEGIN + 9;
+var TAG_STYLE = HWPTAG_BEGIN + 10;
 var TAG_PARA_HEADER = HWPTAG_BEGIN + 50;
 var TAG_PARA_TEXT = HWPTAG_BEGIN + 51;
 var TAG_PARA_CHAR_SHAPE = HWPTAG_BEGIN + 52;
@@ -1963,13 +1966,24 @@ function parseFileHeader(buf) {
 function parseDocInfo(data, compressed) {
   const raw = compressed ? tryInflate(data) : data;
   const recs = parseRecords(raw);
-  const info = { faceNames: [], charShapes: [], paraShapes: [], borderFills: [] };
+  const info = {
+    faceNames: [],
+    charShapes: [],
+    paraShapes: [],
+    borderFills: [],
+    styles: [],
+    numberings: [],
+    bullets: []
+  };
   for (const r of recs) {
     try {
       if (r.tag === TAG_FACE_NAME) info.faceNames.push(parseFaceName(r.data));
       if (r.tag === TAG_CHAR_SHAPE) info.charShapes.push(parseCharShape(r.data));
       if (r.tag === TAG_PARA_SHAPE) info.paraShapes.push(parseParaShape(r.data));
       if (r.tag === TAG_BORDER_FILL) info.borderFills.push(parseBorderFill(r.data));
+      if (r.tag === TAG_STYLE) info.styles.push(parseStyle(r.data));
+      if (r.tag === TAG_NUMBERING) info.numberings.push(parseNumbering(r.data));
+      if (r.tag === TAG_BULLET) info.bullets.push(parseBullet(r.data));
     } catch {
     }
   }
@@ -1980,6 +1994,47 @@ function parseFaceName(d) {
   const len = BinaryKit.readU16LE(d, 1);
   if (d.length < 3 + len * 2) return "";
   return new TextDecoder("utf-16le").decode(d.subarray(3, 3 + len * 2));
+}
+function parseStyle(d) {
+  let offset = 0;
+  const readName = () => {
+    if (offset + 2 > d.length) throw new Error("truncated STYLE name length");
+    const length = BinaryKit.readU16LE(d, offset);
+    offset += 2;
+    const end = offset + length * 2;
+    if (end > d.length) throw new Error("truncated STYLE name");
+    const value = new TextDecoder("utf-16le").decode(d.subarray(offset, end));
+    offset = end;
+    return value;
+  };
+  const name = readName();
+  const engName = readName();
+  if (offset + 8 > d.length) throw new Error("truncated STYLE fields");
+  offset += 4;
+  const paraShapeId = BinaryKit.readU16LE(d, offset);
+  const charShapeId = BinaryKit.readU16LE(d, offset + 2);
+  return { name, engName, paraShapeId, charShapeId };
+}
+function parseNumbering(d) {
+  const formats = [];
+  let offset = 0;
+  for (let level = 0; level < 7; level++) {
+    if (offset + 14 > d.length) throw new Error("truncated NUMBERING level");
+    offset += 12;
+    const length = BinaryKit.readU16LE(d, offset);
+    offset += 2;
+    const end = offset + length * 2;
+    if (end > d.length) throw new Error("truncated NUMBERING format");
+    formats.push(
+      new TextDecoder("utf-16le").decode(d.subarray(offset, end))
+    );
+    offset = end;
+  }
+  return { formats };
+}
+function parseBullet(d) {
+  if (d.length < 10) throw new Error("truncated BULLET record");
+  return { character: String.fromCharCode(BinaryKit.readU16LE(d, 8)) };
 }
 function parseCharShape(d) {
   const faceIds = [];
@@ -2012,6 +2067,11 @@ function parseParaShape(d) {
   const vVal = attr >> 20 & 3;
   const verAlign = vVal === 1 ? "top" : vVal === 2 ? "center" : vVal === 3 ? "bottom" : "baseline";
   const lineWrap = "break";
+  const headingType = attr >>> 23 & 3;
+  const headingLevel = attr >>> 25 & 7;
+  const heading = headingType === 1 && headingLevel < 6 ? headingLevel + 1 : void 0;
+  const listOrd = headingType === 2 ? true : headingType === 3 ? false : void 0;
+  const listId = d.length >= 32 ? BinaryKit.readU16LE(d, 30) : 0;
   return {
     align,
     lineSpacingType,
@@ -2025,7 +2085,11 @@ function parseParaShape(d) {
     spaceAfter: d.length >= 24 ? i32(d, 20) : 0,
     lineSpacing,
     verAlign,
-    lineWrap
+    lineWrap,
+    heading,
+    listOrd,
+    listLevel: listOrd === void 0 ? void 0 : headingLevel,
+    listId: listOrd === void 0 ? void 0 : listId
   };
 }
 var BORDER_W_PT = [0.28, 0.34, 0.43, 0.57, 0.71, 0.85, 1.13, 1.42, 1.7, 1.98, 2.84, 4.25, 5.67, 8.5, 11.34, 14.17];
@@ -2113,6 +2177,7 @@ function parseBody(raw, compressed, di, shield, gsoCtx) {
 function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
   const hdr = recs[start];
   const lv = hdr.level;
+  const _nchars = hdr.data.length >= 4 ? BinaryKit.readU32LE(hdr.data, 0) & 2147483647 : 0;
   const psId = hdr.data.length >= 10 ? BinaryKit.readU16LE(hdr.data, 8) : 0;
   const hwpStyleId = hdr.data.length >= 11 ? hdr.data[10] : void 0;
   const divideSort = hdr.data.length >= 12 ? hdr.data[11] : 0;
@@ -2242,7 +2307,7 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
     if (!isSectionOnlyPara && !isPageBreakOnlyPara) {
       nodes.push(buildPara(
         paraContent.length > 0 ? paraContent : [buildSpan("")],
-        buildParaProps(ps, hwpStyleId)
+        buildParaProps(ps, hwpStyleId, di)
       ));
     }
   }
@@ -2648,7 +2713,14 @@ function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gs
           const kids = paraContent.length > 0 ? paraContent : [buildSpan("")];
           const isPageBreakOnlyPara = cellDivide & 4 && paraContent.length === 0 && innerGrids.length === 0;
           const items = [...innerGrids];
-          if (!isPageBreakOnlyPara) items.push(buildPara(kids, buildParaProps(ps, cellStyleId)));
+          if (!isPageBreakOnlyPara) {
+            items.push(
+              buildPara(
+                kids,
+                buildParaProps(ps, cellStyleId, di)
+              )
+            );
+          }
           if (cellDivide & 4) items.unshift(buildPara([{ tag: "span", props: {}, kids: [buildPb()] }]));
           return { items, next: j };
         },
@@ -2752,9 +2824,29 @@ function strokeFromBF(bfId, di) {
   const b = bf.borders[0];
   return { kind: BORDER_KIND[b.type] ?? "solid", pt: b.widthPt, color: b.color };
 }
-function buildParaProps(ps, hwpStyleId) {
+function headingFromStyle(style) {
+  if (!style) return void 0;
+  for (const name of [style.name, style.engName]) {
+    const match = name.match(/^(?:개요|outline|heading)\s*([1-6])$/i);
+    if (match) return Number(match[1]);
+  }
+  return void 0;
+}
+function buildParaProps(ps, hwpStyleId, di) {
   const p = hwpStyleId !== void 0 ? { hwpStyleId } : {};
+  const heading = ps?.heading ?? headingFromStyle(di?.styles[hwpStyleId ?? -1]);
+  if (heading !== void 0) p.heading = heading;
   if (!ps) return { ...p, spaceBefore: 0, spaceAfter: 0, lineHeight: 1.6 };
+  if (ps.listOrd !== void 0) {
+    p.listOrd = ps.listOrd;
+    p.listLv = Math.max(0, Math.min(6, ps.listLevel ?? 0));
+    if (ps.listOrd) {
+      p.listMark = "1.";
+    } else {
+      const character = ps.listId && di ? di.bullets[ps.listId - 1]?.character : void 0;
+      p.listMark = character || "-";
+    }
+  }
   if (ps.align && ps.align !== "justify") p.align = ps.align;
   if (hwpStyleId === 18 && !p.align) p.align = "justify";
   p.spaceBefore = Math.max(0, Metric.hwpToPt(ps.spaceBefore / 2));
@@ -2791,7 +2883,15 @@ var HwpScanner = class {
       const { compressed, encrypted } = fh ? parseFileHeader(fh) : { compressed: true, encrypted: false };
       if (encrypted) return fail("HWP: \uC554\uD638\uD654\uB41C \uD30C\uC77C\uC740 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
       const diRaw = streams.get("DocInfo");
-      let di = { faceNames: [], charShapes: [], paraShapes: [], borderFills: [] };
+      let di = {
+        faceNames: [],
+        charShapes: [],
+        paraShapes: [],
+        borderFills: [],
+        styles: [],
+        numberings: [],
+        bullets: []
+      };
       if (diRaw) {
         di = shield.guard(() => parseDocInfo(diRaw, compressed), di, "hwp:docInfo");
       }
@@ -3044,7 +3144,7 @@ var DocxDecoder = class extends BaseDecoder {
       let numMap = /* @__PURE__ */ new Map();
       if (numXml) {
         try {
-          numMap = await parseNumbering(TextKit.decode(numXml));
+          numMap = await parseNumbering2(TextKit.decode(numXml));
         } catch {
         }
       }
@@ -3182,7 +3282,7 @@ async function parseCoreProps(xml) {
     return {};
   }
 }
-async function parseNumbering(xml) {
+async function parseNumbering2(xml) {
   const map = /* @__PURE__ */ new Map();
   const trimmed = xml.trim();
   if (!trimmed) return map;
@@ -4362,7 +4462,8 @@ var MdDecoder = class extends BaseDecoder {
         if (listMatch) {
           kids.push(buildPara(parseInline(listMatch[3]), {
             listLv: Math.floor(listMatch[1].length / 2),
-            listOrd: /\d+\./.test(listMatch[2])
+            listOrd: /\d+\./.test(listMatch[2]),
+            listMark: listMatch[2]
           }));
           i++;
           continue;
@@ -4489,7 +4590,25 @@ function parseInline(text) {
   return result.length > 0 ? result : [buildSpan(text)];
 }
 function parseMdTable(lines, startLine) {
-  const parse = (line) => line.split("|").map((c) => c.trim()).filter((c, i, arr) => i > 0 || c !== "");
+  const parse = (line) => {
+    const cells = [];
+    let cell = "";
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === "\\" && line[i + 1] === "|") {
+        cell += "|";
+        i++;
+      } else if (line[i] === "|") {
+        cells.push(cell.trim());
+        cell = "";
+      } else {
+        cell += line[i];
+      }
+    }
+    cells.push(cell.trim());
+    if (cells[0] === "") cells.shift();
+    if (cells[cells.length - 1] === "") cells.pop();
+    return cells;
+  };
   const headers = parse(lines[startLine]);
   let cur = startLine + 2;
   const rows = [];
@@ -7294,62 +7413,76 @@ function encodePara(para, warns, includeImages) {
   const text = para.kids.map((k) => {
     if (k.tag === "span") return encodeSpan(k, warns);
     if (k.tag === "img") return encodeImage3(k, includeImages);
+    if (k.tag === "link") {
+      const label = k.kids.map((span) => encodeSpan(span, warns)).join("");
+      return `[${label}](${k.href})`;
+    }
+    if (k.tag === "pagenum") {
+      warnOnce(warns, "[SHIELD] MD: \uD398\uC774\uC9C0 \uBC88\uD638 \uD45C\uD604 \uBD88\uAC00 \u2014 \uC790\uB9AC\uD45C\uC2DC\uC790\uB85C \uB300\uCCB4\uB428");
+      return "[\uD398\uC774\uC9C0 \uBC88\uD638]";
+    }
     return "";
   }).join("");
   if (para.props.heading) return `${"#".repeat(para.props.heading)} ${text}`;
   if (para.props.listOrd !== void 0) {
     const indent = "  ".repeat(para.props.listLv ?? 0);
-    return `${indent}${para.props.listOrd ? "1." : "-"} ${text}`;
+    const sourceMark = para.props.listMark;
+    const marker = para.props.listOrd ? sourceMark && /^\d+\.$/.test(sourceMark) ? sourceMark : "1." : sourceMark && /^[-*+]$/.test(sourceMark) ? sourceMark : "-";
+    return `${indent}${marker} ${text}`;
   }
   if (para.props.align && para.props.align !== "left" && para.props.align !== "justify") {
-    return `<div align="${para.props.align}">${text}</div>`;
+    warnOnce(warns, "[SHIELD] MD: \uBB38\uB2E8 \uC815\uB82C \uD45C\uD604 \uBD88\uAC00 \u2014 \uC815\uB82C \uC815\uBCF4\uAC00 \uC190\uC2E4\uB428");
   }
   return text;
+}
+function warnOnce(warns, warning) {
+  if (!warns.includes(warning)) warns.push(warning);
+}
+function isCodeFont(font) {
+  return !!font && /courier|consolas|monaco|menlo|monospace/i.test(font);
+}
+function wrapInlineCode(text) {
+  const longestRun = Math.max(
+    0,
+    ...(text.match(/`+/g) ?? []).map((run) => run.length)
+  );
+  const fence = "`".repeat(longestRun + 1);
+  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+  return `${fence}${pad}${text}${pad}${fence}`;
 }
 function encodeSpan(span, warns) {
   let hasPageNum = false;
   const textParts = [];
   for (const kid of span.kids) {
     if (kid.tag === "txt") textParts.push(kid.content);
-    else if (kid.tag === "pagenum") {
+    else if (kid.tag === "br") textParts.push("  \n");
+    else if (kid.tag === "pb") {
+      warnOnce(warns, "[SHIELD] MD: \uCABD \uB098\uB204\uAE30 \uD45C\uD604 \uBD88\uAC00 \u2014 \uC190\uC2E4\uB428");
+    } else if (kid.tag === "pagenum") {
       hasPageNum = true;
-      warns.push("[SHIELD] MD: \uD398\uC774\uC9C0 \uBC88\uD638 \uD45C\uD604 \uBD88\uAC00 \u2014 \uC190\uC2E4\uB428");
+      warnOnce(warns, "[SHIELD] MD: \uD398\uC774\uC9C0 \uBC88\uD638 \uD45C\uD604 \uBD88\uAC00 \u2014 \uC790\uB9AC\uD45C\uC2DC\uC790\uB85C \uB300\uCCB4\uB428");
     }
   }
   let r = textParts.join("");
   if (hasPageNum && r === "") r = "[\uD398\uC774\uC9C0 \uBC88\uD638]";
-  const cssStyles = [];
-  if (span.props.font) cssStyles.push(`font-family: ${span.props.font}`);
-  if (span.props.pt) cssStyles.push(`font-size: ${span.props.pt}pt`);
-  if (span.props.color) cssStyles.push(`color: #${span.props.color}`);
-  if (span.props.bg) cssStyles.push(`background-color: #${span.props.bg}`);
-  const hasHtmlStyle = cssStyles.length > 0;
-  if (hasHtmlStyle) {
-    if (span.props.b) cssStyles.push("font-weight: bold");
-    if (span.props.i) cssStyles.push("font-style: italic");
-    if (span.props.s) cssStyles.push("text-decoration: line-through");
-    if (span.props.u) {
-      const existing = cssStyles.find((s) => s.startsWith("text-decoration:"));
-      if (existing) {
-        const idx = cssStyles.indexOf(existing);
-        cssStyles[idx] = existing.replace("line-through", "underline line-through");
-        if (!existing.includes("line-through")) cssStyles[idx] = existing + " underline";
-      } else {
-        cssStyles.push("text-decoration: underline");
-      }
-    }
-    const styleAttr = cssStyles.join("; ");
-    if (span.props.sup) return `<sup style="${styleAttr}">${r}</sup>`;
-    if (span.props.sub) return `<sub style="${styleAttr}">${r}</sub>`;
-    return `<span style="${styleAttr}">${r}</span>`;
+  const code = isCodeFont(span.props.font);
+  if (span.props.font && !code) {
+    warnOnce(warns, "[SHIELD] MD: \uAE00\uAF34\uBA85 \uD45C\uD604 \uBD88\uAC00 \u2014 \uAE00\uAF34 \uC815\uBCF4\uAC00 \uC190\uC2E4\uB428");
   }
+  if (span.props.pt !== void 0) {
+    warnOnce(warns, "[SHIELD] MD: \uAE00\uC790 \uD06C\uAE30 \uD45C\uD604 \uBD88\uAC00 \u2014 \uD06C\uAE30 \uC815\uBCF4\uAC00 \uC190\uC2E4\uB428");
+  }
+  if (span.props.color || span.props.bg) {
+    warnOnce(warns, "[SHIELD] MD: \uAE00\uC790\uC0C9/\uBC30\uACBD\uC0C9 \uD45C\uD604 \uBD88\uAC00 \u2014 \uC0C9\uC0C1 \uC815\uBCF4\uAC00 \uC190\uC2E4\uB428");
+  }
+  if (span.props.u || span.props.sup || span.props.sub) {
+    warnOnce(warns, "[SHIELD] MD: \uBC11\uC904/\uC704\uCCA8\uC790/\uC544\uB798\uCCA8\uC790 \uD45C\uD604 \uBD88\uAC00 \u2014 \uD574\uB2F9 \uC11C\uC2DD\uC774 \uC190\uC2E4\uB428");
+  }
+  if (code) r = wrapInlineCode(r);
   if (span.props.b && span.props.i) r = `***${r}***`;
   else if (span.props.b) r = `**${r}**`;
   else if (span.props.i) r = `*${r}*`;
   if (span.props.s) r = `~~${r}~~`;
-  if (span.props.u) r = `<u>${r}</u>`;
-  if (span.props.sup) r = `<sup>${r}</sup>`;
-  if (span.props.sub) r = `<sub>${r}</sub>`;
   return r;
 }
 function encodeImage3(img, includeImages) {
@@ -7368,6 +7501,59 @@ function strokeToCss(s) {
 }
 function encodeGrid2(grid, warns, includeImages) {
   if (grid.kids.length === 0) return "";
+  if (canEncodePipeTable(grid)) {
+    const losesLayout = Object.keys(grid.props).length > 0 || grid.kids.some(
+      (row) => row.heightPt !== void 0 || row.kids.some((cell) => Object.keys(cell.props).length > 0)
+    );
+    if (losesLayout) {
+      warnOnce(
+        warns,
+        "[SHIELD] MD: \uD30C\uC774\uD504 \uD45C\uAC00 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uB294 \uB108\uBE44/\uD14C\uB450\uB9AC/\uBC30\uACBD/\uC815\uB82C \uC815\uBCF4\uAC00 \uC190\uC2E4\uB428"
+      );
+    }
+    return encodePipeTable(grid, warns, includeImages);
+  }
+  warnOnce(
+    warns,
+    "[SHIELD] MD: \uBCD1\uD569 \uC140 \uB610\uB294 \uC140 \uB0B4\uBD80 \uAC1C\uD589/\uBE14\uB85D \uC694\uC18C \uB54C\uBB38\uC5D0 HTML \uD45C\uB85C \uD3F4\uBC31\uD568"
+  );
+  return encodeHtmlTable(grid, warns, includeImages);
+}
+function paraHasLineBreak(para) {
+  return para.kids.some((kid) => {
+    if (kid.tag === "grid") return true;
+    if (kid.tag === "span") {
+      return kid.kids.some(
+        (child) => child.tag === "br" || child.tag === "pb" || child.tag === "txt" && /[\r\n]/.test(child.content)
+      );
+    }
+    if (kid.tag === "link") {
+      return kid.kids.some((span) => span.kids.some(
+        (child) => child.tag === "br" || child.tag === "pb" || child.tag === "txt" && /[\r\n]/.test(child.content)
+      ));
+    }
+    return false;
+  });
+}
+function canEncodePipeTable(grid) {
+  const columns = grid.kids[0]?.kids.length ?? 0;
+  if (columns === 0) return false;
+  return grid.kids.every(
+    (row) => row.kids.length === columns && row.kids.every(
+      (cell) => cell.cs === 1 && cell.rs === 1 && cell.kids.length === 1 && cell.kids[0].tag === "para" && cell.kids[0].props.heading === void 0 && cell.kids[0].props.listOrd === void 0 && !paraHasLineBreak(cell.kids[0])
+    )
+  );
+}
+function encodePipeTable(grid, warns, includeImages) {
+  const rows = grid.kids.map((row) => row.kids.map((cell) => {
+    const para = cell.kids[0];
+    return encodePara(para, warns, includeImages).replace(/\|/g, "\\|");
+  }));
+  const renderRow = (cells) => `| ${cells.join(" | ")} |`;
+  const separator = renderRow(rows[0].map(() => "---"));
+  return [renderRow(rows[0]), separator, ...rows.slice(1).map(renderRow)].join("\n");
+}
+function encodeHtmlTable(grid, warns, includeImages) {
   const rowCount = grid.kids.length;
   const occupancy = Array.from({ length: rowCount }, () => /* @__PURE__ */ new Set());
   let colCount = 0;
@@ -7620,8 +7806,10 @@ var TAG_FACE_NAME2 = T + 3;
 var TAG_BORDER_FILL2 = T + 4;
 var TAG_CHAR_SHAPE2 = T + 5;
 var TAG_TAB_DEF = T + 6;
+var TAG_NUMBERING2 = T + 7;
+var TAG_BULLET2 = T + 8;
 var TAG_PARA_SHAPE2 = T + 9;
-var TAG_STYLE = T + 10;
+var TAG_STYLE2 = T + 10;
 var TAG_DOC_DATA = T + 11;
 var TAG_COMPATIBLE_DOCUMENT = T + 14;
 var TAG_LAYOUT_COMPATIBILITY = T + 15;
@@ -7637,7 +7825,6 @@ var TAG_PAGE_BORDER_FILL = T + 59;
 var TAG_SHAPE_COMPONENT = T + 60;
 var TAG_TABLE = T + 61;
 var TAG_SHAPE_COMPONENT_PICTURE2 = T + 69;
-var TAG_CTRL_DATA = T + 71;
 var CTRL_TABLE2 = 1952607264;
 var CTRL_SECD2 = 1936024420;
 var CTRL_COLD = 1668246628;
@@ -7798,6 +7985,7 @@ function isKoreanFont(face) {
 var HwpStyleBank = class {
   // id=0 → 모두 0
   constructor() {
+    this.NONE_STROKE = { kind: "none", pt: 0, color: "000000" };
     this.DEF_STROKE = { kind: "solid", pt: 0.5, color: "000000" };
     // 언어별 독립 폰트 목록 (ANYTOHWP langFontFaces)
     this.langFonts = new Map(
@@ -7814,10 +8002,13 @@ var HwpStyleBank = class {
     this.bfData = [];
     this.bfIdx = /* @__PURE__ */ new Map();
     this.maxStyleId = 0;
+    this.styleParaShapeIds = /* @__PURE__ */ new Map([[0, 0]]);
+    this.hasNumbering = false;
+    this.hasBullet = false;
     // charShape마다 언어별 fontId를 기록
     this.csFontIds = [[0, 0, 0, 0, 0, 0, 0]];
     for (const g of LANG_GROUPS2) this._registerLangFont(g, "\uD568\uCD08\uB86C\uBC14\uD0D5");
-    this.addBorderFill(this.DEF_STROKE);
+    this.addBorderFill(this.NONE_STROKE);
   }
   _registerLangFont(lang, face) {
     const idx = this.langFontIdx.get(lang);
@@ -7866,13 +8057,29 @@ var HwpStyleBank = class {
     this.psIdx.set(k, id);
     return id;
   }
-  registerStyleId(styleId) {
+  registerStyleId(styleId, paraShapeId) {
     if (styleId === void 0) return;
     if (!Number.isInteger(styleId) || styleId < 0 || styleId > 255) return;
     this.maxStyleId = Math.max(this.maxStyleId, styleId);
+    if (paraShapeId !== void 0 && !this.styleParaShapeIds.has(styleId)) {
+      this.styleParaShapeIds.set(styleId, paraShapeId);
+    }
   }
   getStyleCount() {
     return this.maxStyleId + 1;
+  }
+  getStyleParaShapeId(styleId) {
+    return this.styleParaShapeIds.get(styleId) ?? 0;
+  }
+  registerList(p) {
+    if (p.listOrd === true) this.hasNumbering = true;
+    if (p.listOrd === false) this.hasBullet = true;
+  }
+  getNumberingCount() {
+    return this.hasNumbering ? 1 : 0;
+  }
+  getBulletCount() {
+    return this.hasBullet ? 1 : 0;
   }
   addBorderFill(s, bg) {
     const k = bfKey(s, bg);
@@ -7907,6 +8114,9 @@ function csKey(p) {
 function psKey(p) {
   return [
     p.align ?? "left",
+    p.heading ?? 0,
+    p.listOrd === void 0 ? "" : p.listOrd ? "number" : "bullet",
+    p.listLv ?? 0,
     p.indentPt ?? 0,
     p.indentRightPt ?? 0,
     p.firstLineIndentPt ?? 0,
@@ -7925,6 +8135,7 @@ function hwpStyleIdForPara(p) {
     const id = Number(p.styleId);
     if (Number.isInteger(id) && id >= 0 && id <= 255) return id;
   }
+  if (p.heading !== void 0) return p.heading + 1;
   return void 0;
 }
 function bfKey(s, bg) {
@@ -7935,8 +8146,9 @@ function bfPerSideKey(l, r, t, b, bg) {
 }
 function collectNode(node, bank) {
   if (node.tag === "para") {
-    bank.registerStyleId(hwpStyleIdForPara(node.props));
-    bank.addParaShape(node.props);
+    const paraShapeId = bank.addParaShape(node.props);
+    bank.registerStyleId(hwpStyleIdForPara(node.props), paraShapeId);
+    bank.registerList(node.props);
     for (const kid of node.kids) {
       if (kid.tag === "span") bank.addCharShape(kid.props);
     }
@@ -7972,8 +8184,8 @@ function mkIdMappings(bank, nBinData = 0) {
   w.u32(bank.bfData.length);
   w.u32(bank.csProps.length);
   w.u32(1);
-  w.u32(0);
-  w.u32(0);
+  w.u32(bank.getNumberingCount());
+  w.u32(bank.getBulletCount());
   w.u32(bank.psProps.length);
   w.u32(bank.getStyleCount());
   w.u32(0);
@@ -7981,25 +8193,53 @@ function mkIdMappings(bank, nBinData = 0) {
   w.u32(0);
   return w.build();
 }
-function mkStyle(name, engName, paraPrId, charPrId) {
-  return new BufWriter().u16(name.length).utf16(name).u16(engName.length).utf16(engName).u8(0).u8(0).i16(1042).u16(paraPrId).u16(charPrId).u16(0).build();
+function mkStyle(name, engName, paraPrId, charPrId, nextStyleId2 = 0) {
+  return new BufWriter().u16(name.length).utf16(name).u16(engName.length).utf16(engName).u8(0).u8(nextStyleId2).i16(1042).u16(paraPrId).u16(charPrId).u16(0).build();
 }
 function mkTabDef() {
   return new Uint8Array(8);
 }
+function writeNumberingLevel(writer, attr, format) {
+  writer.u32(attr).u16(0).u16(50).u32(4294967295).u16(format.length).utf16(format);
+}
+function mkNumbering() {
+  const writer = new BufWriter();
+  const levels = [
+    [12, "^1."],
+    [268, "^2."],
+    [12, "^3)"],
+    [268, "^4)"],
+    [12, "(^5)"],
+    [268, "(^6)"],
+    [44, "^7"]
+  ];
+  for (const [attr, format] of levels) {
+    writeNumberingLevel(writer, attr, format);
+  }
+  writer.u16(0);
+  for (let level = 0; level < 7; level++) writer.u32(1);
+  writeNumberingLevel(writer, 300, "^8");
+  writeNumberingLevel(writer, 332, "");
+  writeNumberingLevel(writer, 108, "");
+  for (let level = 0; level < 3; level++) writer.u32(1);
+  return writer.build();
+}
+function mkBullet() {
+  return new BufWriter().u32(12).u16(0).u16(50).u16(8226).i32(0).u8(0).u8(0).u8(0).u8(0).u16(0).build();
+}
 var HWP_STYLE_NAMES = [
   ["\uBC14\uD0D5\uAE00", "Normal"],
-  ["\uBCF8\uBB38", "Body Text"],
-  ["\uAC1C\uC694 1", "Heading 1"],
-  ["\uAC1C\uC694 2", "Heading 2"],
-  ["\uAC1C\uC694 3", "Heading 3"],
-  ["\uAC1C\uC694 4", "Heading 4"],
-  ["\uAC1C\uC694 5", "Heading 5"],
-  ["\uAC1C\uC694 6", "Heading 6"],
-  ["\uAC1C\uC694 7", "Heading 7"],
-  ["\uAC1C\uC694 8", "Heading 8"],
-  ["\uAC1C\uC694 9", "Heading 9"],
-  ["\uAC1C\uC694 10", "Heading 10"],
+  ["\uBCF8\uBB38", "Body"],
+  ["\uAC1C\uC694 1", "Outline 1"],
+  ["\uAC1C\uC694 2", "Outline 2"],
+  ["\uAC1C\uC694 3", "Outline 3"],
+  ["\uAC1C\uC694 4", "Outline 4"],
+  ["\uAC1C\uC694 5", "Outline 5"],
+  ["\uAC1C\uC694 6", "Outline 6"],
+  ["\uAC1C\uC694 7", "Outline 7"],
+  ["\uAC1C\uC694 8", "Outline 8"],
+  ["\uAC1C\uC694 9", "Outline 9"],
+  ["\uAC1C\uC694 10", "Outline 10"],
   ["\uCABD \uBC88\uD638", "Page Number"],
   ["\uBA38\uB9AC\uB9D0", "Header"],
   ["\uAC01\uC8FC", "Footnote"],
@@ -8009,7 +8249,7 @@ var HWP_STYLE_NAMES = [
   ["\uCC28\uB840 1", "TOC 1"],
   ["\uCC28\uB840 2", "TOC 2"],
   ["\uCC28\uB840 3", "TOC 3"],
-  ["\uBCF8\uBB38 \uC81C\uBAA9", "Body Title"],
+  ["\uCEA1\uC158", "Caption"],
   ["\uADF8\uB9BC", "Figure"],
   ["\uD45C", "Table"],
   ["\uC218\uC2DD", "Equation"],
@@ -8126,13 +8366,20 @@ function mkCharShape(fontIds, p) {
 function mkParaShape(p) {
   const alignVal = ALIGN_CODE[p.align ?? "left"] ?? 1;
   const lineSpacingType = p.lineHeightFixed !== void 0 ? 3 : 0;
-  const attr1 = lineSpacingType & 3 | (alignVal & 7) << 2;
+  let attr1 = lineSpacingType & 3 | (alignVal & 7) << 2;
+  if (p.heading !== void 0) {
+    attr1 |= 1 << 23;
+    attr1 |= p.heading - 1 << 25;
+  } else if (p.listOrd !== void 0) {
+    attr1 |= (p.listOrd ? 2 : 3) << 23;
+    attr1 |= Math.max(0, Math.min(6, p.listLv ?? 0)) << 25;
+  }
   const lineSpaceValue = p.lineHeightFixed !== void 0 ? Math.max(
     Metric.ptToHwp(p.lineHeightFixed) * 2,
     Math.ceil(Metric.ptToHwp(10) * 1.15) * 2
   ) : Math.max(100, p.lineHeight ? Math.round(p.lineHeight * 100) : 160);
   const paraShapeUnit = (pt) => Metric.ptToHwp(pt) * 2;
-  return new BufWriter().u32(attr1).i32(paraShapeUnit(p.indentPt ?? 0)).i32(paraShapeUnit(p.indentRightPt ?? 0)).i32(paraShapeUnit(p.firstLineIndentPt ?? 0)).i32(paraShapeUnit(p.spaceBefore ?? 0)).i32(paraShapeUnit(p.spaceAfter ?? 0)).i32(lineSpaceValue).u16(0).u16(0).u16(0).i16(0).i16(0).i16(0).i16(0).u32(0).u32(lineSpacingType).u32(lineSpaceValue).u32(0).build();
+  return new BufWriter().u32(attr1).i32(paraShapeUnit(p.indentPt ?? 0)).i32(paraShapeUnit(p.indentRightPt ?? 0)).i32(paraShapeUnit(p.firstLineIndentPt ?? 0)).i32(paraShapeUnit(p.spaceBefore ?? 0)).i32(paraShapeUnit(p.spaceAfter ?? 0)).i32(lineSpaceValue).u16(0).u16(p.listOrd === void 0 ? 0 : 1).u16(0).i16(0).i16(0).i16(0).i16(0).u32(0).u32(lineSpacingType).u32(lineSpaceValue).u32(0).build();
 }
 function mkBinData(id, ext) {
   return new BufWriter().u16(33).u16(id).u16(ext.length).utf16(ext).build();
@@ -8164,13 +8411,33 @@ function buildDocInfoStream(bank, images = []) {
     );
   }
   chunks.push(mkRec(TAG_TAB_DEF, 1, mkTabDef()));
+  if (bank.getNumberingCount() > 0) {
+    chunks.push(mkRec(TAG_NUMBERING2, 1, mkNumbering()));
+  }
+  if (bank.getBulletCount() > 0) {
+    chunks.push(mkRec(TAG_BULLET2, 1, mkBullet()));
+  }
   for (const p of bank.psProps) {
     chunks.push(mkRec(TAG_PARA_SHAPE2, 1, mkParaShape(p)));
   }
   for (let i = 0; i < bank.getStyleCount(); i++) {
     const [name, engName] = styleNameForId(i);
-    chunks.push(mkRec(TAG_STYLE, 1, mkStyle(name, engName, 0, 0)));
+    chunks.push(
+      mkRec(
+        TAG_STYLE2,
+        1,
+        mkStyle(
+          name,
+          engName,
+          bank.getStyleParaShapeId(i),
+          0,
+          i === 0 ? 0 : i
+        )
+      )
+    );
   }
+  chunks.push(mkRec(TAG_COMPATIBLE_DOCUMENT, 0, new Uint8Array(4)));
+  chunks.push(mkRec(TAG_LAYOUT_COMPATIBILITY, 1, new Uint8Array(20)));
   return concatU8(chunks);
 }
 function mkPageDef(dims) {
@@ -8181,7 +8448,7 @@ function mkPageDef(dims) {
   return new BufWriter().u32(Metric.ptToHwp(dims.wPt)).u32(Metric.ptToHwp(dims.hPt)).u32(Metric.ptToHwp(dims.ml)).u32(Metric.ptToHwp(dims.mr)).u32(Metric.ptToHwp(rawTopPt)).u32(Metric.ptToHwp(rawBottomPt)).u32(Metric.ptToHwp(rawHeaderPt)).u32(Metric.ptToHwp(rawFooterPt)).u32(0).u32(dims.orient === "landscape" ? 1 : 0).build();
 }
 function mkParaHeader(nchars, ctrlMask, psId, csCount, lineAlignCount = 0, instanceId = 0, styleId = 0, divideSort = 0) {
-  return new BufWriter().u32(nchars).u32(ctrlMask).u16(psId).u8(Math.max(0, Math.min(255, Math.trunc(styleId)))).u8(Math.max(0, Math.min(255, Math.trunc(divideSort)))).u16(csCount).u16(0).u16(lineAlignCount).u32(instanceId).u16(0).build();
+  return new BufWriter().u32(nchars >>> 0 | 2147483648).u32(ctrlMask).u16(psId).u8(Math.max(0, Math.min(255, Math.trunc(styleId)))).u8(Math.max(0, Math.min(255, Math.trunc(divideSort)))).u16(csCount).u16(0).u16(lineAlignCount).u32(instanceId).u16(0).build();
 }
 function mkParaText(text) {
   const w = new BufWriter();
@@ -8860,21 +9127,9 @@ function mkColumnDefCtrl() {
 function mkPageBorderFill() {
   return new BufWriter().u32(1).u16(1417).u16(1417).u16(1417).u16(1417).u16(1).build();
 }
-var SECTION_CTRL_DATA_HEX = "1b020100000019020080190203000000024009000100000000400900000000006602008066020f000000094001800a000000050000000000050064000000050000000000050000000000050000000000050000000000050000000000050000000000050000000000050000000000084001800a00000005000000ff000500000000000500000000000500000000000500000000000500000000000500000000000500000000000500000000000500000000000a4006003200000007400500020000000640050064000000034005000000000005400500000000000440050032000000024005000100000001400900040000001e40028000002140020000000000224002000000000020400500000000002440050005000000";
-function bytesFromHex(hex) {
-  const out = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < out.length; i++) {
-    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return out;
-}
-function mkSectionCtrlData() {
-  return bytesFromHex(SECTION_CTRL_DATA_HEX);
-}
 function buildSectionControlRecords(dims, level) {
   return [
     mkRec(TAG_CTRL_HEADER2, level, mkSectionCtrl()),
-    mkRec(TAG_CTRL_DATA, level + 1, mkSectionCtrlData()),
     mkRec(TAG_PAGE_DEF2, level + 1, mkPageDef(dims)),
     mkRec(TAG_FOOTNOTE_SHAPE, level + 1, new Uint8Array(28)),
     mkRec(TAG_FOOTNOTE_SHAPE, level + 1, new Uint8Array(28)),

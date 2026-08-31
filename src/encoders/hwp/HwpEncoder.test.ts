@@ -12,7 +12,15 @@ import { BinaryKit } from "../../toolkit/BinaryKit";
 import { HwpEncoder } from "./HwpEncoder";
 
 const HWPTAG_BEGIN = 0x10;
+const TAG_ID_MAPPINGS = HWPTAG_BEGIN + 1;
+const TAG_BORDER_FILL = HWPTAG_BEGIN + 4;
+const TAG_COMPATIBLE_DOCUMENT = HWPTAG_BEGIN + 14;
+const TAG_LAYOUT_COMPATIBILITY = HWPTAG_BEGIN + 15;
+const TAG_PARA_HEADER = HWPTAG_BEGIN + 50;
+const TAG_CTRL_HEADER = HWPTAG_BEGIN + 55;
 const TAG_PAGE_DEF = HWPTAG_BEGIN + 57;
+const TAG_CTRL_DATA = HWPTAG_BEGIN + 71;
+const CTRL_SECD = 0x73656364;
 
 interface ParsedRecord {
   tag: number;
@@ -59,14 +67,64 @@ function countTag(records: ParsedRecord[], tag: number): number {
   return records.filter((record) => record.tag === tag).length;
 }
 
-function extractPageDef(hwp: Uint8Array): Uint8Array {
+function extractRecordStream(
+  hwp: Uint8Array,
+  streamPath: "DocInfo" | "BodyText/Section0",
+): ParsedRecord[] {
   const streams = BinaryKit.parseCfb(hwp);
   const fileHeader = streams.get("FileHeader");
-  const section0 = streams.get("BodyText/Section0");
-  if (!fileHeader || !section0) throw new Error("required HWP stream is missing");
+  const stream = streams.get(streamPath);
+  if (!fileHeader || !stream) throw new Error("required HWP stream is missing");
   const compressed = (readU32(fileHeader, 36) & 1) !== 0;
-  const raw = compressed ? new Uint8Array(pako.inflateRaw(section0)) : section0;
-  const pageDefs = parseRecords(raw).filter((record) => record.tag === TAG_PAGE_DEF);
+  const raw = compressed ? new Uint8Array(pako.inflateRaw(stream)) : stream;
+  return parseRecords(raw);
+}
+
+function expectIdMappingsMatch(records: ParsedRecord[]): void {
+  const mappings = records.filter((record) => record.tag === TAG_ID_MAPPINGS);
+  expect(mappings).toHaveLength(1);
+  expect(mappings[0].data.length).toBeGreaterThanOrEqual(18 * 4);
+
+  const values = Array.from({ length: 18 }, (_, index) =>
+    new DataView(
+      mappings[0].data.buffer,
+      mappings[0].data.byteOffset,
+      mappings[0].data.byteLength,
+    ).getInt32(index * 4, true),
+  );
+  expect(values.every((value) => value >= 0)).toBe(true);
+
+  // All seven language groups share HWPTAG_FACE_NAME, so their sum is the
+  // independently verifiable count in the record stream.
+  expect(values.slice(1, 8).reduce((sum, value) => sum + value, 0)).toBe(
+    countTag(records, HWPTAG_BEGIN + 3),
+  );
+
+  const mappingIndexToTag = new Map<number, number>([
+    [0, HWPTAG_BEGIN + 2],
+    [8, HWPTAG_BEGIN + 4],
+    [9, HWPTAG_BEGIN + 5],
+    [10, HWPTAG_BEGIN + 6],
+    [11, HWPTAG_BEGIN + 7],
+    [12, HWPTAG_BEGIN + 8],
+    [13, HWPTAG_BEGIN + 9],
+    [14, HWPTAG_BEGIN + 10],
+    [15, HWPTAG_BEGIN + 76],
+    [16, HWPTAG_BEGIN + 80],
+    [17, HWPTAG_BEGIN + 81],
+  ]);
+  for (const [index, tag] of mappingIndexToTag) {
+    expect(
+      values[index],
+      `ID_MAPPINGS[${index}] vs tag 0x${tag.toString(16)}`,
+    ).toBe(countTag(records, tag));
+  }
+}
+
+function extractPageDef(hwp: Uint8Array): Uint8Array {
+  const pageDefs = extractRecordStream(hwp, "BodyText/Section0").filter(
+    (record) => record.tag === TAG_PAGE_DEF,
+  );
   expect(pageDefs).toHaveLength(1);
   expect(pageDefs[0].data).toHaveLength(40);
   return new Uint8Array(pageDefs[0].data);
@@ -123,52 +181,15 @@ describe("HwpEncoder structural output", () => {
   it("matches all ID_MAPPINGS counts to the corresponding DocInfo records", () => {
     const raw = new Uint8Array(pako.inflateRaw(streams.get("DocInfo")!));
     const records = parseRecords(raw);
-    const mappings = records.filter(
-      (record) => record.tag === HWPTAG_BEGIN + 1,
-    );
-    expect(mappings).toHaveLength(1);
-    expect(mappings[0].data.length).toBeGreaterThanOrEqual(18 * 4);
-
-    const values = Array.from({ length: 18 }, (_, index) =>
-      new DataView(
-        mappings[0].data.buffer,
-        mappings[0].data.byteOffset,
-        mappings[0].data.byteLength,
-      ).getInt32(index * 4, true),
-    );
-    expect(values.every((value) => value >= 0)).toBe(true);
-
-    // All seven language groups share HWPTAG_FACE_NAME, so their sum is the
-    // independently verifiable count in the record stream.
-    expect(values.slice(1, 8).reduce((sum, value) => sum + value, 0)).toBe(
-      countTag(records, HWPTAG_BEGIN + 3),
-    );
-
-    const mappingIndexToTag = new Map<number, number>([
-      [0, HWPTAG_BEGIN + 2],
-      [8, HWPTAG_BEGIN + 4],
-      [9, HWPTAG_BEGIN + 5],
-      [10, HWPTAG_BEGIN + 6],
-      [11, HWPTAG_BEGIN + 7],
-      [12, HWPTAG_BEGIN + 8],
-      [13, HWPTAG_BEGIN + 9],
-      [14, HWPTAG_BEGIN + 10],
-      [15, HWPTAG_BEGIN + 76],
-      [16, HWPTAG_BEGIN + 80],
-      [17, HWPTAG_BEGIN + 81],
-    ]);
-    for (const [index, tag] of mappingIndexToTag) {
-      expect(values[index], `ID_MAPPINGS[${index}] vs tag 0x${tag.toString(16)}`).toBe(
-        countTag(records, tag),
-      );
-    }
+    expectIdMappingsMatch(records);
   });
 });
 
-describe("PAGE_DEF margin regression", () => {
+describe("reference.hwp encoder regression", () => {
   let reference: Uint8Array;
   let referencePageDef: Uint8Array;
   let referenceDoc: DocRoot;
+  let encodedReferenceHwp: Uint8Array;
   let encodedHwpx: Uint8Array;
 
   beforeAll(async () => {
@@ -181,15 +202,93 @@ describe("PAGE_DEF margin regression", () => {
     if (!decoded.ok) throw new Error(decoded.error);
     referenceDoc = decoded.data;
 
+    const hwp = await new HwpEncoder().encode(referenceDoc);
+    if (!hwp.ok) throw new Error(hwp.error);
+    encodedReferenceHwp = hwp.data;
+
     const hwpx = await new HwpxEncoder().encode(referenceDoc);
     if (!hwpx.ok) throw new Error(hwpx.error);
     encodedHwpx = hwpx.data;
   });
 
-  it("preserves the exact 40-byte PAGE_DEF through HWP to HWP", async () => {
-    const encoded = await new HwpEncoder().encode(referenceDoc);
-    if (!encoded.ok) throw new Error(encoded.error);
-    expect(extractPageDef(encoded.data)).toEqual(referencePageDef);
+  it("preserves the exact 40-byte PAGE_DEF through HWP to HWP", () => {
+    expect(extractPageDef(encodedReferenceHwp)).toEqual(referencePageDef);
+  });
+
+  it("sets the required high bit in every PARA_HEADER character count", () => {
+    const paraHeaders = extractRecordStream(
+      encodedReferenceHwp,
+      "BodyText/Section0",
+    ).filter((record) => record.tag === TAG_PARA_HEADER);
+    expect(paraHeaders.length).toBeGreaterThan(0);
+    for (const record of paraHeaders) {
+      expect(record.data.length).toBeGreaterThanOrEqual(4);
+      expect(readU32(record.data, 0) >>> 31).toBe(1);
+    }
+  });
+
+  it("writes BORDER_FILL id=1 with no border on all four sides", () => {
+    const borderFills = extractRecordStream(
+      encodedReferenceHwp,
+      "DocInfo",
+    ).filter((record) => record.tag === TAG_BORDER_FILL);
+    expect(borderFills.length).toBeGreaterThan(0);
+    expect(borderFills[0].data.length).toBeGreaterThanOrEqual(26);
+    for (let side = 0; side < 4; side++) {
+      const offset = 2 + side * 6;
+      expect(borderFills[0].data[offset]).toBe(0);
+      expect(borderFills[0].data[offset + 1]).toBe(0);
+    }
+  });
+
+  it("does not emit CTRL_DATA below the secd CTRL_HEADER", () => {
+    const records = extractRecordStream(
+      encodedReferenceHwp,
+      "BodyText/Section0",
+    );
+    const secdIndex = records.findIndex(
+      (record) =>
+        record.tag === TAG_CTRL_HEADER &&
+        record.data.length >= 4 &&
+        readU32(record.data, 0) === CTRL_SECD,
+    );
+    expect(secdIndex).toBeGreaterThanOrEqual(0);
+    const secdLevel = records[secdIndex].level;
+    const children: ParsedRecord[] = [];
+    for (let i = secdIndex + 1; i < records.length; i++) {
+      if (records[i].level <= secdLevel) break;
+      children.push(records[i]);
+    }
+    expect(children.some((record) => record.tag === TAG_CTRL_DATA)).toBe(false);
+  });
+
+  it("emits the two compatibility records with their required levels", () => {
+    const records = extractRecordStream(encodedReferenceHwp, "DocInfo");
+    const compatible = records.filter(
+      (record) => record.tag === TAG_COMPATIBLE_DOCUMENT,
+    );
+    const layout = records.filter(
+      (record) => record.tag === TAG_LAYOUT_COMPATIBILITY,
+    );
+    expect(compatible).toHaveLength(1);
+    expect(compatible[0].level).toBe(0);
+    expect(compatible[0].data).toEqual(new Uint8Array(4));
+    expect(layout).toHaveLength(1);
+    expect(layout[0].level).toBe(1);
+    expect(layout[0].data).toEqual(new Uint8Array(20));
+  });
+
+  it("parses DocInfo and Section0 with zero leftover bytes", () => {
+    expect(
+      extractRecordStream(encodedReferenceHwp, "DocInfo").length,
+    ).toBeGreaterThan(0);
+    expect(
+      extractRecordStream(encodedReferenceHwp, "BodyText/Section0").length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("matches ID_MAPPINGS declarations to actual DocInfo records", () => {
+    expectIdMappingsMatch(extractRecordStream(encodedReferenceHwp, "DocInfo"));
   });
 
   it("writes HWPX hp:margin with independent page and header/footer margins", async () => {

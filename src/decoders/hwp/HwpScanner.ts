@@ -1,7 +1,7 @@
 import type { Decoder } from '../../contract/decoder';
 import type { DocRoot, ContentNode, ParaNode, SpanNode, ImgNode, GridNode, PageNumNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
-import type { Align, Stroke, StrokeKind, PageDims, TextProps, ParaProps, CellProps, GridProps, ImgLayout } from '../../model/doc-props';
+import type { Align, Stroke, StrokeKind, PageDims, TextProps, ParaProps, CellProps, GridProps, ImgLayout, Heading } from '../../model/doc-props';
 import { succeed, fail } from '../../contract/result';
 import { buildRoot, buildSheet, buildPara, buildSpan, buildGrid, buildRow, buildCell, buildImg, buildPb, buildPageNum } from '../../model/builders';
 import { ShieldedParser } from '../../safety/ShieldedParser';
@@ -22,7 +22,10 @@ const HWPTAG_BEGIN = 16;
 const TAG_FACE_NAME       = HWPTAG_BEGIN + 3;   // 19
 const TAG_BORDER_FILL     = HWPTAG_BEGIN + 4;   // 20
 const TAG_CHAR_SHAPE      = HWPTAG_BEGIN + 5;   // 21
+const TAG_NUMBERING       = HWPTAG_BEGIN + 7;   // 23
+const TAG_BULLET          = HWPTAG_BEGIN + 8;   // 24
 const TAG_PARA_SHAPE      = HWPTAG_BEGIN + 9;   // 25
+const TAG_STYLE           = HWPTAG_BEGIN + 10;  // 26
 const TAG_PARA_HEADER     = HWPTAG_BEGIN + 50;  // 66
 const TAG_PARA_TEXT       = HWPTAG_BEGIN + 51;  // 67
 const TAG_PARA_CHAR_SHAPE = HWPTAG_BEGIN + 52;  // 68
@@ -84,6 +87,22 @@ interface HwpParaShape {
   indent: number;
   verAlign?: 'baseline' | 'top' | 'center' | 'bottom';
   lineWrap?: 'break' | 'squeeze' | 'keep';
+  heading?: Heading;
+  listOrd?: boolean;
+  listLevel?: number;
+  listId?: number;
+}
+interface HwpStyle {
+  name: string;
+  engName: string;
+  paraShapeId: number;
+  charShapeId: number;
+}
+interface HwpNumbering {
+  formats: string[];
+}
+interface HwpBullet {
+  character: string;
 }
 interface HwpBorderFill {
   borders: { type: number; widthPt: number; color: string }[];
@@ -95,6 +114,9 @@ interface DocInfo {
   charShapes: HwpCharShape[];
   paraShapes: HwpParaShape[];
   borderFills: HwpBorderFill[];
+  styles: HwpStyle[];
+  numberings: HwpNumbering[];
+  bullets: HwpBullet[];
 }
 
 interface ParsedChar { pos: number; ch: string }
@@ -155,7 +177,15 @@ function parseFileHeader(buf: Uint8Array) {
 function parseDocInfo(data: Uint8Array, compressed: boolean): DocInfo {
   const raw = compressed ? tryInflate(data) : data;
   const recs = parseRecords(raw);
-  const info: DocInfo = { faceNames: [], charShapes: [], paraShapes: [], borderFills: [] };
+  const info: DocInfo = {
+    faceNames: [],
+    charShapes: [],
+    paraShapes: [],
+    borderFills: [],
+    styles: [],
+    numberings: [],
+    bullets: [],
+  };
 
   for (const r of recs) {
     try {
@@ -163,6 +193,9 @@ function parseDocInfo(data: Uint8Array, compressed: boolean): DocInfo {
       if (r.tag === TAG_CHAR_SHAPE)  info.charShapes.push(parseCharShape(r.data));
       if (r.tag === TAG_PARA_SHAPE)  info.paraShapes.push(parseParaShape(r.data));
       if (r.tag === TAG_BORDER_FILL) info.borderFills.push(parseBorderFill(r.data));
+      if (r.tag === TAG_STYLE)       info.styles.push(parseStyle(r.data));
+      if (r.tag === TAG_NUMBERING)   info.numberings.push(parseNumbering(r.data));
+      if (r.tag === TAG_BULLET)      info.bullets.push(parseBullet(r.data));
     } catch { /* skip malformed record */ }
   }
   return info;
@@ -175,6 +208,50 @@ function parseFaceName(d: Uint8Array): string {
   const len = BinaryKit.readU16LE(d, 1);          // UTF-16 char count
   if (d.length < 3 + len * 2) return '';
   return new TextDecoder('utf-16le').decode(d.subarray(3, 3 + len * 2));
+}
+
+function parseStyle(d: Uint8Array): HwpStyle {
+  let offset = 0;
+  const readName = (): string => {
+    if (offset + 2 > d.length) throw new Error('truncated STYLE name length');
+    const length = BinaryKit.readU16LE(d, offset);
+    offset += 2;
+    const end = offset + length * 2;
+    if (end > d.length) throw new Error('truncated STYLE name');
+    const value = new TextDecoder('utf-16le').decode(d.subarray(offset, end));
+    offset = end;
+    return value;
+  };
+  const name = readName();
+  const engName = readName();
+  if (offset + 8 > d.length) throw new Error('truncated STYLE fields');
+  offset += 4; // type, nextStyleId, languageId
+  const paraShapeId = BinaryKit.readU16LE(d, offset);
+  const charShapeId = BinaryKit.readU16LE(d, offset + 2);
+  return { name, engName, paraShapeId, charShapeId };
+}
+
+function parseNumbering(d: Uint8Array): HwpNumbering {
+  const formats: string[] = [];
+  let offset = 0;
+  for (let level = 0; level < 7; level++) {
+    if (offset + 14 > d.length) throw new Error('truncated NUMBERING level');
+    offset += 12; // 문단 머리 정보
+    const length = BinaryKit.readU16LE(d, offset);
+    offset += 2;
+    const end = offset + length * 2;
+    if (end > d.length) throw new Error('truncated NUMBERING format');
+    formats.push(
+      new TextDecoder('utf-16le').decode(d.subarray(offset, end)),
+    );
+    offset = end;
+  }
+  return { formats };
+}
+
+function parseBullet(d: Uint8Array): HwpBullet {
+  if (d.length < 10) throw new Error('truncated BULLET record');
+  return { character: String.fromCharCode(BinaryKit.readU16LE(d, 8)) };
 }
 
 /* ── CHAR_SHAPE ─────────────────────────────────────────────── */
@@ -262,6 +339,17 @@ function parseParaShape(d: Uint8Array): HwpParaShape {
 
   // 줄 바꿈 기준: attr1 에는 별도 비트 없음, 기본값 'break'
   const lineWrap: 'break' = 'break';
+  const headingType = (attr >>> 23) & 0x3;
+  const headingLevel = (attr >>> 25) & 0x7;
+  const heading = headingType === 1 && headingLevel < 6
+    ? (headingLevel + 1) as Heading
+    : undefined;
+  const listOrd = headingType === 2
+    ? true
+    : headingType === 3
+      ? false
+      : undefined;
+  const listId = d.length >= 32 ? BinaryKit.readU16LE(d, 30) : 0;
 
   return {
     align,
@@ -274,6 +362,10 @@ function parseParaShape(d: Uint8Array): HwpParaShape {
     lineSpacing,
     verAlign,
     lineWrap,
+    heading,
+    listOrd,
+    listLevel: listOrd === undefined ? undefined : headingLevel,
+    listId: listOrd === undefined ? undefined : listId,
   };
 }
 
@@ -418,9 +510,13 @@ function parseParagraphGroup(
   const lv  = hdr.level;
 
   // P1: PARA_HEADER 레이아웃
+  //   offset 0-3: 글자 수 (최상위 비트는 유효 플래그이므로 제외)
   //   offset 8-9: paraShapeId (UINT16)
   //   offset 10:  styleId (UINT8)
   //   offset 11:  divideSort (UINT8) — 0x04=쪽나누기
+  const _nchars    = hdr.data.length >= 4
+    ? BinaryKit.readU32LE(hdr.data, 0) & 0x7fffffff
+    : 0;
   const psId       = hdr.data.length >= 10 ? BinaryKit.readU16LE(hdr.data, 8) : 0;
   const hwpStyleId = hdr.data.length >= 11 ? hdr.data[10] : undefined;
   const divideSort = hdr.data.length >= 12 ? hdr.data[11] : 0;
@@ -592,7 +688,7 @@ function parseParagraphGroup(
     if (!isSectionOnlyPara && !isPageBreakOnlyPara) {
       nodes.push(buildPara(
         paraContent.length > 0 ? paraContent as any : [buildSpan('')],
-        buildParaProps(ps, hwpStyleId),
+        buildParaProps(ps, hwpStyleId, di),
       ));
     }
   }
@@ -1079,7 +1175,14 @@ function parseCellRec(
           // P6: innerGrids 먼저, 앵커 문단 나중 (P5와 동일한 순서)
           const isPageBreakOnlyPara = (cellDivide & 4) && paraContent.length === 0 && innerGrids.length === 0;
           const items: (ParaNode | GridNode)[] = [...innerGrids];
-          if (!isPageBreakOnlyPara) items.push(buildPara(kids, buildParaProps(ps, cellStyleId)));
+          if (!isPageBreakOnlyPara) {
+            items.push(
+              buildPara(
+                kids,
+                buildParaProps(ps, cellStyleId, di),
+              ),
+            );
+          }
           if (cellDivide & 4) items.unshift(buildPara([{ tag: 'span', props: {}, kids: [buildPb()] } as SpanNode]));
           return { items, next: j };
         },
@@ -1194,10 +1297,37 @@ function strokeFromBF(bfId: number, di: DocInfo): Stroke | undefined {
   return { kind: BORDER_KIND[b.type] ?? 'solid', pt: b.widthPt, color: b.color };
 }
 
-function buildParaProps(ps?: HwpParaShape, hwpStyleId?: number): ParaProps {
+function headingFromStyle(style?: HwpStyle): Heading | undefined {
+  if (!style) return undefined;
+  for (const name of [style.name, style.engName]) {
+    const match = name.match(/^(?:개요|outline|heading)\s*([1-6])$/i);
+    if (match) return Number(match[1]) as Heading;
+  }
+  return undefined;
+}
+
+function buildParaProps(
+  ps?: HwpParaShape,
+  hwpStyleId?: number,
+  di?: DocInfo,
+): ParaProps {
   // P2: hwpStyleId를 초기값으로 포함 (undefined이면 빈 객체)
   const p: ParaProps = hwpStyleId !== undefined ? { hwpStyleId } : {};
+  const heading = ps?.heading ?? headingFromStyle(di?.styles[hwpStyleId ?? -1]);
+  if (heading !== undefined) p.heading = heading;
   if (!ps) return { ...p, spaceBefore: 0, spaceAfter: 0, lineHeight: 1.6 };
+  if (ps.listOrd !== undefined) {
+    p.listOrd = ps.listOrd;
+    p.listLv = Math.max(0, Math.min(6, ps.listLevel ?? 0));
+    if (ps.listOrd) {
+      p.listMark = '1.';
+    } else {
+      const character = ps.listId && di
+        ? di.bullets[ps.listId - 1]?.character
+        : undefined;
+      p.listMark = character || '-';
+    }
+  }
   if (ps.align && ps.align !== 'justify') p.align = ps.align;
   if (hwpStyleId === 18 && !p.align) p.align = 'justify';
   p.spaceBefore = Math.max(0, Metric.hwpToPt(ps.spaceBefore / 2));
@@ -1252,7 +1382,15 @@ export class HwpScanner implements Decoder {
 
       // DocInfo
       const diRaw = streams.get('DocInfo');
-      let di: DocInfo = { faceNames: [], charShapes: [], paraShapes: [], borderFills: [] };
+      let di: DocInfo = {
+        faceNames: [],
+        charShapes: [],
+        paraShapes: [],
+        borderFills: [],
+        styles: [],
+        numberings: [],
+        bullets: [],
+      };
       if (diRaw) {
         di = shield.guard(() => parseDocInfo(diRaw, compressed), di, 'hwp:docInfo');
       }
