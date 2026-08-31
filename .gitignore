@@ -16,3 +16,7 @@ CLAUDE.*
 origin
 output
 ANYTOHWP
+
+!tests/
+!tests/fixtures/
+!tests/fixtures/reference.hwp

@@ -28,6 +28,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "hwp:diff": "vite-node tools/hwp-diff.ts",
     "playground": "vite --config playground/vite.config.ts"
   },
   "dependencies": {

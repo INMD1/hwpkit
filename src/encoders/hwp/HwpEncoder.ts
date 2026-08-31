@@ -54,6 +54,9 @@ const TAG_CHAR_SHAPE = T + 5; // 21
 const TAG_TAB_DEF = T + 6; // 22
 const TAG_PARA_SHAPE = T + 9; // 25
 const TAG_STYLE = T + 10; // 26
+const TAG_DOC_DATA = T + 11; // 27
+const TAG_COMPATIBLE_DOCUMENT = T + 14; // 30
+const TAG_LAYOUT_COMPATIBILITY = T + 15; // 31
 
 // BodyText 태그
 const TAG_PARA_HEADER = T + 50; // 66
@@ -478,6 +481,67 @@ function mkDocumentProperties(): Uint8Array {
 }
 
 /**
+ * HWPTAG_DOC_DATA payload (HWP 5.0 revision 1.3, tables 49-52).
+ *
+ * The public spec defines this as one Parameter Set but does not define a
+ * universal/default set ID or require the record for ordinary documents.
+ * Item payload bytes therefore remain explicit until a reference file gives
+ * us a concrete set ID and item layout to reproduce.
+ */
+interface HwpParameterItem {
+  id: number;
+  type: number;
+  data: Uint8Array;
+}
+
+function mkDocData(
+  parameterSetId: number,
+  items: readonly HwpParameterItem[],
+): Uint8Array {
+  if (!Number.isInteger(parameterSetId) || parameterSetId < 0 || parameterSetId > 0xffff) {
+    throw new Error(`DOC_DATA parameter set ID out of range: ${parameterSetId}`);
+  }
+  if (items.length > 0x7fff) {
+    throw new Error(`DOC_DATA item count out of range: ${items.length}`);
+  }
+  const writer = new BufWriter().u16(parameterSetId).i16(items.length);
+  for (const item of items) {
+    if (!Number.isInteger(item.id) || item.id < 0 || item.id > 0xffff) {
+      throw new Error(`DOC_DATA item ID out of range: ${item.id}`);
+    }
+    if (!Number.isInteger(item.type) || item.type < 0 || item.type > 0xffff) {
+      throw new Error(`DOC_DATA item type out of range: ${item.type}`);
+    }
+    writer.u16(item.id).u16(item.type).bytes(item.data);
+  }
+  return writer.build();
+}
+
+/** HWPTAG_COMPATIBLE_DOCUMENT payload (table 54): one target-program UINT32. */
+function mkCompatibleDocument(targetProgram: 0 | 1 | 2): Uint8Array {
+  return new BufWriter().u32(targetProgram).build();
+}
+
+interface LayoutCompatibility {
+  character: number;
+  paragraph: number;
+  section: number;
+  object: number;
+  field: number;
+}
+
+/** HWPTAG_LAYOUT_COMPATIBILITY payload (table 56): five UINT32 values. */
+function mkLayoutCompatibility(value: LayoutCompatibility): Uint8Array {
+  return new BufWriter()
+    .u32(value.character)
+    .u32(value.paragraph)
+    .u32(value.section)
+    .u32(value.object)
+    .u32(value.field)
+    .build();
+}
+
+/**
  * HWPTAG_ID_MAPPINGS (72 bytes = 18 × INT32)
  * [0]=binData, [1-7]=7개 언어별 글꼴 수 (ANYTOHWP 방식으로 언어별 독립),
  * [8]=테두리/배경, [9]=글자모양, [10]=탭, [11]=번호, [12]=글머리,
@@ -790,10 +854,10 @@ function buildDocInfoStream(
 // ─── BodyText 레코드 빌더 ────────────────────────────────────
 
 function mkPageDef(dims: PageDims): Uint8Array {
-  const rawTopPt = dims.headerPt ?? dims.mt;
-  const rawBottomPt = dims.footerPt ?? dims.mb;
-  const rawHeaderPt = Math.max(0, dims.mt - rawTopPt);
-  const rawFooterPt = Math.max(0, dims.mb - rawBottomPt);
+  const rawTopPt = dims.mt;
+  const rawBottomPt = dims.mb;
+  const rawHeaderPt = dims.headerPt ?? 0;
+  const rawFooterPt = dims.footerPt ?? 0;
   return new BufWriter()
     .u32(Metric.ptToHwp(dims.wPt))
     .u32(Metric.ptToHwp(dims.hPt))

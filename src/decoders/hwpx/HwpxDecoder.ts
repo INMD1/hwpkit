@@ -273,12 +273,12 @@ function extractDims(headObj: any): PageDims | null {
       return {
         wPt: Metric.hwpToPt(ew),
         hPt: Metric.hwpToPt(eh),
-        mt: Metric.hwpToPt(mt + Math.max(0, header)),
-        mb: Metric.hwpToPt(mb + Math.max(0, footer)),
+        mt: Metric.hwpToPt(mt),
+        mb: Metric.hwpToPt(mb),
         ml: Metric.hwpToPt(ml),
         mr: Metric.hwpToPt(mr),
-        headerPt: Metric.hwpToPt(Math.max(0, mt)),
-        footerPt: Metric.hwpToPt(Math.max(0, mb)),
+        headerPt: Metric.hwpToPt(Math.max(0, header)),
+        footerPt: Metric.hwpToPt(Math.max(0, footer)),
         orient: ew > eh ? "landscape" : "portrait",
       };
     }
@@ -310,12 +310,12 @@ function extractDims(headObj: any): PageDims | null {
     return {
       wPt: Metric.hwpToPt(ew),
       hPt: Metric.hwpToPt(eh),
-      mt: Metric.hwpToPt(mt + Math.max(0, header)),
-      mb: Metric.hwpToPt(mb + Math.max(0, footer)),
+      mt: Metric.hwpToPt(mt),
+      mb: Metric.hwpToPt(mb),
       ml: Metric.hwpToPt(ml),
       mr: Metric.hwpToPt(mr),
-      headerPt: Metric.hwpToPt(Math.max(0, mt)),
-      footerPt: Metric.hwpToPt(Math.max(0, mb)),
+      headerPt: Metric.hwpToPt(Math.max(0, header)),
+      footerPt: Metric.hwpToPt(Math.max(0, footer)),
       orient: ew > eh ? "landscape" : "portrait",
     };
   } catch {
@@ -725,12 +725,12 @@ function parseSecPrDims(secPr: any): PageDims | null {
   return {
     wPt: Metric.hwpToPt(pw),
     hPt: Metric.hwpToPt(ph),
-    mt: Metric.hwpToPt(mt + Math.max(0, header)),
-    mb: Metric.hwpToPt(mb + Math.max(0, footer)),
+    mt: Metric.hwpToPt(mt),
+    mb: Metric.hwpToPt(mb),
     ml: Metric.hwpToPt(ml),
     mr: Metric.hwpToPt(mr),
-    headerPt: Metric.hwpToPt(Math.max(0, mt)),
-    footerPt: Metric.hwpToPt(Math.max(0, mb)),
+    headerPt: Metric.hwpToPt(Math.max(0, header)),
+    footerPt: Metric.hwpToPt(Math.max(0, footer)),
     orient: pw > ph ? "landscape" : "portrait",
   };
 }

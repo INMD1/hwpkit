@@ -101,6 +101,15 @@ export interface GridProps {
   layout?: ImgLayout;     // 표 배치/위치 정보 (없으면 inline 흐름 표)
 }
 
+/**
+ * 여백 계약 (HWP/HWPX PAGE_DEF·hp:margin 과 1:1 대응)
+ * mt / mb        : 위쪽 / 아래쪽 여백 — 머리말·꼬리말을 포함하지 않는다
+ * headerPt       : 머리말 여백 (별도 값)
+ * footerPt       : 꼬리말 여백 (별도 값)
+ * 어떤 인코더도 mt 에 headerPt 를 더해 저장해서는 안 된다.
+ * DOCX 로 내보낼 때 w:pgMar 의 top/header 의미가 다르면
+ * DocxEncoder 안에서만 변환하고, IR 값은 그대로 둔다.
+ */
 export interface PageDims {
   wPt: number;
   hPt: number;
@@ -109,8 +118,8 @@ export interface PageDims {
   ml: number;
   mr: number;
   orient?: 'portrait' | 'landscape';
-  headerPt?: number;  // distance from paper top to header top (DOCX w:header)
-  footerPt?: number;  // distance from paper bottom to footer bottom (DOCX w:footer)
+  headerPt?: number;
+  footerPt?: number;
 }
 
 export interface DocMeta {

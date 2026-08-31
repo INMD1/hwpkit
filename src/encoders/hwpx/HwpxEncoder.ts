@@ -949,11 +949,8 @@ function buildBulletsXml(): string {
  * Contents/header.xml 용 전역 구역 설정 리스트(secPrList)를 생성합니다.
  */
 /**
- * 페이지 여백 (margin) 과 헤더/푸터 영역 (zone) 을 계산합니다.
- * HWPX spec 에서는 pagePr > margin 의 header/footer 가 헤더/푸터 영역의 높이 (zone height) 입니다.
- * - headerZone: 용지 상단에서 헤더 영역 상단까지의 거리 (headerPt 가 없으면 0)
- * - footerZone: 용지 하단에서 푸터 영역 하단까지의 거리 (footerPt 가 없으면 0)
- * - mt/mb: 용지 상단/하단에서 본문 영역 상단/하단까지의 거리
+ * PageDims 여백을 HWPX pagePr > margin에 1:1로 기록합니다.
+ * top/bottom과 header/footer는 서로 합산하지 않는 독립 값입니다.
  */
 function buildHeaderSecPrListXml(dims: PageDims): string {
   const wHwp = Metric.ptToHwp(dims.wPt);
@@ -963,8 +960,7 @@ function buildHeaderSecPrListXml(dims: PageDims): string {
   const mt = Metric.ptToHwp(dims.mt);
   const mb = Metric.ptToHwp(dims.mb);
 
-  // 헤더/푸터 영역 높이 계산 (HWPX 는 zone height 를 직접 지정)
-  // headerPt 가 설정되어 있으면 그 값을 zone height 로 사용, 없으면 0 으로 설정
+  // headerPt/footerPt도 독립된 HWPX margin 값으로 그대로 기록한다.
   const headerZone = dims.headerPt !== undefined && dims.headerPt > 0
     ? Metric.ptToHwp(dims.headerPt)
     : 0;
@@ -1288,8 +1284,7 @@ function buildSecPrXml(dims: PageDims): string {
   const mr = Metric.ptToHwp(dims.mr);
   const mt = Metric.ptToHwp(dims.mt);
   const mb = Metric.ptToHwp(dims.mb);
-  // HWPX margin header/footer = header/footer ZONE HEIGHT (not distance from paper edge)
-  // = top_hwp - header_from_top_hwp  (and  bottom_hwp - footer_from_bottom_hwp)
+  // PageDims 계약에 따라 top/bottom과 header/footer를 합산하지 않는다.
   const headerZone = dims.headerPt ? Metric.ptToHwp(dims.headerPt) : 0;
   const footerZone = dims.footerPt ? Metric.ptToHwp(dims.footerPt) : 0;
 

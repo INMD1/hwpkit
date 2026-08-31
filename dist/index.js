@@ -1040,12 +1040,12 @@ function extractDims(headObj) {
       return {
         wPt: Metric.hwpToPt(ew2),
         hPt: Metric.hwpToPt(eh2),
-        mt: Metric.hwpToPt(mt2 + Math.max(0, header2)),
-        mb: Metric.hwpToPt(mb2 + Math.max(0, footer2)),
+        mt: Metric.hwpToPt(mt2),
+        mb: Metric.hwpToPt(mb2),
         ml: Metric.hwpToPt(ml2),
         mr: Metric.hwpToPt(mr2),
-        headerPt: Metric.hwpToPt(Math.max(0, mt2)),
-        footerPt: Metric.hwpToPt(Math.max(0, mb2)),
+        headerPt: Metric.hwpToPt(Math.max(0, header2)),
+        footerPt: Metric.hwpToPt(Math.max(0, footer2)),
         orient: ew2 > eh2 ? "landscape" : "portrait"
       };
     }
@@ -1067,12 +1067,12 @@ function extractDims(headObj) {
     return {
       wPt: Metric.hwpToPt(ew),
       hPt: Metric.hwpToPt(eh),
-      mt: Metric.hwpToPt(mt + Math.max(0, header)),
-      mb: Metric.hwpToPt(mb + Math.max(0, footer)),
+      mt: Metric.hwpToPt(mt),
+      mb: Metric.hwpToPt(mb),
       ml: Metric.hwpToPt(ml),
       mr: Metric.hwpToPt(mr),
-      headerPt: Metric.hwpToPt(Math.max(0, mt)),
-      footerPt: Metric.hwpToPt(Math.max(0, mb)),
+      headerPt: Metric.hwpToPt(Math.max(0, header)),
+      footerPt: Metric.hwpToPt(Math.max(0, footer)),
       orient: ew > eh ? "landscape" : "portrait"
     };
   } catch {
@@ -1340,12 +1340,12 @@ function parseSecPrDims(secPr) {
   return {
     wPt: Metric.hwpToPt(pw),
     hPt: Metric.hwpToPt(ph),
-    mt: Metric.hwpToPt(mt + Math.max(0, header)),
-    mb: Metric.hwpToPt(mb + Math.max(0, footer)),
+    mt: Metric.hwpToPt(mt),
+    mb: Metric.hwpToPt(mb),
     ml: Metric.hwpToPt(ml),
     mr: Metric.hwpToPt(mr),
-    headerPt: Metric.hwpToPt(Math.max(0, mt)),
-    footerPt: Metric.hwpToPt(Math.max(0, mb)),
+    headerPt: Metric.hwpToPt(Math.max(0, header)),
+    footerPt: Metric.hwpToPt(Math.max(0, footer)),
     orient: pw > ph ? "landscape" : "portrait"
   };
 }
@@ -2788,10 +2788,10 @@ function parsePageDef(d) {
     hPt: Metric.hwpToPt(h),
     ml: Metric.hwpToPt(ml),
     mr: Metric.hwpToPt(mr),
-    mt: Metric.hwpToPt(mt + header),
-    mb: Metric.hwpToPt(mb + footer),
-    headerPt: Metric.hwpToPt(mt),
-    footerPt: Metric.hwpToPt(mb),
+    mt: Metric.hwpToPt(mt),
+    mb: Metric.hwpToPt(mb),
+    headerPt: Metric.hwpToPt(header),
+    footerPt: Metric.hwpToPt(footer),
     orient: at & 1 ? "landscape" : "portrait"
   };
 }
@@ -7692,6 +7692,9 @@ var TAG_CHAR_SHAPE2 = T + 5;
 var TAG_TAB_DEF = T + 6;
 var TAG_PARA_SHAPE2 = T + 9;
 var TAG_STYLE = T + 10;
+var TAG_DOC_DATA = T + 11;
+var TAG_COMPATIBLE_DOCUMENT = T + 14;
+var TAG_LAYOUT_COMPATIBILITY = T + 15;
 var TAG_PARA_HEADER2 = T + 50;
 var TAG_PARA_TEXT2 = T + 51;
 var TAG_PARA_CHAR_SHAPE2 = T + 52;
@@ -8241,10 +8244,10 @@ function buildDocInfoStream(bank, images = []) {
   return concatU8(chunks);
 }
 function mkPageDef(dims) {
-  const rawTopPt = dims.headerPt ?? dims.mt;
-  const rawBottomPt = dims.footerPt ?? dims.mb;
-  const rawHeaderPt = Math.max(0, dims.mt - rawTopPt);
-  const rawFooterPt = Math.max(0, dims.mb - rawBottomPt);
+  const rawTopPt = dims.mt;
+  const rawBottomPt = dims.mb;
+  const rawHeaderPt = dims.headerPt ?? 0;
+  const rawFooterPt = dims.footerPt ?? 0;
   return new BufWriter().u32(Metric.ptToHwp(dims.wPt)).u32(Metric.ptToHwp(dims.hPt)).u32(Metric.ptToHwp(dims.ml)).u32(Metric.ptToHwp(dims.mr)).u32(Metric.ptToHwp(rawTopPt)).u32(Metric.ptToHwp(rawBottomPt)).u32(Metric.ptToHwp(rawHeaderPt)).u32(Metric.ptToHwp(rawFooterPt)).u32(0).u32(dims.orient === "landscape" ? 1 : 0).build();
 }
 function mkParaHeader(nchars, ctrlMask, psId, csCount, lineAlignCount = 0, instanceId = 0, styleId = 0, divideSort = 0) {

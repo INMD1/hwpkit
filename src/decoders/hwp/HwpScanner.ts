@@ -1149,9 +1149,9 @@ function parsePageDef(d: Uint8Array): PageDims {
   return {
     wPt: Metric.hwpToPt(w),  hPt: Metric.hwpToPt(h),
     ml: Metric.hwpToPt(ml),  mr: Metric.hwpToPt(mr),
-    mt: Metric.hwpToPt(mt + header),  mb: Metric.hwpToPt(mb + footer),
-    headerPt: Metric.hwpToPt(mt),
-    footerPt: Metric.hwpToPt(mb),
+    mt: Metric.hwpToPt(mt),  mb: Metric.hwpToPt(mb),
+    headerPt: Metric.hwpToPt(header),
+    footerPt: Metric.hwpToPt(footer),
     orient: (at & 1) ? 'landscape' : 'portrait',
   };
 }
