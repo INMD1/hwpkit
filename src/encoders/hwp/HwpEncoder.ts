@@ -40,6 +40,7 @@ import pako from "pako";
 import { TextKit } from "../../toolkit/TextKit";
 import { fitColumnWidths } from "../../toolkit/TableGeometry";
 import { BaseEncoder } from "../../core/BaseEncoder";
+import { verifyHwpRecordStreams } from "./verify";
 
 // ─── HWP 5.0 태그 ID ────────────────────────────────────────
 const T = 16; // HWPTAG_BEGIN
@@ -80,8 +81,6 @@ const CTRL_SECD = 0x73656364; // 'secd'
 const CTRL_COLD = 0x636f6c64; // 'cold'
 const CTRL_GSO = 0x67736f20; // 'gso '
 const CTRL_PIC = 0x24706963; // '$pic'
-const CTRL_FIELD_BEGIN = 0x646c6625; // '%fld'
-const CTRL_FIELD_END = 0x646c665c; // '\fld'
 const TABLE_CTRL_MASK = 1 << 11;
 
 /** 테두리선 굵기 인덱스 테이블 (pt) */
@@ -465,14 +464,20 @@ type BfEntry =
 
 // ─── Pre-scan: 스타일 수집 ──────────────────────────────────
 
+function collectInlineCharShapes(kids: any[], bank: HwpStyleBank): void {
+  for (const kid of kids ?? []) {
+    if (!kid || typeof kid !== "object") continue;
+    if (kid.tag === "span") bank.addCharShape((kid as SpanNode).props);
+    if (Array.isArray(kid.kids)) collectInlineCharShapes(kid.kids, bank);
+  }
+}
+
 function collectNode(node: ContentNode, bank: HwpStyleBank): void {
   if (node.tag === "para") {
     const paraShapeId = bank.addParaShape(node.props);
     bank.registerStyleId(hwpStyleIdForPara(node.props), paraShapeId);
     bank.registerList(node.props);
-    for (const kid of node.kids) {
-      if (kid.tag === "span") bank.addCharShape((kid as SpanNode).props);
-    }
+    collectInlineCharShapes(node.kids, bank);
   } else if (node.tag === "grid") {
     if (node.props.defaultStroke) bank.addBorderFill(node.props.defaultStroke);
     for (const row of node.kids) {
@@ -667,14 +672,15 @@ function mkBullet(): Uint8Array {
     .u32(0x00c) // 왼쪽 정렬, 실제 너비 사용, 자동 내어쓰기
     .u16(0) // 너비 보정값
     .u16(50) // 본문과의 거리
+    .u32(0xffffffff) // 글자 모양은 문단 글자 모양을 따름
     .u16(0x2022) // BULLET(•)
     .i32(0) // 이미지 글머리표 아님
     .u8(0) // 대비
     .u8(0) // 밝기
     .u8(0) // 효과
-    .u8(0) // 이미지 BinData ID
+    .u16(0) // 이미지 BinData ID
     .u16(0) // 체크 글머리표 문자 없음
-    .build();
+    .build(); // 25 bytes
 }
 
 const HWP_STYLE_NAMES: Array<[string, string]> = [
@@ -832,7 +838,7 @@ function mkCharShape(fontIds: number[], p: TextProps): Uint8Array {
   w.colorRef("000000"); // underlineColor
   w.colorRef(p.bg ?? "FFFFFF"); // shadeColor
   w.colorRef("000000"); // shadowColor
-  w.u16(0); // borderFillId
+  w.u16(1); // borderFillId — BorderFill 은 1-based, 0 은 무효 참조
   w.colorRef("000000"); // strikeColor
   return w.build(); // 74 bytes
 }
@@ -864,9 +870,9 @@ function mkParaShape(p: ParaProps): Uint8Array {
     .i32(paraShapeUnit(p.spaceBefore ?? 0))
     .i32(paraShapeUnit(p.spaceAfter ?? 0))
     .i32(lineSpaceValue)
-    .u16(0)
-    .u16(p.listOrd === undefined ? 0 : 1)
-    .u16(0)
+    .u16(0) // 탭 정의 ID
+    .u16(p.listOrd === undefined ? 0 : 1) // 번호 문단 ID
+    .u16(1) // 테두리/배경 ID — BorderFill 은 1-based, id=1 은 "테두리 없음"
     .i16(0)
     .i16(0)
     .i16(0)
@@ -1567,27 +1573,6 @@ function mkObjectCtrl(
     .build(); // 46 bytes
 }
 
-function mkFieldBeginCtrl(instanceId: number): Uint8Array {
-  // 46-byte Object Control Header for Field
-  return new BufWriter()
-    .u32(CTRL_FIELD_BEGIN)
-    .u32(0x00000002) // 필드 플래그
-    .zeros(28) // xy/size 등 불필요 (필드는 비가시)
-    .u32(instanceId)
-    .zeros(6)
-    .build();
-}
-
-function mkFieldEndCtrl(beginId: number): Uint8Array {
-  return new BufWriter()
-    .u32(CTRL_FIELD_END)
-    .u32(0)
-    .zeros(28)
-    .u32(beginId)
-    .zeros(6)
-    .build();
-}
-
 /**
  * 이미지 단락 인코딩
  * ANYTOHWP 개선: PNG/JPEG 픽셀 치수에서 HWPUNIT 계산
@@ -1662,11 +1647,6 @@ function encodePara(
   const csPairs: [number, number][] = [];
   let pos = 0;
   const fontHwp = maxFontHwpInPara(para);
-  const ctrlRecords: Uint8Array[] = [];
-
-  // 내부적으로 사용되는 ID 생성기 (단락 내에서 로컬하게 사용)
-  let localIdCounter = 10000;
-  const localIdGen = () => localIdCounter++;
 
   function processKids(kids: any[]): void {
     for (const kid of kids) {
@@ -1687,25 +1667,11 @@ function encodePara(
         }
       } else if (kid.tag === "link") {
         const link = kid as LinkNode;
-        mask |= 1 << 11; // 하이퍼링크 마스크
-
-        const fieldBeginId = localIdGen();
-        // 1. 시작 제어 문자 (0x03)
-        text += String.fromCharCode(3);
-        pos += 1;
-        ctrlRecords.push(
-          mkRec(TAG_CTRL_HEADER, lv + 1, mkFieldBeginCtrl(fieldBeginId)),
-        );
-
-        // 2. 내용 처리
+        // A hyperlink field requires an 8-character extended control plus a
+        // variable-length FIELD_HYPERLINK record. Until that complete binary
+        // structure is emitted, preserve all visible text without writing a
+        // malformed field that makes Hancom discard the linked content.
         processKids(link.kids);
-
-        // 3. 종료 제어 문자 (0x04)
-        text += String.fromCharCode(4);
-        pos += 1;
-        ctrlRecords.push(
-          mkRec(TAG_CTRL_HEADER, lv + 1, mkFieldEndCtrl(fieldBeginId)),
-        );
       }
     }
   }
@@ -1768,7 +1734,6 @@ function encodePara(
       lineSegs.data,
     ),
     ...sectionRecords,
-    ...ctrlRecords,
   ];
 }
 
@@ -2159,7 +2124,7 @@ function buildSectionParagraph(
     mkRec(
       TAG_PARA_HEADER,
       0,
-      mkParaHeader(nchars, SECD_CTRL_MASK, 0, 1, 1, instanceId),
+      mkParaHeader(nchars, SECD_CTRL_MASK, 0, 2, 1, instanceId),
     ),
     mkRec(
       TAG_PARA_TEXT,
@@ -3204,8 +3169,15 @@ export class HwpEncoder extends BaseEncoder {
       }
 
       // 패스 2: 스트림 빌드
-      const docInfoRaw = buildDocInfoStream(bank, images);
       const bodyRaw = buildBodyTextStream(doc, bank, images);
+      const docInfoRaw = buildDocInfoStream(bank, images);
+
+      const verification = verifyHwpRecordStreams(docInfoRaw, bodyRaw);
+      if (!verification.ok) {
+        return fail(
+          `HwpEncoder: 레코드 참조 무결성 오류 - ${verification.errors.join("; ")}`,
+        );
+      }
 
       // HWP 5.0: Zlib 헤더 없는 Raw Deflate
       const docInfoCmp = pako.deflateRaw(docInfoRaw);

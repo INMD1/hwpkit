@@ -20,3 +20,4 @@ ANYTOHWP
 !tests/
 !tests/fixtures/
 !tests/fixtures/reference.hwp
+!tests/fixtures/demo.docx

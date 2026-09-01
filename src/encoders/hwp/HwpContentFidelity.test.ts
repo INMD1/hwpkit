@@ -332,7 +332,10 @@ describe("HWP content fidelity", () => {
     expect(countTag(records, TAG_NUMBERING)).toBe(1);
     expect(countTag(records, TAG_BULLET)).toBe(1);
     expect(records.find(record => record.tag === TAG_NUMBERING)?.data).toHaveLength(230);
-    expect(records.find(record => record.tag === TAG_BULLET)?.data).toHaveLength(20);
+    const bullet = records.find(record => record.tag === TAG_BULLET)?.data;
+    expect(bullet).toHaveLength(25);
+    expect(readU32(bullet!, 8)).toBe(0xffffffff);
+    expect(readU16(bullet!, 12)).toBe(0x2022);
     expectIdMappingsMatch(records);
 
     const listShapes = records

@@ -251,7 +251,11 @@ function parseNumbering(d: Uint8Array): HwpNumbering {
 
 function parseBullet(d: Uint8Array): HwpBullet {
   if (d.length < 10) throw new Error('truncated BULLET record');
-  return { character: String.fromCharCode(BinaryKit.readU16LE(d, 8)) };
+  // Conforming HWP 5.x records include the paragraph-head charShapeId at
+  // offset 8, followed by the bullet character at offset 12. Keep the old
+  // compact hwpkit layout readable for files emitted before that fix.
+  const characterOffset = d.length >= 23 ? 12 : 8;
+  return { character: String.fromCharCode(BinaryKit.readU16LE(d, characterOffset)) };
 }
 
 /* ── CHAR_SHAPE ─────────────────────────────────────────────── */

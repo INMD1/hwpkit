@@ -9,16 +9,27 @@ import { HwpxDecoder } from "../../decoders/hwpx/HwpxDecoder";
 import { HwpxEncoder } from "../hwpx/HwpxEncoder";
 import { ArchiveKit } from "../../toolkit/ArchiveKit";
 import { BinaryKit } from "../../toolkit/BinaryKit";
+import { Pipeline } from "../../pipeline/Pipeline";
 import { HwpEncoder } from "./HwpEncoder";
+import {
+  parseHwpRecords,
+  verifyHwpRecordStreams,
+  type HwpVerificationResult,
+} from "./verify";
 
 const HWPTAG_BEGIN = 0x10;
 const TAG_ID_MAPPINGS = HWPTAG_BEGIN + 1;
 const TAG_BORDER_FILL = HWPTAG_BEGIN + 4;
+const TAG_CHAR_SHAPE = HWPTAG_BEGIN + 5;
+const TAG_PARA_SHAPE = HWPTAG_BEGIN + 9;
 const TAG_COMPATIBLE_DOCUMENT = HWPTAG_BEGIN + 14;
 const TAG_LAYOUT_COMPATIBILITY = HWPTAG_BEGIN + 15;
 const TAG_PARA_HEADER = HWPTAG_BEGIN + 50;
 const TAG_CTRL_HEADER = HWPTAG_BEGIN + 55;
+const TAG_LIST_HEADER = HWPTAG_BEGIN + 56;
 const TAG_PAGE_DEF = HWPTAG_BEGIN + 57;
+const TAG_PAGE_BORDER_FILL = HWPTAG_BEGIN + 59;
+const TAG_TABLE = HWPTAG_BEGIN + 61;
 const TAG_CTRL_DATA = HWPTAG_BEGIN + 71;
 const CTRL_SECD = 0x73656364;
 
@@ -30,6 +41,13 @@ interface ParsedRecord {
 
 function readU32(data: Uint8Array, offset: number): number {
   return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(
+    offset,
+    true,
+  );
+}
+
+function readU16(data: Uint8Array, offset: number): number {
+  return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint16(
     offset,
     true,
   );
@@ -65,6 +83,15 @@ function parseRecords(data: Uint8Array): ParsedRecord[] {
 
 function countTag(records: ParsedRecord[], tag: number): number {
   return records.filter((record) => record.tag === tag).length;
+}
+
+function collectDocumentText(node: unknown): string {
+  if (!node || typeof node !== "object") return "";
+  const value = node as { tag?: string; content?: string; kids?: unknown[] };
+  if (value.tag === "txt") return value.content ?? "";
+  return Array.isArray(value.kids)
+    ? value.kids.map(collectDocumentText).join("")
+    : "";
 }
 
 function extractRecordStream(
@@ -307,5 +334,151 @@ describe("reference.hwp encoder regression", () => {
     const encoded = await new HwpEncoder().encode(decoded.data);
     if (!encoded.ok) throw new Error(encoded.error);
     expect(extractPageDef(encoded.data)).toEqual(referencePageDef);
+  });
+});
+
+describe("demo.docx HWP reference integrity regression", () => {
+  let output: Uint8Array;
+  let verification: HwpVerificationResult;
+  let docInfoRecords: ParsedRecord[];
+  let docInfoRaw: Uint8Array;
+  let sectionRaw: Uint8Array;
+  let sourceText: string;
+  let encodedText: string;
+
+  beforeAll(async () => {
+    const fixture = new Uint8Array(
+      readFileSync(resolve(process.cwd(), "tests/fixtures/demo.docx")),
+    );
+    const source = await Pipeline.open(fixture, "docx").inspect();
+    if (!source.ok) throw new Error(source.error);
+    sourceText = collectDocumentText(source.data);
+    const encoded = await Pipeline.open(fixture, "docx").to("hwp");
+    if (!encoded.ok) throw new Error(encoded.error);
+    output = encoded.data;
+
+    const streams = BinaryKit.parseCfb(output);
+    const docInfo = streams.get("DocInfo");
+    const section0 = streams.get("BodyText/Section0");
+    if (!docInfo || !section0) throw new Error("required HWP stream is missing");
+    docInfoRaw = new Uint8Array(pako.inflateRaw(docInfo));
+    sectionRaw = new Uint8Array(pako.inflateRaw(section0));
+    docInfoRecords = parseRecords(docInfoRaw);
+    verification = verifyHwpRecordStreams(docInfoRaw, sectionRaw);
+    const decoded = await new HwpScanner().decode(output);
+    if (!decoded.ok) throw new Error(decoded.error);
+    encodedText = collectDocumentText(decoded.data);
+  });
+
+  it("converts the DOCX fixture to a parseable HWP", () => {
+    expect(BinaryKit.isOle2(output)).toBe(true);
+  });
+
+  it("passes every raw-record reference integrity check", () => {
+    expect(verification.ok, verification.errors.join("\n")).toBe(true);
+    expect(verification.errors).toEqual([]);
+  });
+
+  it("defines every charShapeId referenced by Section0", () => {
+    expect(verification.stats.charShapeCount).toBeGreaterThanOrEqual(
+      verification.stats.maxCharShapeId + 1,
+    );
+  });
+
+  it("preserves every visible DOCX text character in the HWP", () => {
+    expect(encodedText).toBe(sourceText);
+  });
+
+  it("writes every PARA_SHAPE borderFillId in the 1-based BorderFill range", () => {
+    const borderFillCount = countTag(docInfoRecords, TAG_BORDER_FILL);
+    const paraShapes = docInfoRecords.filter(
+      (record) => record.tag === TAG_PARA_SHAPE,
+    );
+    expect(paraShapes.length).toBeGreaterThan(0);
+    for (const record of paraShapes) {
+      expect(record.data.length).toBeGreaterThanOrEqual(34);
+      const borderFillId = readU16(record.data, 32);
+      expect(borderFillId).toBeGreaterThanOrEqual(1);
+      expect(borderFillId).toBeLessThanOrEqual(borderFillCount);
+    }
+  });
+
+  it("writes every CHAR_SHAPE borderFillId in the 1-based BorderFill range", () => {
+    const borderFillCount = countTag(docInfoRecords, TAG_BORDER_FILL);
+    const charShapes = docInfoRecords.filter(
+      (record) => record.tag === TAG_CHAR_SHAPE,
+    );
+    expect(charShapes.length).toBeGreaterThan(0);
+    for (const record of charShapes) {
+      expect(record.data.length).toBeGreaterThanOrEqual(70);
+      const borderFillId = readU16(record.data, 68);
+      expect(borderFillId).toBeGreaterThanOrEqual(1);
+      expect(borderFillId).toBeLessThanOrEqual(borderFillCount);
+    }
+  });
+
+  it("rejects zero BorderFill references in DocInfo, table cells, pages, and tables", () => {
+    const cases = [
+      {
+        label: "PARA_SHAPE",
+        stream: "docInfo" as const,
+        find: (record: ParsedRecord) => record.tag === TAG_PARA_SHAPE,
+        offset: () => 32,
+      },
+      {
+        label: "CHAR_SHAPE",
+        stream: "docInfo" as const,
+        find: (record: ParsedRecord) => record.tag === TAG_CHAR_SHAPE,
+        offset: () => 68,
+      },
+      {
+        label: "LIST_HEADER",
+        stream: "section" as const,
+        find: (record: ParsedRecord) =>
+          record.tag === TAG_LIST_HEADER && record.data.length === 47,
+        offset: () => 32,
+      },
+      {
+        label: "PAGE_BORDER_FILL",
+        stream: "section" as const,
+        find: (record: ParsedRecord) => record.tag === TAG_PAGE_BORDER_FILL,
+        offset: () => 12,
+      },
+      {
+        label: "TABLE",
+        stream: "section" as const,
+        find: (record: ParsedRecord) => record.tag === TAG_TABLE,
+        offset: (record: ParsedRecord) => 18 + readU16(record.data, 4) * 2,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const invalidDocInfo = docInfoRaw.slice();
+      const invalidSection = sectionRaw.slice();
+      const records = parseHwpRecords(
+        testCase.stream === "docInfo" ? invalidDocInfo : invalidSection,
+      );
+      const record = records.find(testCase.find);
+      expect(record, `${testCase.label} fixture record`).toBeDefined();
+      const offset = testCase.offset(record!);
+      record!.data[offset] = 0;
+      record!.data[offset + 1] = 0;
+
+      const result = verifyHwpRecordStreams(invalidDocInfo, invalidSection);
+      expect(
+        result.errors.some((error) => error.includes("borderFillId 0")),
+        `${testCase.label} zero reference was not rejected`,
+      ).toBe(true);
+    }
+  });
+
+  it("parses the complete Section0 record stream with zero leftover bytes", () => {
+    expect(
+      extractRecordStream(output, "BodyText/Section0").length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("writes all 343 PARA_HEADER records, including table-cell paragraphs", () => {
+    expect(verification.stats.paragraphCount).toBe(343);
   });
 });

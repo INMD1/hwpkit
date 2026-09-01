@@ -7798,30 +7798,329 @@ registry.registerEncoder(new HtmlEncoder());
 
 // src/encoders/hwp/HwpEncoder.ts
 import pako3 from "pako";
+
+// src/encoders/hwp/verify.ts
+var HWPTAG_BEGIN2 = 16;
+var TAG_ID_MAPPINGS = HWPTAG_BEGIN2 + 1;
+var TAG_BIN_DATA = HWPTAG_BEGIN2 + 2;
+var TAG_FACE_NAME2 = HWPTAG_BEGIN2 + 3;
+var TAG_BORDER_FILL2 = HWPTAG_BEGIN2 + 4;
+var TAG_CHAR_SHAPE2 = HWPTAG_BEGIN2 + 5;
+var TAG_TAB_DEF = HWPTAG_BEGIN2 + 6;
+var TAG_NUMBERING2 = HWPTAG_BEGIN2 + 7;
+var TAG_BULLET2 = HWPTAG_BEGIN2 + 8;
+var TAG_PARA_SHAPE2 = HWPTAG_BEGIN2 + 9;
+var TAG_STYLE2 = HWPTAG_BEGIN2 + 10;
+var TAG_MEMO_SHAPE = HWPTAG_BEGIN2 + 76;
+var TAG_TRACK_CHANGE = HWPTAG_BEGIN2 + 80;
+var TAG_TRACK_CHANGE_AUTHOR = HWPTAG_BEGIN2 + 81;
+var TAG_PARA_HEADER2 = HWPTAG_BEGIN2 + 50;
+var TAG_PARA_TEXT2 = HWPTAG_BEGIN2 + 51;
+var TAG_PARA_CHAR_SHAPE2 = HWPTAG_BEGIN2 + 52;
+var TAG_PARA_LINE_SEG = HWPTAG_BEGIN2 + 53;
+var TAG_LIST_HEADER2 = HWPTAG_BEGIN2 + 56;
+var TAG_PAGE_BORDER_FILL = HWPTAG_BEGIN2 + 59;
+var ID_MAPPING_COUNT = 18;
+var PARA_HEADER_SIZE = 24;
+var CHAR_SHAPE_RANGE_SIZE = 8;
+var LINE_SEG_SIZE = 36;
+var CELL_LIST_HEADER_SIZE = 47;
+function readU16(data, offset) {
+  return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint16(
+    offset,
+    true
+  );
+}
+function readU32(data, offset) {
+  return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(
+    offset,
+    true
+  );
+}
+function readI32(data, offset) {
+  return new DataView(data.buffer, data.byteOffset, data.byteLength).getInt32(
+    offset,
+    true
+  );
+}
+function parseHwpRecords(data) {
+  const records = [];
+  let offset = 0;
+  while (offset < data.length) {
+    const recordOffset = offset;
+    if (data.length - offset < 4) {
+      throw new Error(
+        `offset ${offset}: ${data.length - offset} trailing record byte(s)`
+      );
+    }
+    const header = readU32(data, offset);
+    const tag = header & 1023;
+    const level = header >>> 10 & 1023;
+    let size = header >>> 20 & 4095;
+    offset += 4;
+    if (size === 4095) {
+      if (data.length - offset < 4) {
+        throw new Error(`offset ${recordOffset}: missing extended record size`);
+      }
+      size = readU32(data, offset);
+      offset += 4;
+    }
+    if (size > data.length - offset) {
+      throw new Error(
+        `offset ${recordOffset}: record size ${size} exceeds ${data.length - offset} remaining byte(s)`
+      );
+    }
+    records.push({
+      tag,
+      level,
+      offset: recordOffset,
+      data: data.subarray(offset, offset + size)
+    });
+    offset += size;
+  }
+  return records;
+}
+function countTag(records, tag) {
+  return records.reduce(
+    (count, record) => count + (record.tag === tag ? 1 : 0),
+    0
+  );
+}
+function verifyIdMappings(records, errors) {
+  const mappings = records.filter((record) => record.tag === TAG_ID_MAPPINGS);
+  if (mappings.length !== 1) {
+    errors.push(`ID_MAPPINGS record count is ${mappings.length}, expected 1`);
+    return;
+  }
+  if (mappings[0].data.length < ID_MAPPING_COUNT * 4) {
+    errors.push(
+      `ID_MAPPINGS payload is ${mappings[0].data.length} bytes, expected at least ${ID_MAPPING_COUNT * 4}`
+    );
+    return;
+  }
+  const values = Array.from(
+    { length: ID_MAPPING_COUNT },
+    (_, index) => readI32(mappings[0].data, index * 4)
+  );
+  for (let index = 0; index < values.length; index++) {
+    if (values[index] < 0) {
+      errors.push(`ID_MAPPINGS[${index}] is negative (${values[index]})`);
+    }
+  }
+  const faceNameDeclared = values.slice(1, 8).reduce((sum, value) => sum + value, 0);
+  const faceNameActual = countTag(records, TAG_FACE_NAME2);
+  if (faceNameDeclared !== faceNameActual) {
+    errors.push(
+      `ID_MAPPINGS FACE_NAME total is ${faceNameDeclared}, actual record count is ${faceNameActual}`
+    );
+  }
+  const mappingIndexToTag = [
+    [0, TAG_BIN_DATA],
+    [8, TAG_BORDER_FILL2],
+    [9, TAG_CHAR_SHAPE2],
+    [10, TAG_TAB_DEF],
+    [11, TAG_NUMBERING2],
+    [12, TAG_BULLET2],
+    [13, TAG_PARA_SHAPE2],
+    [14, TAG_STYLE2],
+    [15, TAG_MEMO_SHAPE],
+    [16, TAG_TRACK_CHANGE],
+    [17, TAG_TRACK_CHANGE_AUTHOR]
+  ];
+  for (const [index, tag] of mappingIndexToTag) {
+    const actual = countTag(records, tag);
+    if (values[index] !== actual) {
+      errors.push(
+        `ID_MAPPINGS[${index}] is ${values[index]}, tag ${tag} record count is ${actual}`
+      );
+    }
+  }
+}
+function directChildren(records, parentIndex) {
+  const parentLevel = records[parentIndex].level;
+  const children = [];
+  for (let index = parentIndex + 1; index < records.length; index++) {
+    const record = records[index];
+    if (record.level <= parentLevel) break;
+    if (record.level === parentLevel + 1) children.push(record);
+  }
+  return children;
+}
+function verifyHwpRecordStreams(docInfoRaw, sectionRaw) {
+  const errors = [];
+  let docInfoRecords = [];
+  let bodyRecords = [];
+  try {
+    docInfoRecords = parseHwpRecords(docInfoRaw);
+  } catch (error) {
+    errors.push(
+      `DocInfo record framing: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  try {
+    bodyRecords = parseHwpRecords(sectionRaw);
+  } catch (error) {
+    errors.push(
+      `Section0 record framing: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  const charShapeCount = countTag(docInfoRecords, TAG_CHAR_SHAPE2);
+  const paraShapeCount = countTag(docInfoRecords, TAG_PARA_SHAPE2);
+  const styleCount = countTag(docInfoRecords, TAG_STYLE2);
+  const borderFillCount = countTag(docInfoRecords, TAG_BORDER_FILL2);
+  let maxCharShapeId = -1;
+  let paragraphCount = 0;
+  if (docInfoRecords.length > 0) verifyIdMappings(docInfoRecords, errors);
+  for (let index = 0; index < bodyRecords.length; index++) {
+    const header = bodyRecords[index];
+    if (header.tag !== TAG_PARA_HEADER2) continue;
+    paragraphCount++;
+    if (header.data.length < PARA_HEADER_SIZE) {
+      errors.push(
+        `PARA_HEADER at offset ${header.offset} is ${header.data.length} bytes, expected at least ${PARA_HEADER_SIZE}`
+      );
+      continue;
+    }
+    const rawCharCount = readU32(header.data, 0);
+    const nChars = rawCharCount & 2147483647;
+    const paraShapeId = readU16(header.data, 8);
+    const styleId = header.data[10];
+    const csCount = readU16(header.data, 12);
+    const lineAlignCount = readU16(header.data, 16);
+    const label = `PARA_HEADER at offset ${header.offset}`;
+    if ((rawCharCount & 2147483648) === 0) {
+      errors.push(`${label} has no 0x80000000 character-count bit`);
+    }
+    if (paraShapeId >= paraShapeCount) {
+      errors.push(
+        `${label} references paraShapeId ${paraShapeId}, but only ${paraShapeCount} PARA_SHAPE record(s) exist`
+      );
+    }
+    if (styleId >= styleCount) {
+      errors.push(
+        `${label} references styleId ${styleId}, but only ${styleCount} STYLE record(s) exist`
+      );
+    }
+    const children = directChildren(bodyRecords, index);
+    const paraTexts = children.filter((record) => record.tag === TAG_PARA_TEXT2);
+    const charShapeRanges = children.filter(
+      (record) => record.tag === TAG_PARA_CHAR_SHAPE2
+    );
+    const lineSegs = children.filter(
+      (record) => record.tag === TAG_PARA_LINE_SEG
+    );
+    let textBytes = 0;
+    for (const record of paraTexts) {
+      if (record.data.length % 2 !== 0) {
+        errors.push(
+          `${label} has an odd-sized PARA_TEXT payload (${record.data.length} bytes)`
+        );
+      }
+      textBytes += record.data.length;
+    }
+    if (nChars !== textBytes / 2) {
+      errors.push(
+        `${label} declares nChars ${nChars}, but direct PARA_TEXT payloads contain ${textBytes / 2} UTF-16 code unit(s)`
+      );
+    }
+    let actualCsCount = 0;
+    for (const record of charShapeRanges) {
+      if (record.data.length % CHAR_SHAPE_RANGE_SIZE !== 0) {
+        errors.push(
+          `${label} has a PARA_CHAR_SHAPE payload of ${record.data.length} bytes, not a multiple of ${CHAR_SHAPE_RANGE_SIZE}`
+        );
+        continue;
+      }
+      actualCsCount += record.data.length / CHAR_SHAPE_RANGE_SIZE;
+      for (let offset = 0; offset < record.data.length; offset += CHAR_SHAPE_RANGE_SIZE) {
+        const charShapeId = readU32(record.data, offset + 4);
+        maxCharShapeId = Math.max(maxCharShapeId, charShapeId);
+        if (charShapeId >= charShapeCount) {
+          errors.push(
+            `${label} references charShapeId ${charShapeId}, but only ${charShapeCount} CHAR_SHAPE record(s) exist`
+          );
+        }
+      }
+    }
+    if (csCount !== actualCsCount) {
+      errors.push(
+        `${label} declares csCount ${csCount}, but has ${actualCsCount} PARA_CHAR_SHAPE range(s)`
+      );
+    }
+    let actualLineAlignCount = 0;
+    for (const record of lineSegs) {
+      if (record.data.length % LINE_SEG_SIZE !== 0) {
+        errors.push(
+          `${label} has a PARA_LINE_SEG payload of ${record.data.length} bytes, not a multiple of ${LINE_SEG_SIZE}`
+        );
+        continue;
+      }
+      actualLineAlignCount += record.data.length / LINE_SEG_SIZE;
+    }
+    if (lineAlignCount !== actualLineAlignCount) {
+      errors.push(
+        `${label} declares lineAlignCount ${lineAlignCount}, but has ${actualLineAlignCount} LINE_SEG item(s)`
+      );
+    }
+  }
+  for (const record of bodyRecords) {
+    let borderFillId;
+    if (record.tag === TAG_PAGE_BORDER_FILL) {
+      if (record.data.length < 14) {
+        errors.push(
+          `PAGE_BORDER_FILL at offset ${record.offset} is ${record.data.length} bytes, expected at least 14`
+        );
+        continue;
+      }
+      borderFillId = readU16(record.data, 12);
+    } else if (record.tag === TAG_LIST_HEADER2 && record.data.length === CELL_LIST_HEADER_SIZE) {
+      borderFillId = readU16(record.data, 32);
+    }
+    if (borderFillId !== void 0 && borderFillId > borderFillCount) {
+      errors.push(
+        `record tag ${record.tag} at offset ${record.offset} references borderFillId ${borderFillId}, but only ${borderFillCount} BORDER_FILL record(s) exist`
+      );
+    }
+  }
+  return {
+    ok: errors.length === 0,
+    errors,
+    stats: {
+      charShapeCount,
+      maxCharShapeId,
+      paraShapeCount,
+      styleCount,
+      borderFillCount,
+      paragraphCount
+    }
+  };
+}
+
+// src/encoders/hwp/HwpEncoder.ts
 var T = 16;
 var TAG_DOCUMENT_PROPERTIES = T + 0;
-var TAG_ID_MAPPINGS = T + 1;
-var TAG_BIN_DATA = T + 2;
-var TAG_FACE_NAME2 = T + 3;
-var TAG_BORDER_FILL2 = T + 4;
-var TAG_CHAR_SHAPE2 = T + 5;
-var TAG_TAB_DEF = T + 6;
-var TAG_NUMBERING2 = T + 7;
-var TAG_BULLET2 = T + 8;
-var TAG_PARA_SHAPE2 = T + 9;
-var TAG_STYLE2 = T + 10;
+var TAG_ID_MAPPINGS2 = T + 1;
+var TAG_BIN_DATA2 = T + 2;
+var TAG_FACE_NAME3 = T + 3;
+var TAG_BORDER_FILL3 = T + 4;
+var TAG_CHAR_SHAPE3 = T + 5;
+var TAG_TAB_DEF2 = T + 6;
+var TAG_NUMBERING3 = T + 7;
+var TAG_BULLET3 = T + 8;
+var TAG_PARA_SHAPE3 = T + 9;
+var TAG_STYLE3 = T + 10;
 var TAG_DOC_DATA = T + 11;
 var TAG_COMPATIBLE_DOCUMENT = T + 14;
 var TAG_LAYOUT_COMPATIBILITY = T + 15;
-var TAG_PARA_HEADER2 = T + 50;
-var TAG_PARA_TEXT2 = T + 51;
-var TAG_PARA_CHAR_SHAPE2 = T + 52;
-var TAG_PARA_LINE_SEG = T + 53;
+var TAG_PARA_HEADER3 = T + 50;
+var TAG_PARA_TEXT3 = T + 51;
+var TAG_PARA_CHAR_SHAPE3 = T + 52;
+var TAG_PARA_LINE_SEG2 = T + 53;
 var TAG_CTRL_HEADER2 = T + 55;
-var TAG_LIST_HEADER2 = T + 56;
+var TAG_LIST_HEADER3 = T + 56;
 var TAG_PAGE_DEF2 = T + 57;
 var TAG_FOOTNOTE_SHAPE = T + 58;
-var TAG_PAGE_BORDER_FILL = T + 59;
+var TAG_PAGE_BORDER_FILL2 = T + 59;
 var TAG_SHAPE_COMPONENT = T + 60;
 var TAG_TABLE = T + 61;
 var TAG_SHAPE_COMPONENT_PICTURE2 = T + 69;
@@ -8144,14 +8443,19 @@ function bfKey(s, bg) {
 function bfPerSideKey(l, r, t, b, bg) {
   return `${bfKey(l)}/${bfKey(r)}/${bfKey(t)}/${bfKey(b)}/${bg ?? ""}`;
 }
+function collectInlineCharShapes(kids, bank) {
+  for (const kid of kids ?? []) {
+    if (!kid || typeof kid !== "object") continue;
+    if (kid.tag === "span") bank.addCharShape(kid.props);
+    if (Array.isArray(kid.kids)) collectInlineCharShapes(kid.kids, bank);
+  }
+}
 function collectNode(node, bank) {
   if (node.tag === "para") {
     const paraShapeId = bank.addParaShape(node.props);
     bank.registerStyleId(hwpStyleIdForPara(node.props), paraShapeId);
     bank.registerList(node.props);
-    for (const kid of node.kids) {
-      if (kid.tag === "span") bank.addCharShape(kid.props);
-    }
+    collectInlineCharShapes(node.kids, bank);
   } else if (node.tag === "grid") {
     if (node.props.defaultStroke) bank.addBorderFill(node.props.defaultStroke);
     for (const row of node.kids) {
@@ -8387,19 +8691,19 @@ function mkBinData(id, ext) {
 function buildDocInfoStream(bank, images = []) {
   const chunks = [];
   chunks.push(mkRec(TAG_DOCUMENT_PROPERTIES, 0, mkDocumentProperties()));
-  chunks.push(mkRec(TAG_ID_MAPPINGS, 0, mkIdMappings(bank, images.length)));
+  chunks.push(mkRec(TAG_ID_MAPPINGS2, 0, mkIdMappings(bank, images.length)));
   for (const img of images) {
-    chunks.push(mkRec(TAG_BIN_DATA, 1, mkBinData(img.id, img.ext)));
+    chunks.push(mkRec(TAG_BIN_DATA2, 1, mkBinData(img.id, img.ext)));
   }
   for (const lang of LANG_GROUPS2) {
     for (const face of bank.getFontsForLang(lang)) {
-      chunks.push(mkRec(TAG_FACE_NAME2, 1, mkFaceName(face)));
+      chunks.push(mkRec(TAG_FACE_NAME3, 1, mkFaceName(face)));
     }
   }
   for (const entry of bank.bfData) {
     chunks.push(
       mkRec(
-        TAG_BORDER_FILL2,
+        TAG_BORDER_FILL3,
         1,
         entry.uniform ? mkBorderFill(entry.s, entry.bg) : mkBorderFillPerSide(entry.l, entry.r, entry.t, entry.b, entry.bg)
       )
@@ -8407,24 +8711,24 @@ function buildDocInfoStream(bank, images = []) {
   }
   for (let i = 0; i < bank.csProps.length; i++) {
     chunks.push(
-      mkRec(TAG_CHAR_SHAPE2, 1, mkCharShape(bank.csFontIds[i], bank.csProps[i]))
+      mkRec(TAG_CHAR_SHAPE3, 1, mkCharShape(bank.csFontIds[i], bank.csProps[i]))
     );
   }
-  chunks.push(mkRec(TAG_TAB_DEF, 1, mkTabDef()));
+  chunks.push(mkRec(TAG_TAB_DEF2, 1, mkTabDef()));
   if (bank.getNumberingCount() > 0) {
-    chunks.push(mkRec(TAG_NUMBERING2, 1, mkNumbering()));
+    chunks.push(mkRec(TAG_NUMBERING3, 1, mkNumbering()));
   }
   if (bank.getBulletCount() > 0) {
-    chunks.push(mkRec(TAG_BULLET2, 1, mkBullet()));
+    chunks.push(mkRec(TAG_BULLET3, 1, mkBullet()));
   }
   for (const p of bank.psProps) {
-    chunks.push(mkRec(TAG_PARA_SHAPE2, 1, mkParaShape(p)));
+    chunks.push(mkRec(TAG_PARA_SHAPE3, 1, mkParaShape(p)));
   }
   for (let i = 0; i < bank.getStyleCount(); i++) {
     const [name, engName] = styleNameForId(i);
     chunks.push(
       mkRec(
-        TAG_STYLE2,
+        TAG_STYLE3,
         1,
         mkStyle(
           name,
@@ -8767,14 +9071,14 @@ function encodePicPara(imgNode, binDataId, bank, lv, idGen, availWidthHwp, divid
   const psId = bank.addParaShape({});
   return [
     mkRec(
-      TAG_PARA_HEADER2,
+      TAG_PARA_HEADER3,
       lv,
       mkParaHeader(9, CTRL_MASK, psId, 1, 1, instanceId, 0, divideSort)
     ),
-    mkRec(TAG_PARA_TEXT2, lv + 1, mkPicParaText()),
-    mkRec(TAG_PARA_CHAR_SHAPE2, lv + 1, mkParaCharShape([[0, 0]])),
+    mkRec(TAG_PARA_TEXT3, lv + 1, mkPicParaText()),
+    mkRec(TAG_PARA_CHAR_SHAPE3, lv + 1, mkParaCharShape([[0, 0]])),
     mkRec(
-      TAG_PARA_LINE_SEG,
+      TAG_PARA_LINE_SEG2,
       lv + 1,
       buildObjectLineSeg(availWidthHwp, hHwp, vertPos)
     ),
@@ -8865,7 +9169,7 @@ function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPo
   );
   return [
     mkRec(
-      TAG_PARA_HEADER2,
+      TAG_PARA_HEADER3,
       lv,
       mkParaHeader(
         nchars,
@@ -8878,10 +9182,10 @@ function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPo
         effectiveDivideSort
       )
     ),
-    mkRec(TAG_PARA_TEXT2, lv + 1, paraTextData),
-    mkRec(TAG_PARA_CHAR_SHAPE2, lv + 1, mkParaCharShape(effectiveCsPairs)),
+    mkRec(TAG_PARA_TEXT3, lv + 1, paraTextData),
+    mkRec(TAG_PARA_CHAR_SHAPE3, lv + 1, mkParaCharShape(effectiveCsPairs)),
     mkRec(
-      TAG_PARA_LINE_SEG,
+      TAG_PARA_LINE_SEG2,
       lv + 1,
       lineSegs.data
     ),
@@ -9031,7 +9335,7 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
       }, 0);
       records.push(
         mkRec(
-          TAG_LIST_HEADER2,
+          TAG_LIST_HEADER3,
           lv + 1,
           mkCellListHeader(
             Math.max(1, encodedCellParagraphs),
@@ -9057,18 +9361,18 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
           const nestedGridHeight = minGridHeightHwp(kid);
           records.push(
             mkRec(
-              TAG_PARA_HEADER2,
+              TAG_PARA_HEADER3,
               lv + 1,
               mkParaHeader(9, TABLE_CTRL_MASK, 0, 1, 1, idGen())
             )
           );
-          records.push(mkRec(TAG_PARA_TEXT2, lv + 2, mkTableParaText()));
+          records.push(mkRec(TAG_PARA_TEXT3, lv + 2, mkTableParaText()));
           records.push(
-            mkRec(TAG_PARA_CHAR_SHAPE2, lv + 2, mkParaCharShape([[0, 0]]))
+            mkRec(TAG_PARA_CHAR_SHAPE3, lv + 2, mkParaCharShape([[0, 0]]))
           );
           records.push(
             mkRec(
-              TAG_PARA_LINE_SEG,
+              TAG_PARA_LINE_SEG2,
               lv + 2,
               buildObjectLineSeg(cellWidthHwp, nestedGridHeight, cellVertPos)
             )
@@ -9133,9 +9437,9 @@ function buildSectionControlRecords(dims, level) {
     mkRec(TAG_PAGE_DEF2, level + 1, mkPageDef(dims)),
     mkRec(TAG_FOOTNOTE_SHAPE, level + 1, new Uint8Array(28)),
     mkRec(TAG_FOOTNOTE_SHAPE, level + 1, new Uint8Array(28)),
-    mkRec(TAG_PAGE_BORDER_FILL, level + 1, mkPageBorderFill()),
-    mkRec(TAG_PAGE_BORDER_FILL, level + 1, mkPageBorderFill()),
-    mkRec(TAG_PAGE_BORDER_FILL, level + 1, mkPageBorderFill()),
+    mkRec(TAG_PAGE_BORDER_FILL2, level + 1, mkPageBorderFill()),
+    mkRec(TAG_PAGE_BORDER_FILL2, level + 1, mkPageBorderFill()),
+    mkRec(TAG_PAGE_BORDER_FILL2, level + 1, mkPageBorderFill()),
     mkRec(TAG_CTRL_HEADER2, level, mkColumnDefCtrl())
   ];
 }
@@ -9148,18 +9452,18 @@ function buildSectionParagraph(dims, instanceId) {
   );
   return [
     mkRec(
-      TAG_PARA_HEADER2,
+      TAG_PARA_HEADER3,
       0,
-      mkParaHeader(nchars, SECD_CTRL_MASK, 0, 1, 1, instanceId)
+      mkParaHeader(nchars, SECD_CTRL_MASK, 0, 2, 1, instanceId)
     ),
     mkRec(
-      TAG_PARA_TEXT2,
+      TAG_PARA_TEXT3,
       1,
       new BufWriter().bytes(mkSectionAndColumnParaTextPrefix()).bytes(mkParaText(" ")).build()
     ),
-    mkRec(TAG_PARA_CHAR_SHAPE2, 1, mkParaCharShape([[0, 0], [16, 0]])),
+    mkRec(TAG_PARA_CHAR_SHAPE3, 1, mkParaCharShape([[0, 0], [16, 0]])),
     mkRec(
-      TAG_PARA_LINE_SEG,
+      TAG_PARA_LINE_SEG2,
       1,
       buildDefaultLineSeg(availWidthHwp, 1e3, nchars)
     ),
@@ -9249,16 +9553,16 @@ function buildBodyTextStream(doc, bank, images) {
           if (vertPos > 0 && vertPos + gridHeight > bodyHeightHwp) vertPos = 0;
           chunks.push(
             mkRec(
-              TAG_PARA_HEADER2,
+              TAG_PARA_HEADER3,
               0,
               mkParaHeader(9, TABLE_CTRL_MASK | paraMask, 0, 1, 1, idGen(), 0, paraDivideSort)
             )
           );
-          chunks.push(mkRec(TAG_PARA_TEXT2, 1, mkTableParaText()));
-          chunks.push(mkRec(TAG_PARA_CHAR_SHAPE2, 1, mkParaCharShape([[0, 0]])));
+          chunks.push(mkRec(TAG_PARA_TEXT3, 1, mkTableParaText()));
+          chunks.push(mkRec(TAG_PARA_CHAR_SHAPE3, 1, mkParaCharShape([[0, 0]])));
           chunks.push(
             mkRec(
-              TAG_PARA_LINE_SEG,
+              TAG_PARA_LINE_SEG2,
               1,
               buildObjectLineSeg(availWidthHwp, gridHeight, vertPos)
             )
@@ -9325,7 +9629,7 @@ function buildBodyTextStream(doc, bank, images) {
               void 0,
               bodyHeightHwp
             )) {
-              if (r[0] === (TAG_PARA_HEADER2 & 255)) {
+              if (r[0] === (TAG_PARA_HEADER3 & 255)) {
               }
               chunks.push(r);
             }
@@ -9367,16 +9671,16 @@ function buildBodyTextStream(doc, bank, images) {
         if (vertPos > 0 && vertPos + gridHeight > bodyHeightHwp) vertPos = 0;
         chunks.push(
           mkRec(
-            TAG_PARA_HEADER2,
+            TAG_PARA_HEADER3,
             0,
             mkParaHeader(9, TABLE_CTRL_MASK, 0, 1, 1, idGen())
           )
         );
-        chunks.push(mkRec(TAG_PARA_TEXT2, 1, mkTableParaText()));
-        chunks.push(mkRec(TAG_PARA_CHAR_SHAPE2, 1, mkParaCharShape([[0, 0]])));
+        chunks.push(mkRec(TAG_PARA_TEXT3, 1, mkTableParaText()));
+        chunks.push(mkRec(TAG_PARA_CHAR_SHAPE3, 1, mkParaCharShape([[0, 0]])));
         chunks.push(
           mkRec(
-            TAG_PARA_LINE_SEG,
+            TAG_PARA_LINE_SEG2,
             1,
             buildObjectLineSeg(availWidthHwp, gridHeight, vertPos)
           )
@@ -9948,8 +10252,14 @@ var HwpEncoder = class extends BaseEncoder {
       for (const sheet of doc.kids) {
         for (const node of sheet.kids) collectImages3(node);
       }
-      const docInfoRaw = buildDocInfoStream(bank, images);
       const bodyRaw = buildBodyTextStream(doc, bank, images);
+      const docInfoRaw = buildDocInfoStream(bank, images);
+      const verification = verifyHwpRecordStreams(docInfoRaw, bodyRaw);
+      if (!verification.ok) {
+        return fail(
+          `HwpEncoder: \uB808\uCF54\uB4DC \uCC38\uC870 \uBB34\uACB0\uC131 \uC624\uB958 - ${verification.errors.join("; ")}`
+        );
+      }
       const docInfoCmp = pako3.deflateRaw(docInfoRaw);
       const bodyCmp = pako3.deflateRaw(bodyRaw);
       const fileHdr = buildHwpFileHeader();
