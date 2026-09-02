@@ -709,13 +709,10 @@ function encodeParaInner(
   if (firstPt < 0) {
     const hangingDxa = Math.round(Metric.ptToDxa(-firstPt));
     if (hangingDxa > 0) {
-      const baseLeftDxa = Math.max(0, leftDxa);
-      leftDxa = baseLeftDxa + hangingDxa;
-      if (baseLeftDxa <= 0 || hangingDxa > baseLeftDxa) {
-        ctx.warns.push(
-          `[DocxEncoder] w:hanging=${hangingDxa} exceeds w:left=${baseLeftDxa}`,
-        );
-      }
+      // w:hanging 은 w:left 기준에서 첫 줄을 왼쪽으로 당기는 값이므로
+      // 본문 왼쪽 여백에 hanging 폭을 더해 방출한다. 이 보정 덕분에
+      // 방출된 w:left 는 항상 w:hanging 이상이며 위반은 발생하지 않는다.
+      leftDxa = Math.max(0, leftDxa) + hangingDxa;
       indParts.push(`w:hanging="${hangingDxa}"`);
     }
   }

@@ -2104,7 +2104,8 @@ function parseNumbering(d) {
 }
 function parseBullet(d) {
   if (d.length < 10) throw new Error("truncated BULLET record");
-  return { character: String.fromCharCode(BinaryKit.readU16LE(d, 8)) };
+  const characterOffset = d.length >= 23 ? 12 : 8;
+  return { character: String.fromCharCode(BinaryKit.readU16LE(d, characterOffset)) };
 }
 function parseCharShape(d) {
   const faceIds = [];
@@ -6993,13 +6994,7 @@ function encodeParaInner(para, ctx, maxWidthPt) {
   if (firstPt < 0) {
     const hangingDxa = Math.round(Metric.ptToDxa(-firstPt));
     if (hangingDxa > 0) {
-      const baseLeftDxa = Math.max(0, leftDxa);
-      leftDxa = baseLeftDxa + hangingDxa;
-      if (baseLeftDxa <= 0 || hangingDxa > baseLeftDxa) {
-        ctx.warns.push(
-          `[DocxEncoder] w:hanging=${hangingDxa} exceeds w:left=${baseLeftDxa}`
-        );
-      }
+      leftDxa = Math.max(0, leftDxa) + hangingDxa;
       indParts.push(`w:hanging="${hangingDxa}"`);
     }
   }
@@ -7890,11 +7885,15 @@ var TAG_PARA_CHAR_SHAPE2 = HWPTAG_BEGIN2 + 52;
 var TAG_PARA_LINE_SEG = HWPTAG_BEGIN2 + 53;
 var TAG_LIST_HEADER2 = HWPTAG_BEGIN2 + 56;
 var TAG_PAGE_BORDER_FILL = HWPTAG_BEGIN2 + 59;
+var TAG_TABLE = HWPTAG_BEGIN2 + 61;
 var ID_MAPPING_COUNT = 18;
 var PARA_HEADER_SIZE = 24;
+var PARA_SHAPE_BORDER_FILL_OFFSET = 32;
+var CHAR_SHAPE_BORDER_FILL_OFFSET = 68;
 var CHAR_SHAPE_RANGE_SIZE = 8;
 var LINE_SEG_SIZE = 36;
 var CELL_LIST_HEADER_SIZE = 47;
+var BULLET_RECORD_MIN_SIZE = 23;
 function readU16(data, offset) {
   return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint16(
     offset,
@@ -7955,6 +7954,13 @@ function countTag(records, tag) {
     (count, record) => count + (record.tag === tag ? 1 : 0),
     0
   );
+}
+function verifyBorderFillId(borderFillId, borderFillCount, label, errors) {
+  if (borderFillId < 1 || borderFillId > borderFillCount) {
+    errors.push(
+      `${label} references borderFillId ${borderFillId}, but valid BorderFill IDs are 1..${borderFillCount}`
+    );
+  }
 }
 function verifyIdMappings(records, errors) {
   const mappings = records.filter((record) => record.tag === TAG_ID_MAPPINGS);
@@ -8035,12 +8041,61 @@ function verifyHwpRecordStreams(docInfoRaw, sectionRaw) {
     );
   }
   const charShapeCount = countTag(docInfoRecords, TAG_CHAR_SHAPE2);
+  const binDataCount = countTag(docInfoRecords, TAG_BIN_DATA);
   const paraShapeCount = countTag(docInfoRecords, TAG_PARA_SHAPE2);
   const styleCount = countTag(docInfoRecords, TAG_STYLE2);
   const borderFillCount = countTag(docInfoRecords, TAG_BORDER_FILL2);
   let maxCharShapeId = -1;
   let paragraphCount = 0;
   if (docInfoRecords.length > 0) verifyIdMappings(docInfoRecords, errors);
+  for (const record of docInfoRecords) {
+    if (record.tag === TAG_PARA_SHAPE2) {
+      if (record.data.length < PARA_SHAPE_BORDER_FILL_OFFSET + 2) {
+        errors.push(
+          `PARA_SHAPE at offset ${record.offset} is ${record.data.length} bytes, expected at least ${PARA_SHAPE_BORDER_FILL_OFFSET + 2}`
+        );
+        continue;
+      }
+      verifyBorderFillId(
+        readU16(record.data, PARA_SHAPE_BORDER_FILL_OFFSET),
+        borderFillCount,
+        `PARA_SHAPE at offset ${record.offset}`,
+        errors
+      );
+    } else if (record.tag === TAG_CHAR_SHAPE2) {
+      if (record.data.length < CHAR_SHAPE_BORDER_FILL_OFFSET + 2) {
+        errors.push(
+          `CHAR_SHAPE at offset ${record.offset} is ${record.data.length} bytes, expected at least ${CHAR_SHAPE_BORDER_FILL_OFFSET + 2}`
+        );
+        continue;
+      }
+      verifyBorderFillId(
+        readU16(record.data, CHAR_SHAPE_BORDER_FILL_OFFSET),
+        borderFillCount,
+        `CHAR_SHAPE at offset ${record.offset}`,
+        errors
+      );
+    } else if (record.tag === TAG_BULLET2) {
+      if (record.data.length < BULLET_RECORD_MIN_SIZE) {
+        errors.push(
+          `BULLET at offset ${record.offset} is ${record.data.length} bytes, expected at least ${BULLET_RECORD_MIN_SIZE}`
+        );
+        continue;
+      }
+      const charShapeId = readU32(record.data, 8);
+      if (charShapeId !== 4294967295 && charShapeId >= charShapeCount) {
+        errors.push(
+          `BULLET at offset ${record.offset} references charShapeId ${charShapeId}, but only ${charShapeCount} CHAR_SHAPE record(s) exist`
+        );
+      }
+      const imageBinDataId = readU16(record.data, 21);
+      if (imageBinDataId > binDataCount) {
+        errors.push(
+          `BULLET at offset ${record.offset} references BinData ID ${imageBinDataId}, but only ${binDataCount} BIN_DATA record(s) exist`
+        );
+      }
+    }
+  }
   for (let index = 0; index < bodyRecords.length; index++) {
     const header = bodyRecords[index];
     if (header.tag !== TAG_PARA_HEADER2) continue;
@@ -8145,10 +8200,29 @@ function verifyHwpRecordStreams(docInfoRaw, sectionRaw) {
       borderFillId = readU16(record.data, 12);
     } else if (record.tag === TAG_LIST_HEADER2 && record.data.length === CELL_LIST_HEADER_SIZE) {
       borderFillId = readU16(record.data, 32);
+    } else if (record.tag === TAG_TABLE) {
+      if (record.data.length < 6) {
+        errors.push(
+          `TABLE at offset ${record.offset} is ${record.data.length} bytes, expected at least 6`
+        );
+        continue;
+      }
+      const rowCount = readU16(record.data, 4);
+      const borderFillOffset = 18 + rowCount * 2;
+      if (record.data.length < borderFillOffset + 2) {
+        errors.push(
+          `TABLE at offset ${record.offset} is ${record.data.length} bytes, expected borderFillId at offset ${borderFillOffset}`
+        );
+        continue;
+      }
+      borderFillId = readU16(record.data, borderFillOffset);
     }
-    if (borderFillId !== void 0 && borderFillId > borderFillCount) {
-      errors.push(
-        `record tag ${record.tag} at offset ${record.offset} references borderFillId ${borderFillId}, but only ${borderFillCount} BORDER_FILL record(s) exist`
+    if (borderFillId !== void 0) {
+      verifyBorderFillId(
+        borderFillId,
+        borderFillCount,
+        `record tag ${record.tag} at offset ${record.offset}`,
+        errors
       );
     }
   }
@@ -8192,15 +8266,13 @@ var TAG_PAGE_DEF2 = T + 57;
 var TAG_FOOTNOTE_SHAPE = T + 58;
 var TAG_PAGE_BORDER_FILL2 = T + 59;
 var TAG_SHAPE_COMPONENT = T + 60;
-var TAG_TABLE = T + 61;
+var TAG_TABLE2 = T + 61;
 var TAG_SHAPE_COMPONENT_PICTURE2 = T + 69;
 var CTRL_TABLE2 = 1952607264;
 var CTRL_SECD2 = 1936024420;
 var CTRL_COLD = 1668246628;
 var CTRL_GSO2 = 1735618336;
 var CTRL_PIC2 = 611346787;
-var CTRL_FIELD_BEGIN = 1684825637;
-var CTRL_FIELD_END = 1684825692;
 var TABLE_CTRL_MASK = 1 << 11;
 var BORDER_W_PT2 = [
   0.28,
@@ -8599,7 +8671,7 @@ function mkNumbering() {
   return writer.build();
 }
 function mkBullet() {
-  return new BufWriter().u32(12).u16(0).u16(50).u16(8226).i32(0).u8(0).u8(0).u8(0).u8(0).u16(0).build();
+  return new BufWriter().u32(12).u16(0).u16(50).u32(4294967295).u16(8226).i32(0).u8(0).u8(0).u8(0).u16(0).u16(0).build();
 }
 var HWP_STYLE_NAMES = [
   ["\uBC14\uD0D5\uAE00", "Normal"],
@@ -8733,7 +8805,7 @@ function mkCharShape(fontIds, p) {
   w.colorRef("000000");
   w.colorRef(p.bg ?? "FFFFFF");
   w.colorRef("000000");
-  w.u16(0);
+  w.u16(1);
   w.colorRef("000000");
   return w.build();
 }
@@ -8753,7 +8825,7 @@ function mkParaShape(p) {
     Math.ceil(Metric.ptToHwp(10) * 1.15) * 2
   ) : Math.max(100, p.lineHeight ? Math.round(p.lineHeight * 100) : 160);
   const paraShapeUnit = (pt) => Metric.ptToHwp(pt) * 2;
-  return new BufWriter().u32(attr1).i32(paraShapeUnit(p.indentPt ?? 0)).i32(paraShapeUnit(p.indentRightPt ?? 0)).i32(paraShapeUnit(p.firstLineIndentPt ?? 0)).i32(paraShapeUnit(p.spaceBefore ?? 0)).i32(paraShapeUnit(p.spaceAfter ?? 0)).i32(lineSpaceValue).u16(0).u16(p.listOrd === void 0 ? 0 : 1).u16(0).i16(0).i16(0).i16(0).i16(0).u32(0).u32(lineSpacingType).u32(lineSpaceValue).u32(0).build();
+  return new BufWriter().u32(attr1).i32(paraShapeUnit(p.indentPt ?? 0)).i32(paraShapeUnit(p.indentRightPt ?? 0)).i32(paraShapeUnit(p.firstLineIndentPt ?? 0)).i32(paraShapeUnit(p.spaceBefore ?? 0)).i32(paraShapeUnit(p.spaceAfter ?? 0)).i32(lineSpaceValue).u16(0).u16(p.listOrd === void 0 ? 0 : 1).u16(1).i16(0).i16(0).i16(0).i16(0).u32(0).u32(lineSpacingType).u32(lineSpaceValue).u32(0).build();
 }
 function mkBinData(id, ext) {
   return new BufWriter().u16(33).u16(id).u16(ext.length).utf16(ext).build();
@@ -9124,12 +9196,6 @@ function mkObjectCtrl(ctrlId, wHwp, hHwp, instanceId, layout) {
   if (!layout || layout.wrap === "inline") attr |= 1 | 1 << 2;
   return new BufWriter().u32(ctrlId).u32(attr).i32(layout?.yPt ? Metric.ptToHwp(layout.yPt) : 0).i32(layout?.xPt ? Metric.ptToHwp(layout.xPt) : 0).u32(wHwp).u32(hHwp).i32(layout?.zOrder ?? 0).u16(layout?.distL ? Metric.ptToHwp(layout.distL) : 0).u16(layout?.distR ? Metric.ptToHwp(layout.distR) : 0).u16(layout?.distT ? Metric.ptToHwp(layout.distT) : 0).u16(layout?.distB ? Metric.ptToHwp(layout.distB) : 0).u32(instanceId).i32(0).u16(0).build();
 }
-function mkFieldBeginCtrl(instanceId) {
-  return new BufWriter().u32(CTRL_FIELD_BEGIN).u32(2).zeros(28).u32(instanceId).zeros(6).build();
-}
-function mkFieldEndCtrl(beginId) {
-  return new BufWriter().u32(CTRL_FIELD_END).u32(0).zeros(28).u32(beginId).zeros(6).build();
-}
 function encodePicPara(imgNode, binDataId, bank, lv, idGen, availWidthHwp, divideSort = 0, vertPos = 0, maxHeightHwp = Number.MAX_SAFE_INTEGER) {
   const { w: wHwp, h: hHwp } = imageDisplaySizeHwp(
     imgNode,
@@ -9174,9 +9240,6 @@ function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPo
   const csPairs = [];
   let pos = 0;
   const fontHwp = maxFontHwpInPara(para);
-  const ctrlRecords = [];
-  let localIdCounter = 1e4;
-  const localIdGen = () => localIdCounter++;
   function processKids(kids) {
     for (const kid of kids) {
       if (kid.tag === "span") {
@@ -9196,19 +9259,7 @@ function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPo
         }
       } else if (kid.tag === "link") {
         const link = kid;
-        mask |= 1 << 11;
-        const fieldBeginId = localIdGen();
-        text += String.fromCharCode(3);
-        pos += 1;
-        ctrlRecords.push(
-          mkRec(TAG_CTRL_HEADER2, lv + 1, mkFieldBeginCtrl(fieldBeginId))
-        );
         processKids(link.kids);
-        text += String.fromCharCode(4);
-        pos += 1;
-        ctrlRecords.push(
-          mkRec(TAG_CTRL_HEADER2, lv + 1, mkFieldEndCtrl(fieldBeginId))
-        );
       }
     }
   }
@@ -9259,8 +9310,7 @@ function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPo
       lv + 1,
       lineSegs.data
     ),
-    ...sectionRecords,
-    ...ctrlRecords
+    ...sectionRecords
   ];
 }
 function mkTableCtrl(wHwp, hHwp, instanceId, align = "left") {
@@ -9355,7 +9405,7 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
   );
   records.push(
     mkRec(
-      TAG_TABLE,
+      TAG_TABLE2,
       lv + 1,
       mkTableRecord(
         rowCnt,
