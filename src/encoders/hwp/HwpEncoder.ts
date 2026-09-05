@@ -987,10 +987,10 @@ function buildDocInfoStream(
 // ─── BodyText 레코드 빌더 ────────────────────────────────────
 
 function mkPageDef(dims: PageDims): Uint8Array {
-  const rawTopPt = dims.mt;
-  const rawBottomPt = dims.mb;
-  const rawHeaderPt = dims.headerPt ?? 0;
-  const rawFooterPt = dims.footerPt ?? 0;
+  const rawTopPt = Math.max(0, Math.min(dims.mt, dims.headerPt ?? dims.mt));
+  const rawBottomPt = Math.max(0, Math.min(dims.mb, dims.footerPt ?? dims.mb));
+  const rawHeaderPt = Math.max(0, dims.mt - rawTopPt);
+  const rawFooterPt = Math.max(0, dims.mb - rawBottomPt);
   return new BufWriter()
     .u32(Metric.ptToHwp(dims.wPt))
     .u32(Metric.ptToHwp(dims.hPt))

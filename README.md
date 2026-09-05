@@ -52,6 +52,21 @@ npm install hwpkit
 
 ## 사용법
 
+### 로컬 playground
+
+```bash
+npm run playground
+```
+
+playground는 `src/index.ts`를 직접 불러오므로 라이브러리 수정이 즉시 반영됩니다.
+입출력 형식 목록도 같은 라이브러리 레지스트리에서 가져옵니다.
+HWP/HWPX/DOCX 파일은 내용으로 자동 감지하며, Markdown/HTML은 직접 입력하거나 파일로 열 수 있습니다.
+HTML 조각을 직접 붙여 넣을 때는 입력 포맷을 HTML로 선택하세요.
+DocRoot 검사에서 들여쓰기·페이지 분리 속성, 구역별 용지·머리말·꼬리말을 확인할 수 있습니다.
+HTML 미리보기는 한컴의 실제 페이지 배치를 재현하는 렌더러가 아닙니다.
+
+`npm run playground:build`는 playground 타입 검사 후 `playground/dist`에 빌드합니다.
+
 ### Pipeline API (권장)
 
 ```typescript
@@ -266,3 +281,12 @@ npm run dev
 ## 라이선스
 
 이 프로젝트는 **LGPL-2.1** 라이선스를 따릅니다. 자세한 내용은 [`license.md`](./license.md)를 참고하세요.
+
+
+### PDF 외관 검증 상태
+
+한컴 원본 외관과 94% 이상 일치하는 상태는 아직 아닙니다.
+본문·머리말 여백과 빈 문단 높이를 보정했으며, 실제 PDF의 표 높이·줄 간격·글꼴·쪽 흐름에는 차이가 남아 있습니다.
+`PageDims.mt/mb`는 종이 가장자리에서 본문까지, `headerPt/footerPt`는 머리말/꼬리말까지의 거리(pt)입니다.
+HWP/HWPX 저장값은 코덱에서 합산·분리하므로 직접 모델을 만들 때 HWP의 바깥 여백만 넣지 않습니다.
+[PDF 비교 자료와 실제 측정 결과](../hwpkit_research/docs/pdf-layout-review-2026-09-05.md)를 참고하세요.

@@ -12,6 +12,33 @@ async function parts(bytes: Uint8Array) {
 }
 
 describe('Pagination and table style interoperability', () => {
+  it('preserves small and large empty HWP paragraphs and their DOCX paragraph marks', async () => {
+    for (const pt of [2, 24]) {
+      const document = buildRoot({}, [buildSheet([
+        buildPara([buildSpan('Before blank', { pt: 10 })]),
+        buildPara([buildSpan('', { font: '굴림체', pt })], { lineHeight: 1 }),
+        buildPara([buildSpan('After blank', { pt: 10 })]),
+      ])]);
+      const hwp = await new HwpEncoder().encode(document);
+      if (!hwp.ok) throw new Error(hwp.error);
+      const decoded = await Pipeline.open(hwp.data, 'hwp').inspect();
+      if (!decoded.ok) throw new Error(decoded.error);
+      const children = decoded.data.kids[0].kids;
+      const after = children.findIndex(p => JSON.stringify(p).includes('After blank'));
+      const first = children[after - 1];
+      expect(first.tag).toBe('para');
+      if (first.tag !== 'para') throw new Error('Expected empty paragraph');
+      const blankSpan = first.kids[0];
+      if (blankSpan.tag !== 'span') throw new Error('Expected empty span');
+      expect(blankSpan.props).toMatchObject({ font: '굴림체', pt });
+      const docx = await new DocxEncoder().encode(decoded.data);
+      if (!docx.ok) throw new Error(docx.error);
+      const xml = (await parts(docx.data)).xml;
+      const marks = [...xml.matchAll(/<w:pPr>([\s\S]*?)<\/w:pPr>/g)].map(m => m[1]);
+      expect(marks.some(mark => mark.includes(`<w:sz w:val="${pt * 2}"/>`))).toBe(true);
+    }
+  });
+
   it('defines every native style used in nested tables and emits one pStyle per list paragraph', async () => {
     const nested = buildGrid([buildRow([buildCell([buildPara([buildSpan('nested')], { hwpStyleId: 44, listOrd: true })])])]);
     const doc = buildRoot({}, [buildSheet([buildGrid([buildRow([buildCell([nested])])])])]);

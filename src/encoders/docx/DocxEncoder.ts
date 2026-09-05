@@ -8,7 +8,7 @@ import type {
   SheetNode,
 } from "../../model/doc-tree";
 import type { Outcome } from "../../contract/result";
-import type { PageDims, GridProps, CellProps, ImgLayout } from "../../model/doc-props";
+import type { PageDims, GridProps, CellProps, ImgLayout, TextProps } from "../../model/doc-props";
 import { A4, normalizeDims } from "../../model/doc-props";
 import { succeed, fail } from "../../contract/result";
 import { Metric } from "../../safety/StyleBridge";
@@ -776,6 +776,12 @@ function encodeParaInner(
     .map(([key, tag]) => para.props[key] ? `<w:${tag}/>` : `<w:${tag} w:val="0"/>`).join('');
   const omitEmptyLeftAlign = align === "left" && paraTextContent(para) === "";
   const jcXml = align && !omitEmptyLeftAlign ? `<w:jc w:val="${docxJcValue(align)}"/>` : "";
+  // Empty runs alone do not format the paragraph mark in Word/LibreOffice.
+  // Retain its character size so blank lines do not silently become 10 pt.
+  const blankSpan = paraTextContent(para) === "" && !paraHasNonTextContent(para)
+    ? para.kids.find((kid): kid is SpanNode => kid.tag === "span") : undefined;
+  const markProps = blankSpan ? encodeTextProperties(blankSpan.props) : [];
+  const markXml = markProps.length ? `<w:rPr>${markProps.join("")}</w:rPr>` : "";
 
   const runs = para.kids
     .map((k) => {
@@ -791,7 +797,7 @@ function encodeParaInner(
     .join("");
 
   return `    <w:p>
-      <w:pPr>${headStyle}${paginationXml}${numPr}${spacingXml}${indentXml}${cjkLineBreakXml}${jcXml}${sectionPrXml}</w:pPr>
+      <w:pPr>${headStyle}${paginationXml}${numPr}${spacingXml}${indentXml}${cjkLineBreakXml}${jcXml}${markXml}${sectionPrXml}</w:pPr>
       ${runs}
     </w:p>`;
 }
@@ -928,8 +934,7 @@ function cellHasVisibleContent(cell: any): boolean {
   return false;
 }
 
-function encodeRun(span: SpanNode, _ctx: EncCtx): string {
-  const p = span.props;
+function encodeTextProperties(p: TextProps): string[] {
   const rPr: string[] = [];
   if (p.b) rPr.push("<w:b/>");
   if (p.i) rPr.push("<w:i/>");
@@ -947,6 +952,11 @@ function encodeRun(span: SpanNode, _ctx: EncCtx): string {
       `<w:rFonts w:ascii="${esc(p.font)}" w:hAnsi="${esc(p.font)}" w:eastAsia="${esc(p.font)}" w:hint="eastAsia"/>`,
     );
   if (p.bg) rPr.push(`<w:shd w:val="clear" w:color="auto" w:fill="${p.bg}"/>`);
+  return rPr;
+}
+
+function encodeRun(span: SpanNode, _ctx: EncCtx): string {
+  const rPr = encodeTextProperties(span.props);
 
   // Process kids — text and pagenum
   const parts: string[] = [];

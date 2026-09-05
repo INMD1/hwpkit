@@ -1,4 +1,4 @@
-import { Pipeline } from 'hwpkit';
+import { Pipeline, registry } from 'hwpkit';
 import type { AnyNode, DocRoot } from 'hwpkit';
 
 // ─── DOM refs ───────────────────────────────────────────────
@@ -21,6 +21,17 @@ const outputInfo = document.getElementById('output-info')!;
 let rawBytes: Uint8Array | null = null;
 let currentTab: 'text' | 'html' | 'tree' = 'text';
 
+// Derive the choices from the same source registry used for conversion.
+function populateFormats(select: HTMLSelectElement, formats: string[]) {
+  const labels: Record<string, string> = { md: 'Markdown (md)', html: 'HTML' };
+  for (const format of [...new Set(formats)]) {
+    select.add(new Option(labels[format] ?? format.toUpperCase(), format));
+  }
+}
+populateFormats(srcFmtEl, registry.supportedInputs().map(fmt => registry.getDecoder(fmt)!.format));
+populateFormats(dstFmtEl, registry.supportedOutputs().map(fmt => registry.getEncoder(fmt)!.format));
+dstFmtEl.value = 'md';
+
 // ─── Demo 파일 로드 ──────────────────────────────────────────
 async function loadDemoFile(path: string, fmt: string, label: string) {
   setStatus(`${label} 로드 중...`, false);
@@ -31,6 +42,7 @@ async function loadDemoFile(path: string, fmt: string, label: string) {
     srcFmtEl.value = fmt;
     inputEl.value = `[데모 파일 로드됨: ${label} (${fmtBytes(rawBytes.length)})]`;
     inputEl.style.color = '#a78bfa';
+    clearOutput();
     updateInputInfo();
     setStatus(`${label} 로드 완료`, false);
   } catch (e: any) {
@@ -48,15 +60,25 @@ fileInput.addEventListener('change', async () => {
   const file = fileInput.files?.[0];
   if (!file) return;
 
-  rawBytes = new Uint8Array(await file.arrayBuffer());
-  const ext = file.name.split('.').pop()?.toLowerCase() ?? 'md';
-  const fmt = ext === 'hwpx' ? 'hwpx' : ext === 'docx' ? 'docx' : ext === 'hwp' ? 'hwp' : 'md';
-  srcFmtEl.value = fmt;
-
-  inputEl.value = `[파일 로드됨: ${file.name} (${fmtBytes(rawBytes.length)})]`;
-  inputEl.style.color = '#60a5fa';
-  updateInputInfo();
-  setStatus(`파일 로드: ${file.name}`, false);
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    // Text fragments need an explicit format; binary packages use content detection.
+    const textFormat = ext === 'html' || ext === 'htm' ? 'html'
+      : ext === 'md' || ext === 'txt' ? 'md' : undefined;
+    rawBytes = textFormat ? null : bytes;
+    srcFmtEl.value = textFormat ?? 'auto';
+    inputEl.value = textFormat ? new TextDecoder().decode(bytes)
+      : `[파일 로드됨: ${file.name} (${fmtBytes(bytes.length)})]`;
+    inputEl.style.color = textFormat ? '' : '#60a5fa';
+    clearOutput();
+    updateInputInfo();
+    setStatus(`파일 로드: ${file.name}`, false);
+  } catch (e: unknown) {
+    setStatus(`파일 로드 실패: ${e instanceof Error ? e.message : String(e)}`, true);
+  } finally {
+    fileInput.value = '';
+  }
 });
 
 inputEl.addEventListener('input', () => {
@@ -73,6 +95,8 @@ clearBtn.addEventListener('click', () => {
   inputEl.value = '';
   inputEl.style.color = '';
   rawBytes = null;
+  fileInput.value = '';
+  srcFmtEl.value = 'auto';
   clearOutput();
   statusEl.textContent = '초기화됨';
   statusEl.className = '';
@@ -88,10 +112,14 @@ function clearOutput() {
   warnBar.classList.remove('visible');
 }
 
-async function getInput(): Promise<{ data: Uint8Array | string; fmt: string }> {
-  const fmt = srcFmtEl.value;
+function getInput(): { data: Uint8Array | string; fmt?: string } {
+  const fmt = srcFmtEl.value === 'auto' ? undefined : srcFmtEl.value;
   if (rawBytes) return { data: rawBytes, fmt };
-  return { data: inputEl.value, fmt: 'md' };
+  if (fmt && !['md', 'html'].includes(fmt)) {
+    throw new Error(`${fmt.toUpperCase()} 입력은 파일을 업로드하세요.`);
+  }
+  // Pipeline keeps string inputs as Markdown by default; bytes enable auto detection.
+  return { data: fmt ? inputEl.value : new TextEncoder().encode(inputEl.value), fmt };
 }
 
 async function runConvert() {
@@ -100,14 +128,10 @@ async function runConvert() {
   clearOutput();
 
   try {
-    const { data, fmt } = await getInput();
-    const srcFmt = rawBytes ? fmt : 'md';
+    const { data, fmt } = getInput();
     const dstFmt = dstFmtEl.value;
 
-    const pipeline = await Pipeline.openAsync(
-      typeof data === 'string' ? data : data,
-      srcFmt,
-    );
+    const pipeline = await Pipeline.openAsync(data, fmt);
 
     const result = await pipeline.to(dstFmt);
     const ms = (performance.now() - t0).toFixed(1);
@@ -130,7 +154,7 @@ async function runConvert() {
       showText(new TextDecoder().decode(result.data));
     } else {
       // Binary format: offer download
-      const blob = new Blob([result.data]);
+      const blob = new Blob([new Uint8Array(result.data)]);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -140,7 +164,7 @@ async function runConvert() {
       showText(`[${dstFmt.toUpperCase()} 파일 다운로드 완료]\n크기: ${fmtBytes(result.data.length)}\n\n다시 다운로드하려면 '변환 실행'을 눌러주세요.`);
     }
 
-    setStatus(`변환 완료 (${srcFmt} → ${dstFmt})`, false);
+    setStatus(`변환 완료 (${fmt ?? '자동 감지'} → ${dstFmt})`, false);
     timingEl.textContent = `${ms}ms`;
   } catch (e: any) {
     const ms = (performance.now() - t0).toFixed(1);
@@ -156,13 +180,9 @@ async function runInspect() {
   clearOutput();
 
   try {
-    const { data, fmt } = await getInput();
-    const srcFmt = rawBytes ? fmt : 'md';
+    const { data, fmt } = getInput();
 
-    const pipeline = await Pipeline.openAsync(
-      typeof data === 'string' ? data : data,
-      srcFmt,
-    );
+    const pipeline = await Pipeline.openAsync(data, fmt);
 
     const result = await pipeline.inspect();
     const ms = (performance.now() - t0).toFixed(1);
@@ -191,7 +211,8 @@ async function runInspect() {
 // ─── 트리 렌더링 ──────────────────────────────────────────────
 function renderTree(root: DocRoot) {
   outputTree.innerHTML = '';
-  outputTree.appendChild(buildTreeEl(root as unknown as AnyNode));
+  outputTree.appendChild(buildTreeEl(root));
+  outputInfo.textContent = `${root.kids.length}개 구역`;
 }
 
 function buildTreeEl(node: AnyNode): HTMLElement {
@@ -203,14 +224,16 @@ function buildTreeEl(node: AnyNode): HTMLElement {
   tag.textContent = `<${node.tag}`;
   wrap.appendChild(tag);
 
-  if ('props' in node && node.props && Object.keys(node.props).length > 0) {
-    const filtered = Object.entries(node.props).filter(([, v]) => v !== undefined && v !== null);
-    if (filtered.length > 0) {
-      const prop = document.createElement('span');
-      prop.className = 'tree-prop';
-      prop.textContent = ' ' + filtered.map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' ');
-      wrap.appendChild(prop);
-    }
+  // Include section dimensions, metadata, spans and layout fields outside props.
+  const attributes = Object.entries(node).filter(([key, value]) =>
+    !['tag', 'kids', 'content', 'headers', 'footers'].includes(key)
+      && value !== undefined && value !== null);
+  if (attributes.length > 0) {
+    const prop = document.createElement('span');
+    prop.className = 'tree-prop';
+    prop.textContent = ' ' + attributes.map(([key, value]) =>
+      `${key}=${key === 'b64' ? `"[${value.length} base64 문자]"` : JSON.stringify(value)}`).join(' ');
+    wrap.appendChild(prop);
   }
 
   const closeTag = document.createElement('span');
@@ -219,22 +242,42 @@ function buildTreeEl(node: AnyNode): HTMLElement {
   if (node.tag === 'txt') {
     const ct = document.createElement('span');
     ct.className = 'tree-content';
-    ct.textContent = ` "${(node as any).text ?? (node as any).content ?? ''}"`;
+    ct.textContent = ` "${node.content}"`;
     wrap.appendChild(ct);
     closeTag.textContent = ' />';
     wrap.appendChild(closeTag);
     return wrap;
   }
 
-  if ('kids' in node && Array.isArray(node.kids) && node.kids.length > 0) {
+  const kids: AnyNode[] = 'kids' in node ? node.kids : [];
+  const extras = document.createElement('div');
+  if (node.tag === 'sheet') {
+    for (const kind of ['headers', 'footers'] as const) {
+      for (const [variant, paragraphs] of Object.entries(node[kind] ?? {})) {
+        const group = document.createElement('div');
+        group.className = 'tree-node';
+        const label = document.createElement('div');
+        label.className = 'tree-tag';
+        label.textContent = `${kind}.${variant}`;
+        group.appendChild(label);
+        const contents = document.createElement('div');
+        contents.className = 'tree-children';
+        for (const paragraph of paragraphs ?? []) contents.appendChild(buildTreeEl(paragraph));
+        group.appendChild(contents);
+        extras.appendChild(group);
+      }
+    }
+  }
+  if (kids.length > 0 || extras.childElementCount > 0) {
     closeTag.textContent = '>';
     wrap.appendChild(closeTag);
 
     const children = document.createElement('div');
     children.className = 'tree-children';
-    for (const child of node.kids as AnyNode[]) {
+    for (const child of kids) {
       children.appendChild(buildTreeEl(child));
     }
+    if (extras.childElementCount > 0) children.appendChild(extras);
     wrap.appendChild(children);
 
     const endTag = document.createElement('div');
@@ -276,7 +319,7 @@ function setStatus(msg: string, isErr: boolean) {
 }
 
 function updateInputInfo() {
-  const fmt = srcFmtEl.value;
+  const fmt = srcFmtEl.value === 'auto' ? '자동 감지' : srcFmtEl.value;
   const bytes = rawBytes ? rawBytes.length : new TextEncoder().encode(inputEl.value).length;
   inputInfo.textContent = `${fmt} · ${fmtBytes(bytes)}`;
 }
@@ -288,7 +331,7 @@ function fmtBytes(n: number): string {
 }
 
 // ─── 탭 전환 ─────────────────────────────────────────────────
-(window as any).switchTab = function (tab: 'text' | 'html' | 'tree') {
+function switchTab(tab: 'text' | 'html' | 'tree') {
   currentTab = tab;
   outputText.classList.toggle('active', tab === 'text');
   outputHtml.classList.toggle('active', tab === 'html');
@@ -296,7 +339,8 @@ function fmtBytes(n: number): string {
   document.getElementById('tab-text')!.classList.toggle('active', tab === 'text');
   document.getElementById('tab-html')!.classList.toggle('active', tab === 'html');
   document.getElementById('tab-tree')!.classList.toggle('active', tab === 'tree');
-};
+}
+Object.assign(window, { switchTab });
 
 srcFmtEl.addEventListener('change', updateInputInfo);
 updateInputInfo();

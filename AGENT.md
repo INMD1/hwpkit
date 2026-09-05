@@ -62,3 +62,33 @@
 - 재현: 연구 `compare/audit_dataset_docx.py`, `compare/audit_pagination.py`의 새 빈 출력 디렉터리 사용.
   최종 결과: datasets/docx_audit/final_pagination_library, final_runner_spacing, final_directions_spacing;
   datasets/pagination_audit/final_full_library, runner_spacing. 번들 빌드와 변환을 동시에 실행하지 않는다.
+
+## 2026-09-05 playground 동기화
+
+- 기존 Vite alias가 `src/index.ts`를 직접 참조하므로 들여쓰기·페이지 분리 수정은 이미 적용된다.
+  `playground/main.ts`의 입출력 선택지를 같은 registry에서 생성해 HTML 입력/HWP 출력을 반영했다.
+- 직접 입력의 MD 강제 처리를 제거하고 선택 형식을 존중한다. 바이너리 파일과 자동 모드는
+  Pipeline의 내용 감지를 사용하며, MD/HTML 파일은 편집 가능하게 연다. 파일 읽기 오류도 표시한다.
+- 트리에 props 외의 meta/dims/sectionType/differentFirstPage 및 headers/footers를 표시한다.
+  셀 병합·이미지 배치·페이지 번호 형식도 표시하며 이미지 base64 본문은 길이만 보여준다.
+- 탭 전환 함수의 타입 오류와 비활성 텍스트가 계속 표시되는 CSS를 수정하고 HTML iframe을 sandbox 처리했다.
+- `playground/tsconfig.json`, `playground:typecheck`, `playground:build` 추가.
+  검증: 기존 Vitest 110개, 라이브러리 타입·빌드 및 playground 타입·Vite 빌드 통과.
+- 내장 demo.hwp/demo.hwpx 자동 감지·트리 검사·5종 출력(총 10변환), 명시 HTML 조각·자동 HTML 입력도 통과.
+- 명세 변경 없음(UI/API 연결 수정). HTML은 실제 페이지 배치 렌더러가 아니며 브라우저 수동 검증은 미실시.
+
+## 2026-09-05 한컴 원본 PDF 위치 보정
+
+- 보고서: `../hwpkit_research/docs/pdf-layout-review-2026-09-05.{md,json}`. 사용자 목표 외관 94%는 미달.
+- HWP 빈 문단의 PARA_CHAR_SHAPE 보존, DOCX 빈 문단 pPr/rPr 출력. 독립 2pt/24pt 빈 줄의 실제 y 위치 검사.
+- PageDims는 DOCX와 같은 종이→본문/머리말 거리로 정규화. HWP/HWPX top+header=mt, top=headerPt.
+  역변환은 영역을 분리, 명시적 0 보존. DOCX header/footer=0을 undefined로 버리던 디코더도 수정.
+  기존 PageDims를 HWP 저장 값으로 직접 만들던 호출자는 본문 기준으로 조정해야 함. 모델 주석 갱신.
+- 근거: HWP 명세 PDF59쪽 표131 + 독립 한컴 DOCX 268구역 전부에서 여백 합산/분리 관계 검증.
+  세로 여백 4종 각각 268/268 일치. 원본 237/237 재변환, 기존 내용/들여쓰기 감사 행과 차이 없음.
+- 검증: Vitest 114, 타입/ESM/CJS/d.ts 빌드, playground 타입/Vite 빌드 통과. 연구 Python 119 통과.
+  PageMargins.test.ts의 독립 HWPX·raw PAGE_DEF·0값·3회 다방향 왕복 회귀 추가.
+- 실제 한컴 PDF 128개: 엄격 위치 F1 평균 0.0239%→0.0442%, 인쇄 영역 15.07%→15.93%; 94% 통과 0.
+  쪽수 오차 628→726 증가, 점수 하락 문서 20개. 여백 값 정확성과 외관 비회귀는 별개이며 외관 완료로 보지 않음.
+  나머지 109개는 한컴 기준 PDF 미확보. 표·줄 간격·폰트·개체 배치 후속 필요, 자동 품질 승인/학습 승격 없음.
+- 원본/정답 및 기존 playground 사용자 변경 보존. 연구 runner는 일부 대응이 이미 있어 파일째 동기화하지 않음.

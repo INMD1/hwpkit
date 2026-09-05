@@ -808,9 +808,9 @@ function parseCharShapePairs(d: Uint8Array): [number, number][] {
 /* ── Char-shape → SpanNode resolution ───────────────────────── */
 
 function resolveCharShapes(chars: ParsedChar[], pairs: [number, number][], di: DocInfo): SpanNode[] {
-  if (chars.length === 0) return [buildSpan('')];
-
   const defaultId = pairs.length > 0 ? pairs[0][1] : 0;
+  // Paragraph terminators still carry a character shape: it controls blank-line height.
+  if (chars.length === 0) return styledSpans('', defaultId, di);
 
   function idFor(pos: number): number {
     let id = defaultId;
@@ -1291,9 +1291,9 @@ function parsePageDef(d: Uint8Array): PageDims {
   return {
     wPt: Metric.hwpToPt(w),  hPt: Metric.hwpToPt(h),
     ml: Metric.hwpToPt(ml),  mr: Metric.hwpToPt(mr),
-    mt: Metric.hwpToPt(mt),  mb: Metric.hwpToPt(mb),
-    headerPt: Metric.hwpToPt(header),
-    footerPt: Metric.hwpToPt(footer),
+    mt: Metric.hwpToPt(mt + header),  mb: Metric.hwpToPt(mb + footer),
+    headerPt: Metric.hwpToPt(mt),
+    footerPt: Metric.hwpToPt(mb),
     orient: (at & 1) ? 'landscape' : 'portrait',
   };
 }

@@ -962,25 +962,21 @@ function buildBulletsXml(): string {
 /**
  * Contents/header.xml 용 전역 구역 설정 리스트(secPrList)를 생성합니다.
  */
-/**
- * PageDims 여백을 HWPX pagePr > margin에 1:1로 기록합니다.
- * top/bottom과 header/footer는 서로 합산하지 않는 독립 값입니다.
- */
+/** Convert body-edge distances to Hancom's outer margins and header/footer areas. */
+function hancomVerticalMargins(dims: PageDims) {
+  const top = Math.max(0, Math.min(dims.mt, dims.headerPt ?? dims.mt));
+  const bottom = Math.max(0, Math.min(dims.mb, dims.footerPt ?? dims.mb));
+  return { top: Metric.ptToHwp(top), bottom: Metric.ptToHwp(bottom),
+    header: Metric.ptToHwp(Math.max(0, dims.mt - top)),
+    footer: Metric.ptToHwp(Math.max(0, dims.mb - bottom)) };
+}
+
 function buildHeaderSecPrListXml(dims: PageDims): string {
   const wHwp = Metric.ptToHwp(dims.wPt);
   const hHwp = Metric.ptToHwp(dims.hPt);
   const ml = Metric.ptToHwp(dims.ml);
   const mr = Metric.ptToHwp(dims.mr);
-  const mt = Metric.ptToHwp(dims.mt);
-  const mb = Metric.ptToHwp(dims.mb);
-
-  // headerPt/footerPt도 독립된 HWPX margin 값으로 그대로 기록한다.
-  const headerZone = dims.headerPt !== undefined && dims.headerPt > 0
-    ? Metric.ptToHwp(dims.headerPt)
-    : 0;
-  const footerZone = dims.footerPt !== undefined && dims.footerPt > 0
-    ? Metric.ptToHwp(dims.footerPt)
-    : 0;
+  const { top: mt, bottom: mb, header: headerZone, footer: footerZone } = hancomVerticalMargins(dims);
 
   const pageBorderFill =
     `<hh:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER">` +
@@ -1143,8 +1139,8 @@ function buildHeaderFooterRunXml(
   const availW = ctx.availableWidth;
   const mtHwp = Metric.ptToHwp(dims.mt);
   const mbHwp = Metric.ptToHwp(dims.mb);
-  const headerZoneH = dims.headerPt ? Metric.ptToHwp(dims.headerPt) : 4252; // 기본값 15mm
-  const footerZoneH = dims.footerPt ? Metric.ptToHwp(dims.footerPt) : 4252; // 기본값 15mm
+  const headerZoneH = hancomVerticalMargins(dims).header;
+  const footerZoneH = hancomVerticalMargins(dims).footer;
 
   let inner = "";
 
@@ -1296,11 +1292,7 @@ function buildSecPrXml(dims: PageDims): string {
   const hHwp = Metric.ptToHwp(dims.hPt);
   const ml = Metric.ptToHwp(dims.ml);
   const mr = Metric.ptToHwp(dims.mr);
-  const mt = Metric.ptToHwp(dims.mt);
-  const mb = Metric.ptToHwp(dims.mb);
-  // PageDims 계약에 따라 top/bottom과 header/footer를 합산하지 않는다.
-  const headerZone = dims.headerPt ? Metric.ptToHwp(dims.headerPt) : 0;
-  const footerZone = dims.footerPt ? Metric.ptToHwp(dims.footerPt) : 0;
+  const { top: mt, bottom: mb, header: headerZone, footer: footerZone } = hancomVerticalMargins(dims);
 
   const pageBorderFill =
     `<hp:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER">` +

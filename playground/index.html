@@ -168,6 +168,7 @@
     }
 
     .output-text {
+      display: none;
       white-space: pre-wrap;
       word-break: break-all;
       color: #e2e8f0;
@@ -260,19 +261,11 @@
   <div class="toolbar">
     <label>입력 포맷</label>
     <select id="src-fmt">
-      <option value="md">Markdown (md)</option>
-      <option value="hwpx">HWPX</option>
-      <option value="docx">DOCX</option>
-      <option value="hwp">HWP (읽기 전용)</option>
+      <option value="auto">자동 감지</option>
     </select>
 
     <label>출력 포맷</label>
     <select id="dst-fmt">
-      <option value="md">Markdown (md)</option>
-      <option value="html">HTML</option>
-      <option value="hwpx">HWPX</option>
-      <option value="docx">DOCX</option>
-      <option value="hwp">HWP (hwp)</option>
     </select>
 
     <button class="btn-primary" id="run-btn">변환 실행</button>
@@ -281,7 +274,7 @@
     <label for="file-input">
       <button class="btn-upload" onclick="document.getElementById('file-input').click()">파일 업로드</button>
     </label>
-    <input type="file" id="file-input" accept=".md,.hwpx,.docx,.hwp,.txt" />
+    <input type="file" id="file-input" accept=".md,.html,.htm,.hwpx,.docx,.hwp,.txt" />
 
     <span style="color:#374151;font-size:12px;">데모:</span>
     <button class="btn-secondary" id="demo-hwpx-btn">demo.hwpx</button>
@@ -296,7 +289,7 @@
         <strong>입력</strong>
         <span id="input-info">md · 0 bytes</span>
       </div>
-      <textarea id="input" placeholder="Markdown 텍스트를 입력하거나 파일을 업로드하세요...
+      <textarea id="input" placeholder="Markdown 또는 HTML을 입력하거나 파일을 업로드하세요...
 
 예시:
 # 안녕하세요
@@ -329,7 +322,7 @@
       </div>
       <div class="output-area">
         <div class="output-text active" id="output-text"></div>
-        <iframe class="output-html" id="output-html"></iframe>
+        <iframe class="output-html" id="output-html" title="변환된 HTML 미리보기" sandbox=""></iframe>
         <div class="output-tree" id="output-tree"></div>
       </div>
       <div class="warn-bar" id="warn-bar"></div>

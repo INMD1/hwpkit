@@ -106,13 +106,12 @@ export interface GridProps {
 }
 
 /**
- * 여백 계약 (HWP/HWPX PAGE_DEF·hp:margin 과 1:1 대응)
- * mt / mb        : 위쪽 / 아래쪽 여백 — 머리말·꼬리말을 포함하지 않는다
- * headerPt       : 머리말 여백 (별도 값)
- * footerPt       : 꼬리말 여백 (별도 값)
- * 어떤 인코더도 mt 에 headerPt 를 더해 저장해서는 안 된다.
- * DOCX 로 내보낼 때 w:pgMar 의 top/header 의미가 다르면
- * DocxEncoder 안에서만 변환하고, IR 값은 그대로 둔다.
+ * 모든 값은 종이 가장자리로부터의 거리(pt), DOCX w:pgMar 기준이다.
+ * mt / mb        : 본문 시작/끝까지의 거리 (머리말·꼬리말 영역 포함)
+ * headerPt       : 종이 위쪽에서 머리말까지의 거리
+ * footerPt       : 종이 아래쪽에서 꼬리말까지의 거리
+ * HWP/HWPX의 top + header = mt, top = headerPt이며 bottom도 같은 방식이다.
+ * HWP/HWPX 코덱 경계에서만 합산/분리한다. DOCX에 다시 더하지 않는다.
  */
 export interface PageDims {
   wPt: number;

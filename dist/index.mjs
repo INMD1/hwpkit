@@ -1115,12 +1115,12 @@ function extractDims(headObj) {
       return {
         wPt: Metric.hwpToPt(ew2),
         hPt: Metric.hwpToPt(eh2),
-        mt: Metric.hwpToPt(mt2),
-        mb: Metric.hwpToPt(mb2),
+        mt: Metric.hwpToPt(mt2 + Math.max(0, header2)),
+        mb: Metric.hwpToPt(mb2 + Math.max(0, footer2)),
         ml: Metric.hwpToPt(ml2),
         mr: Metric.hwpToPt(mr2),
-        headerPt: Metric.hwpToPt(Math.max(0, header2)),
-        footerPt: Metric.hwpToPt(Math.max(0, footer2)),
+        headerPt: Metric.hwpToPt(Math.max(0, mt2)),
+        footerPt: Metric.hwpToPt(Math.max(0, mb2)),
         orient: ew2 > eh2 ? "landscape" : "portrait"
       };
     }
@@ -1142,12 +1142,12 @@ function extractDims(headObj) {
     return {
       wPt: Metric.hwpToPt(ew),
       hPt: Metric.hwpToPt(eh),
-      mt: Metric.hwpToPt(mt),
-      mb: Metric.hwpToPt(mb),
+      mt: Metric.hwpToPt(mt + Math.max(0, header)),
+      mb: Metric.hwpToPt(mb + Math.max(0, footer)),
       ml: Metric.hwpToPt(ml),
       mr: Metric.hwpToPt(mr),
-      headerPt: Metric.hwpToPt(Math.max(0, header)),
-      footerPt: Metric.hwpToPt(Math.max(0, footer)),
+      headerPt: Metric.hwpToPt(Math.max(0, mt)),
+      footerPt: Metric.hwpToPt(Math.max(0, mb)),
       orient: ew > eh ? "landscape" : "portrait"
     };
   } catch {
@@ -1438,12 +1438,12 @@ function parseSecPrDims(secPr) {
   return {
     wPt: Metric.hwpToPt(pw),
     hPt: Metric.hwpToPt(ph),
-    mt: Metric.hwpToPt(mt),
-    mb: Metric.hwpToPt(mb),
+    mt: Metric.hwpToPt(mt + Math.max(0, header)),
+    mb: Metric.hwpToPt(mb + Math.max(0, footer)),
     ml: Metric.hwpToPt(ml),
     mr: Metric.hwpToPt(mr),
-    headerPt: Metric.hwpToPt(Math.max(0, header)),
-    footerPt: Metric.hwpToPt(Math.max(0, footer)),
+    headerPt: Metric.hwpToPt(Math.max(0, mt)),
+    footerPt: Metric.hwpToPt(Math.max(0, mb)),
     orient: pw > ph ? "landscape" : "portrait"
   };
 }
@@ -2433,8 +2433,8 @@ function parseCharShapePairs(d) {
   return out;
 }
 function resolveCharShapes(chars, pairs, di) {
-  if (chars.length === 0) return [buildSpan("")];
   const defaultId = pairs.length > 0 ? pairs[0][1] : 0;
+  if (chars.length === 0) return styledSpans("", defaultId, di);
   function idFor(pos) {
     let id = defaultId;
     for (const [p, sid] of pairs) {
@@ -2832,10 +2832,10 @@ function parsePageDef(d) {
     hPt: Metric.hwpToPt(h),
     ml: Metric.hwpToPt(ml),
     mr: Metric.hwpToPt(mr),
-    mt: Metric.hwpToPt(mt),
-    mb: Metric.hwpToPt(mb),
-    headerPt: Metric.hwpToPt(header),
-    footerPt: Metric.hwpToPt(footer),
+    mt: Metric.hwpToPt(mt + header),
+    mb: Metric.hwpToPt(mb + footer),
+    headerPt: Metric.hwpToPt(mt),
+    footerPt: Metric.hwpToPt(mb),
     orient: at & 1 ? "landscape" : "portrait"
   };
 }
@@ -3400,8 +3400,8 @@ function extractDims2(body) {
     const sz = sp?.["w:pgSz"]?.[0]?._attr ?? sp?.pgSz?.[0]?._attr;
     const mar = sp?.["w:pgMar"]?.[0]?._attr ?? sp?.pgMar?.[0]?._attr;
     if (!sz) return null;
-    const headerDxa = Number(mar?.["w:header"] ?? mar?.header ?? 0);
-    const footerDxa = Number(mar?.["w:footer"] ?? mar?.footer ?? 0);
+    const headerDxa = Number(mar?.["w:header"] ?? mar?.header ?? NaN);
+    const footerDxa = Number(mar?.["w:footer"] ?? mar?.footer ?? NaN);
     return {
       wPt: Metric.dxaToPt(Number(sz["w:w"] ?? sz.w ?? 11906)),
       hPt: Metric.dxaToPt(Number(sz["w:h"] ?? sz.h ?? 16838)),
@@ -3410,8 +3410,8 @@ function extractDims2(body) {
       ml: Metric.dxaToPt(Number(mar?.["w:left"] ?? mar?.left ?? 1800)),
       mr: Metric.dxaToPt(Number(mar?.["w:right"] ?? mar?.right ?? 1800)),
       orient: (sz["w:orient"] ?? sz.orient) === "landscape" ? "landscape" : "portrait",
-      headerPt: headerDxa > 0 ? Metric.dxaToPt(headerDxa) : void 0,
-      footerPt: footerDxa > 0 ? Metric.dxaToPt(footerDxa) : void 0
+      headerPt: Number.isFinite(headerDxa) && headerDxa >= 0 ? Metric.dxaToPt(headerDxa) : void 0,
+      footerPt: Number.isFinite(footerDxa) && footerDxa >= 0 ? Metric.dxaToPt(footerDxa) : void 0
     };
   } catch {
     return null;
@@ -5681,6 +5681,16 @@ function buildNumberingsXml() {
 function buildBulletsXml() {
   return `<hh:bullets itemCnt="1"><hh:bullet id="1" char="&#x2022;" useImage="0"><hh:paraHead level="0" align="LEFT" useInstWidth="0" autoIndent="1" widthAdjust="0" textOffsetType="PERCENT" textOffset="50" numFormat="DIGIT" charPrIDRef="0" checkable="0"/></hh:bullet></hh:bullets>`;
 }
+function hancomVerticalMargins(dims) {
+  const top = Math.max(0, Math.min(dims.mt, dims.headerPt ?? dims.mt));
+  const bottom = Math.max(0, Math.min(dims.mb, dims.footerPt ?? dims.mb));
+  return {
+    top: Metric.ptToHwp(top),
+    bottom: Metric.ptToHwp(bottom),
+    header: Metric.ptToHwp(Math.max(0, dims.mt - top)),
+    footer: Metric.ptToHwp(Math.max(0, dims.mb - bottom))
+  };
+}
 function buildHeaderXml(dims, meta, ctx, sectionCount = 1) {
   const fontFacesXml = ctx.fontBank.toXml();
   let charPrXml = "";
@@ -5715,8 +5725,8 @@ function buildHeaderFooterRunXml(sheet, dims, ctx) {
   const availW = ctx.availableWidth;
   const mtHwp = Metric.ptToHwp(dims.mt);
   const mbHwp = Metric.ptToHwp(dims.mb);
-  const headerZoneH = dims.headerPt ? Metric.ptToHwp(dims.headerPt) : 4252;
-  const footerZoneH = dims.footerPt ? Metric.ptToHwp(dims.footerPt) : 4252;
+  const headerZoneH = hancomVerticalMargins(dims).header;
+  const footerZoneH = hancomVerticalMargins(dims).footer;
   let inner = "";
   const hideFirst = !!(headers.first || footers.first);
   inner += `<hp:ctrl><hp:pageHiding hideHeader="${hideFirst ? 1 : 0}" hideFooter="${hideFirst ? 1 : 0}" hideMasterPage="0" hideBorder="0" hideFill="0" hidePageNum="0"/></hp:ctrl>`;
@@ -5824,10 +5834,7 @@ function buildSecPrXml(dims) {
   const hHwp = Metric.ptToHwp(dims.hPt);
   const ml = Metric.ptToHwp(dims.ml);
   const mr = Metric.ptToHwp(dims.mr);
-  const mt = Metric.ptToHwp(dims.mt);
-  const mb = Metric.ptToHwp(dims.mb);
-  const headerZone = dims.headerPt ? Metric.ptToHwp(dims.headerPt) : 0;
-  const footerZone = dims.footerPt ? Metric.ptToHwp(dims.footerPt) : 0;
+  const { top: mt, bottom: mb, header: headerZone, footer: footerZone } = hancomVerticalMargins(dims);
   const pageBorderFill = `<hp:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="EVEN" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="ODD" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill>`;
   return `<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0"><hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/><hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/><hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/><hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/><hp:pagePr landscape="WIDELY" width="${wHwp}" height="${hHwp}" gutterType="LEFT_ONLY"><hp:margin header="${headerZone}" footer="${footerZone}" gutter="0" left="${ml}" right="${mr}" top="${mt}" bottom="${mb}"/></hp:pagePr><hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar="" supscript="1"/><hp:noteLine length="-1" type="SOLID" width="0.25 mm" color="#000000"/><hp:noteSpacing betweenNotes="283" belowLine="0" aboveLine="1000"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr><hp:endNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar="" supscript="1"/><hp:noteLine length="-1" type="SOLID" width="0.25 mm" color="#000000"/><hp:noteSpacing betweenNotes="0" belowLine="0" aboveLine="1000"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="END_OF_DOCUMENT" beneathText="0"/></hp:endNotePr>` + pageBorderFill + `</hp:secPr>`;
 }
@@ -7088,6 +7095,9 @@ function encodeParaInner(para, ctx, maxWidthPt, sectionPrXml = "") {
   ].filter(([key]) => para.props[key] !== void 0).map(([key, tag]) => para.props[key] ? `<w:${tag}/>` : `<w:${tag} w:val="0"/>`).join("");
   const omitEmptyLeftAlign = align === "left" && paraTextContent(para) === "";
   const jcXml = align && !omitEmptyLeftAlign ? `<w:jc w:val="${docxJcValue(align)}"/>` : "";
+  const blankSpan = paraTextContent(para) === "" && !paraHasNonTextContent(para) ? para.kids.find((kid) => kid.tag === "span") : void 0;
+  const markProps = blankSpan ? encodeTextProperties(blankSpan.props) : [];
+  const markXml = markProps.length ? `<w:rPr>${markProps.join("")}</w:rPr>` : "";
   const runs = para.kids.map((k) => {
     if (k.tag === "span") return encodeRun(k, ctx);
     if (k.tag === "img") return encodeImage2(k, ctx, maxWidthPt);
@@ -7098,7 +7108,7 @@ function encodeParaInner(para, ctx, maxWidthPt, sectionPrXml = "") {
     return "";
   }).join("");
   return `    <w:p>
-      <w:pPr>${headStyle}${paginationXml}${numPr}${spacingXml}${indentXml}${cjkLineBreakXml}${jcXml}${sectionPrXml}</w:pPr>
+      <w:pPr>${headStyle}${paginationXml}${numPr}${spacingXml}${indentXml}${cjkLineBreakXml}${jcXml}${markXml}${sectionPrXml}</w:pPr>
       ${runs}
     </w:p>`;
 }
@@ -7118,11 +7128,25 @@ function paraTextContent(para) {
   collect(para.kids);
   return text;
 }
+function paraHasNonTextContent(para) {
+  let found = false;
+  const visit = (kids) => {
+    for (const kid of kids ?? []) {
+      if (kid.tag === "img" || kid.tag === "br" || kid.tag === "pb" || kid.tag === "pagenum") {
+        found = true;
+        return;
+      }
+      if (kid.kids) visit(kid.kids);
+      if (found) return;
+    }
+  };
+  visit(para.kids);
+  return found;
+}
 function docxLineHeightRatio(lineHeight) {
   return Math.max(0.01, lineHeight);
 }
-function encodeRun(span, _ctx) {
-  const p = span.props;
+function encodeTextProperties(p) {
   const rPr = [];
   if (p.b) rPr.push("<w:b/>");
   if (p.i) rPr.push("<w:i/>");
@@ -7140,6 +7164,10 @@ function encodeRun(span, _ctx) {
       `<w:rFonts w:ascii="${esc2(p.font)}" w:hAnsi="${esc2(p.font)}" w:eastAsia="${esc2(p.font)}" w:hint="eastAsia"/>`
     );
   if (p.bg) rPr.push(`<w:shd w:val="clear" w:color="auto" w:fill="${p.bg}"/>`);
+  return rPr;
+}
+function encodeRun(span, _ctx) {
+  const rPr = encodeTextProperties(span.props);
   const parts = [];
   for (const kid of span.kids) {
     if (kid.tag === "txt") {
@@ -8980,10 +9008,10 @@ function buildDocInfoStream(bank, images = [], sectionCount = 1) {
   return concatU8(chunks);
 }
 function mkPageDef(dims) {
-  const rawTopPt = dims.mt;
-  const rawBottomPt = dims.mb;
-  const rawHeaderPt = dims.headerPt ?? 0;
-  const rawFooterPt = dims.footerPt ?? 0;
+  const rawTopPt = Math.max(0, Math.min(dims.mt, dims.headerPt ?? dims.mt));
+  const rawBottomPt = Math.max(0, Math.min(dims.mb, dims.footerPt ?? dims.mb));
+  const rawHeaderPt = Math.max(0, dims.mt - rawTopPt);
+  const rawFooterPt = Math.max(0, dims.mb - rawBottomPt);
   return new BufWriter().u32(Metric.ptToHwp(dims.wPt)).u32(Metric.ptToHwp(dims.hPt)).u32(Metric.ptToHwp(dims.ml)).u32(Metric.ptToHwp(dims.mr)).u32(Metric.ptToHwp(rawTopPt)).u32(Metric.ptToHwp(rawBottomPt)).u32(Metric.ptToHwp(rawHeaderPt)).u32(Metric.ptToHwp(rawFooterPt)).u32(0).u32(dims.orient === "landscape" ? 1 : 0).build();
 }
 function mkParaHeader(nchars, ctrlMask, psId, csCount, lineAlignCount = 0, instanceId = 0, styleId = 0, divideSort = 0) {

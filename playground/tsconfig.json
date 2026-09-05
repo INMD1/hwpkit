@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true,
+    "baseUrl": "..",
+    "paths": { "hwpkit": ["src/index.ts"] }
+  },
+  "include": ["./**/*.ts", "../src/**/*.ts"]
+}

@@ -29,7 +29,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "hwp:diff": "vite-node tools/hwp-diff.ts",
-    "playground": "vite --config playground/vite.config.ts"
+    "playground": "vite --config playground/vite.config.ts",
+    "playground:typecheck": "tsc --project playground/tsconfig.json",
+    "playground:build": "npm run playground:typecheck && vite build --config playground/vite.config.ts"
   },
   "dependencies": {
     "fs": "^0.0.1-security",

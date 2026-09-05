@@ -384,8 +384,8 @@ function extractDims(body: any): PageDims | null {
     const sz = sp?.["w:pgSz"]?.[0]?._attr ?? sp?.pgSz?.[0]?._attr;
     const mar = sp?.["w:pgMar"]?.[0]?._attr ?? sp?.pgMar?.[0]?._attr;
     if (!sz) return null;
-    const headerDxa = Number(mar?.["w:header"] ?? mar?.header ?? 0);
-    const footerDxa = Number(mar?.["w:footer"] ?? mar?.footer ?? 0);
+    const headerDxa = Number(mar?.["w:header"] ?? mar?.header ?? NaN);
+    const footerDxa = Number(mar?.["w:footer"] ?? mar?.footer ?? NaN);
     return {
       wPt: Metric.dxaToPt(Number(sz["w:w"] ?? sz.w ?? 11906)),
       hPt: Metric.dxaToPt(Number(sz["w:h"] ?? sz.h ?? 16838)),
@@ -397,8 +397,8 @@ function extractDims(body: any): PageDims | null {
         (sz["w:orient"] ?? sz.orient) === "landscape"
           ? "landscape"
           : "portrait",
-      headerPt: headerDxa > 0 ? Metric.dxaToPt(headerDxa) : undefined,
-      footerPt: footerDxa > 0 ? Metric.dxaToPt(footerDxa) : undefined,
+      headerPt: Number.isFinite(headerDxa) && headerDxa >= 0 ? Metric.dxaToPt(headerDxa) : undefined,
+      footerPt: Number.isFinite(footerDxa) && footerDxa >= 0 ? Metric.dxaToPt(footerDxa) : undefined,
     };
   } catch {
     return null;
