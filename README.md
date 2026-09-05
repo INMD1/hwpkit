@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/hwpkit.svg)](https://www.npmjs.com/package/hwpkit)
 [![license](https://img.shields.io/npm/l/hwpkit.svg)](https://github.com/INMD1/hwpkit/blob/main/license.md)
 
-**HWP / HWPX / DOCX / Markdown 양방향 문서 변환 라이브러리**
+**HWP / HWPX / DOCX / Markdown / HTML 문서 변환 라이브러리**
 
 한국 문서 포맷(HWP, HWPX)과 국제 표준(DOCX, Markdown)을 상호 변환하는 TypeScript 라이브러리입니다.
 브라우저와 Node.js 환경 모두에서 동작하며, 데이터 무결성과 무중단 변환을 최우선으로 설계했습니다.
@@ -13,7 +13,7 @@
 ## 주요 특징
 
 - **Pipeline 체이닝 API** - `Pipeline.open(file).to('hwpx')` 한 줄로 변환
-- **데이터 무결성 100%** - 텍스트, 표, 이미지 누락 없이 변환
+- **공통 문서 모델** - 텍스트·표·이미지 등을 변환하며, 지원하지 않는 서식은 손실될 수 있음
 - **무중단 변환** - 어떤 입력이 들어와도 크래시 없이 `Outcome<T>` 반환
 - **4단계 표 폴백** - Full > Grid > Flat > Text 순서로 안전 변환
 - **Result 모나드** - null/throw 대신 `Ok | Fail` 명시적 결과 처리
@@ -23,14 +23,23 @@
 
 ## 변환 지원 현황
 
-| 입력 \ 출력 | HWPX | HWP | DOCX |
-|------------|:----:|:----:|:------:|
-| **HWPX**   |  O   |   X   |   O   |
-| **HWP**    |  O   |   X   |   O   |
-| **DOCX**   |  O   |   X   |   O   |
-| **Markdown** |O   |   X   |   △  |
+| 입력 \ 출력 | HWP | HWPX | DOCX | Markdown | HTML | DOC | PDF |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| HWP | O | O | O | O | O | X | X |
+| HWPX | O | O | O | O | O | X | X |
+| DOCX | O | O | O | O | O | X | X |
+| Markdown | O | O | O | O | O | X | X |
+| HTML | O | O | O | O | O | X | X |
+| DOC / PDF | X | X | X | X | X | X | X |
 
-> 한글 2022기준 hwpx는 정상적으로 열림
+`O`는 디코더·인코더 구현과 제목·한글 본문·표 셀 내용의 기본 왕복 검증을 뜻합니다.
+복잡한 표·수식·이미지 배치·페이지 레이아웃의 완전 보존을 보증하지 않습니다.
+Markdown/HTML은 페이지 서식을 모두 표현하지 못합니다. `.doc`은 `.docx`의 별칭이 아니며 현재 미지원입니다.
+PDF는 연구용 명세/렌더링 비교 대상이고 라이브러리 입력·출력 형식은 아닙니다.
+
+2026-09-05: 최신 커밋 `887661c` 기준 5×5 조합 재점검.
+[변환 정확도 점검 보고서](docs/conversion-quality-audit-2026-09-05.md)와 [작업 메모](AGENT.md)를 참고하세요.
+
 ---
 
 ## 설치
@@ -76,11 +85,10 @@ const mdResult = await Pipeline.open('# Hello\n\nWorld').to('docx');
 ### Decoder / Encoder 직접 사용
 
 ```typescript
-import { DocxDecoder } from 'hwpkit';
-import { MdEncoder } from 'hwpkit';
+import { registry } from 'hwpkit';
 
-const decoder = new DocxDecoder();
-const encoder = new MdEncoder();
+const decoder = registry.getDecoder('docx')!;
+const encoder = registry.getEncoder('md')!;
 
 const docResult = await decoder.decode(docxBytes);
 if (!docResult.ok) throw new Error(docResult.error);

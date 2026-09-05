@@ -68,6 +68,151 @@ __export(index_exports, {
 });
 module.exports = __toCommonJS(index_exports);
 
+// src/pipeline/Pipeline.ts
+var import_jszip = __toESM(require("jszip"));
+
+// src/toolkit/BinaryKit.ts
+var BinaryKit = {
+  readU16LE(buf, offset) {
+    return buf[offset] | buf[offset + 1] << 8;
+  },
+  readU32LE(buf, offset) {
+    return ((buf[offset] | buf[offset + 1] << 8 | buf[offset + 2] << 16) >>> 0) + buf[offset + 3] * 16777216;
+  },
+  isOle2(data) {
+    return data.length >= 8 && data[0] === 208 && data[1] === 207 && data[2] === 17 && data[3] === 224 && data[4] === 161 && data[5] === 177 && data[6] === 26 && data[7] === 225;
+  },
+  parseCfb(data) {
+    const streams = /* @__PURE__ */ new Map();
+    if (!this.isOle2(data)) {
+      throw new Error("Not a valid OLE2 file");
+    }
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const sectorSize = 1 << view.getUint16(30, true);
+    const miniSectorSz = 1 << view.getUint16(32, true);
+    const dirFirstSec = view.getUint32(48, true);
+    const miniStreamCutoff = view.getUint32(56, true);
+    const miniFatFirst = view.getUint32(60, true);
+    const miniFatCnt = view.getUint32(64, true);
+    const difatFirst = view.getUint32(68, true);
+    const ENDOFCHAIN = 4294967294;
+    const FREESECT = 4294967295;
+    const sectorAt = (sec) => data.subarray(512 + sec * sectorSize, 512 + (sec + 1) * sectorSize);
+    const fatSecNums = [];
+    for (let i = 0; i < 109; i++) {
+      const s = view.getUint32(76 + i * 4, true);
+      if (s === FREESECT || s === ENDOFCHAIN) break;
+      fatSecNums.push(s);
+    }
+    if (difatFirst !== ENDOFCHAIN && difatFirst !== FREESECT) {
+      let difSec = difatFirst;
+      while (difSec !== ENDOFCHAIN && difSec !== FREESECT) {
+        const sec = sectorAt(difSec);
+        const sv = new DataView(sec.buffer, sec.byteOffset, sec.byteLength);
+        for (let i = 0; i < sectorSize / 4 - 1; i++) {
+          const s = sv.getUint32(i * 4, true);
+          if (s === FREESECT || s === ENDOFCHAIN) break;
+          fatSecNums.push(s);
+        }
+        difSec = sv.getUint32(sectorSize - 4, true);
+      }
+    }
+    const fat = [];
+    for (const sec of fatSecNums) {
+      const s = sectorAt(sec);
+      const sv = new DataView(s.buffer, s.byteOffset, s.byteLength);
+      for (let i = 0; i < sectorSize / 4; i++) {
+        fat.push(sv.getUint32(i * 4, true));
+      }
+    }
+    const readChain = (startSec) => {
+      const chunks = [];
+      let sec = startSec;
+      while (sec !== ENDOFCHAIN && sec !== FREESECT && sec < fat.length) {
+        chunks.push(sectorAt(sec));
+        sec = fat[sec];
+      }
+      return concatUint8(chunks);
+    };
+    const dirData = readChain(dirFirstSec);
+    const dirView = new DataView(dirData.buffer, dirData.byteOffset, dirData.byteLength);
+    const dirCount = dirData.length / 128;
+    const dirEntries = [];
+    for (let i = 0; i < dirCount; i++) {
+      const base = i * 128;
+      const nameLen = dirView.getUint16(base + 64, true);
+      const nameBytes = dirData.subarray(base, base + Math.max(0, nameLen - 2));
+      const name = new TextDecoder("utf-16le").decode(nameBytes);
+      const type = dirData[base + 66];
+      const childId = dirView.getInt32(base + 76, true);
+      const sibLeft = dirView.getInt32(base + 68, true);
+      const sibRight = dirView.getInt32(base + 72, true);
+      const startSec = dirView.getUint32(base + 116, true);
+      const size = dirView.getUint32(base + 120, true);
+      dirEntries.push({ name, type, startSec, size, childId, siblingLeftId: sibLeft, siblingRightId: sibRight });
+    }
+    const rootEntry = dirEntries[0];
+    let miniStreamData = null;
+    let miniFat = [];
+    if (rootEntry && rootEntry.startSec !== ENDOFCHAIN && rootEntry.startSec !== FREESECT) {
+      miniStreamData = readChain(rootEntry.startSec);
+    }
+    if (miniFatCnt > 0 && miniFatFirst !== ENDOFCHAIN && miniFatFirst !== FREESECT) {
+      const mfData = readChain(miniFatFirst);
+      const mfv = new DataView(mfData.buffer, mfData.byteOffset, mfData.byteLength);
+      for (let i = 0; i < mfData.length / 4; i++) {
+        miniFat.push(mfv.getUint32(i * 4, true));
+      }
+    }
+    const readMiniChain = (startSec, size) => {
+      if (!miniStreamData) return new Uint8Array(0);
+      const chunks = [];
+      let sec = startSec;
+      let remaining = size;
+      while (sec !== ENDOFCHAIN && sec !== FREESECT && sec < miniFat.length && remaining > 0) {
+        const off = sec * miniSectorSz;
+        const chunk = miniStreamData.subarray(off, off + Math.min(miniSectorSz, remaining));
+        chunks.push(chunk);
+        remaining -= chunk.length;
+        sec = miniFat[sec];
+      }
+      return concatUint8(chunks).subarray(0, size);
+    };
+    const visit = (id, path) => {
+      if (id < 0 || id >= dirEntries.length) return;
+      const entry = dirEntries[id];
+      const fullPath = path ? `${path}/${entry.name}` : entry.name;
+      if (entry.type === 2) {
+        let streamData;
+        if (entry.size < miniStreamCutoff && miniStreamData) {
+          streamData = readMiniChain(entry.startSec, entry.size);
+        } else {
+          streamData = readChain(entry.startSec).subarray(0, entry.size);
+        }
+        streams.set(fullPath, streamData);
+        streams.set(entry.name, streamData);
+      }
+      if (entry.childId >= 0) visit(entry.childId, fullPath);
+      if (entry.siblingLeftId >= 0) visit(entry.siblingLeftId, path);
+      if (entry.siblingRightId >= 0) visit(entry.siblingRightId, path);
+    };
+    if (dirEntries.length > 0 && dirEntries[0].childId >= 0) {
+      visit(dirEntries[0].childId, "");
+    }
+    return streams;
+  }
+};
+function concatUint8(arrays) {
+  const total = arrays.reduce((s, a) => s + a.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const a of arrays) {
+    out.set(a, off);
+    off += a.length;
+  }
+  return out;
+}
+
 // src/contract/result.ts
 function succeed(data, warns = []) {
   return { ok: true, data, warns };
@@ -1818,148 +1963,6 @@ function toArr(v) {
 }
 registry.registerDecoder(new HwpxDecoder());
 
-// src/toolkit/BinaryKit.ts
-var BinaryKit = {
-  readU16LE(buf, offset) {
-    return buf[offset] | buf[offset + 1] << 8;
-  },
-  readU32LE(buf, offset) {
-    return ((buf[offset] | buf[offset + 1] << 8 | buf[offset + 2] << 16) >>> 0) + buf[offset + 3] * 16777216;
-  },
-  isOle2(data) {
-    return data.length >= 8 && data[0] === 208 && data[1] === 207 && data[2] === 17 && data[3] === 224 && data[4] === 161 && data[5] === 177 && data[6] === 26 && data[7] === 225;
-  },
-  parseCfb(data) {
-    const streams = /* @__PURE__ */ new Map();
-    if (!this.isOle2(data)) {
-      throw new Error("Not a valid OLE2 file");
-    }
-    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-    const sectorSize = 1 << view.getUint16(30, true);
-    const miniSectorSz = 1 << view.getUint16(32, true);
-    const dirFirstSec = view.getUint32(48, true);
-    const miniStreamCutoff = view.getUint32(56, true);
-    const miniFatFirst = view.getUint32(60, true);
-    const miniFatCnt = view.getUint32(64, true);
-    const difatFirst = view.getUint32(68, true);
-    const ENDOFCHAIN = 4294967294;
-    const FREESECT = 4294967295;
-    const sectorAt = (sec) => data.subarray(512 + sec * sectorSize, 512 + (sec + 1) * sectorSize);
-    const fatSecNums = [];
-    for (let i = 0; i < 109; i++) {
-      const s = view.getUint32(76 + i * 4, true);
-      if (s === FREESECT || s === ENDOFCHAIN) break;
-      fatSecNums.push(s);
-    }
-    if (difatFirst !== ENDOFCHAIN && difatFirst !== FREESECT) {
-      let difSec = difatFirst;
-      while (difSec !== ENDOFCHAIN && difSec !== FREESECT) {
-        const sec = sectorAt(difSec);
-        const sv = new DataView(sec.buffer, sec.byteOffset, sec.byteLength);
-        for (let i = 0; i < sectorSize / 4 - 1; i++) {
-          const s = sv.getUint32(i * 4, true);
-          if (s === FREESECT || s === ENDOFCHAIN) break;
-          fatSecNums.push(s);
-        }
-        difSec = sv.getUint32(sectorSize - 4, true);
-      }
-    }
-    const fat = [];
-    for (const sec of fatSecNums) {
-      const s = sectorAt(sec);
-      const sv = new DataView(s.buffer, s.byteOffset, s.byteLength);
-      for (let i = 0; i < sectorSize / 4; i++) {
-        fat.push(sv.getUint32(i * 4, true));
-      }
-    }
-    const readChain = (startSec) => {
-      const chunks = [];
-      let sec = startSec;
-      while (sec !== ENDOFCHAIN && sec !== FREESECT && sec < fat.length) {
-        chunks.push(sectorAt(sec));
-        sec = fat[sec];
-      }
-      return concatUint8(chunks);
-    };
-    const dirData = readChain(dirFirstSec);
-    const dirView = new DataView(dirData.buffer, dirData.byteOffset, dirData.byteLength);
-    const dirCount = dirData.length / 128;
-    const dirEntries = [];
-    for (let i = 0; i < dirCount; i++) {
-      const base = i * 128;
-      const nameLen = dirView.getUint16(base + 64, true);
-      const nameBytes = dirData.subarray(base, base + Math.max(0, nameLen - 2));
-      const name = new TextDecoder("utf-16le").decode(nameBytes);
-      const type = dirData[base + 66];
-      const childId = dirView.getInt32(base + 76, true);
-      const sibLeft = dirView.getInt32(base + 68, true);
-      const sibRight = dirView.getInt32(base + 72, true);
-      const startSec = dirView.getUint32(base + 116, true);
-      const size = dirView.getUint32(base + 120, true);
-      dirEntries.push({ name, type, startSec, size, childId, siblingLeftId: sibLeft, siblingRightId: sibRight });
-    }
-    const rootEntry = dirEntries[0];
-    let miniStreamData = null;
-    let miniFat = [];
-    if (rootEntry && rootEntry.startSec !== ENDOFCHAIN && rootEntry.startSec !== FREESECT) {
-      miniStreamData = readChain(rootEntry.startSec);
-    }
-    if (miniFatCnt > 0 && miniFatFirst !== ENDOFCHAIN && miniFatFirst !== FREESECT) {
-      const mfData = readChain(miniFatFirst);
-      const mfv = new DataView(mfData.buffer, mfData.byteOffset, mfData.byteLength);
-      for (let i = 0; i < mfData.length / 4; i++) {
-        miniFat.push(mfv.getUint32(i * 4, true));
-      }
-    }
-    const readMiniChain = (startSec, size) => {
-      if (!miniStreamData) return new Uint8Array(0);
-      const chunks = [];
-      let sec = startSec;
-      let remaining = size;
-      while (sec !== ENDOFCHAIN && sec !== FREESECT && sec < miniFat.length && remaining > 0) {
-        const off = sec * miniSectorSz;
-        const chunk = miniStreamData.subarray(off, off + Math.min(miniSectorSz, remaining));
-        chunks.push(chunk);
-        remaining -= chunk.length;
-        sec = miniFat[sec];
-      }
-      return concatUint8(chunks).subarray(0, size);
-    };
-    const visit = (id, path) => {
-      if (id < 0 || id >= dirEntries.length) return;
-      const entry = dirEntries[id];
-      const fullPath = path ? `${path}/${entry.name}` : entry.name;
-      if (entry.type === 2) {
-        let streamData;
-        if (entry.size < miniStreamCutoff && miniStreamData) {
-          streamData = readMiniChain(entry.startSec, entry.size);
-        } else {
-          streamData = readChain(entry.startSec).subarray(0, entry.size);
-        }
-        streams.set(fullPath, streamData);
-        streams.set(entry.name, streamData);
-      }
-      if (entry.childId >= 0) visit(entry.childId, fullPath);
-      if (entry.siblingLeftId >= 0) visit(entry.siblingLeftId, path);
-      if (entry.siblingRightId >= 0) visit(entry.siblingRightId, path);
-    };
-    if (dirEntries.length > 0 && dirEntries[0].childId >= 0) {
-      visit(dirEntries[0].childId, "");
-    }
-    return streams;
-  }
-};
-function concatUint8(arrays) {
-  const total = arrays.reduce((s, a) => s + a.length, 0);
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const a of arrays) {
-    out.set(a, off);
-    off += a.length;
-  }
-  return out;
-}
-
 // src/decoders/hwp/HwpScanner.ts
 var import_pako2 = __toESM(require("pako"));
 var HWPTAG_BEGIN = 16;
@@ -3606,23 +3609,11 @@ function decodePara2(p, ctx) {
     props.lineHeight = styleInherited.pPr?.lineHeight ?? WORD_DEFAULT_LINE_HEIGHT;
   }
   const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
-  const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
-  const rightVal = Number(indAttr?.["w:right"] ?? indAttr?.right ?? 0);
-  const firstLineVal = Number(
-    indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0
-  );
-  const hangingVal = Number(indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0);
-  if (leftVal > 0) props.indentPt = Metric.dxaToPt(leftVal);
-  else if (styleInherited.pPr?.indentPt)
-    props.indentPt = styleInherited.pPr.indentPt;
-  if (rightVal > 0) props.indentRightPt = Metric.dxaToPt(rightVal);
-  else if (styleInherited.pPr?.indentRightPt)
-    props.indentRightPt = styleInherited.pPr.indentRightPt;
-  if (firstLineVal > 0) props.firstLineIndentPt = Metric.dxaToPt(firstLineVal);
-  else if (hangingVal > 0)
-    props.firstLineIndentPt = -Metric.dxaToPt(hangingVal);
-  else if (styleInherited.pPr?.firstLineIndentPt)
-    props.firstLineIndentPt = styleInherited.pPr.firstLineIndentPt;
+  const indentation = parseDocxIndentation(indAttr);
+  for (const key of ["indentPt", "indentRightPt", "firstLineIndentPt"]) {
+    const value = indentation[key] ?? styleInherited.pPr?.[key];
+    if (value !== void 0) props[key] = value;
+  }
   if (!alignVal && styleInherited.pPr?.align)
     props.align = safeAlign(styleInherited.pPr.align);
   const numPr = pPr?.["w:numPr"]?.[0] ?? pPr?.numPr?.[0];
@@ -4075,21 +4066,11 @@ async function parseParaStyleMap(xml) {
       if (pPr) {
         const spacingProps = parseDocxSpacingProps(pPr);
         const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
-        const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
-        const rightVal = Number(indAttr?.["w:right"] ?? indAttr?.right ?? 0);
-        const firstLineVal = Number(
-          indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0
-        );
-        const hangingVal = Number(
-          indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0
-        );
         const alignVal = pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ?? pPr?.["w:jc"]?.[0]?._attr?.val;
         def.pPr = {
           ...spacingProps,
           align: alignVal,
-          indentPt: leftVal > 0 ? Metric.dxaToPt(leftVal) : void 0,
-          indentRightPt: rightVal > 0 ? Metric.dxaToPt(rightVal) : void 0,
-          firstLineIndentPt: firstLineVal > 0 ? Metric.dxaToPt(firstLineVal) : hangingVal > 0 ? -Metric.dxaToPt(hangingVal) : void 0
+          ...parseDocxIndentation(indAttr)
         };
       }
       map.set(id, def);
@@ -4097,6 +4078,26 @@ async function parseParaStyleMap(xml) {
   } catch {
   }
   return map;
+}
+function parseDocxIndentation(attrs) {
+  const result = {};
+  const read = (name) => {
+    const raw = docxAttr(attrs, name);
+    if (raw === void 0) return void 0;
+    const value = Number(raw);
+    return Number.isFinite(value) ? Metric.dxaToPt(value) : void 0;
+  };
+  const left = read("left");
+  const right = read("right");
+  const hanging = read("hanging");
+  const first = hanging !== void 0 ? -hanging : read("firstLine");
+  if (left !== void 0) result.indentPt = left;
+  if (right !== void 0) result.indentRightPt = right;
+  if (first !== void 0) result.firstLineIndentPt = first === 0 ? 0 : first;
+  return result;
+}
+function definedProps(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== void 0));
 }
 function resolveParaStyle(styleId, map) {
   let merged = {};
@@ -4110,7 +4111,7 @@ function resolveParaStyle(styleId, map) {
       merged.rPr = { ...def.rPr, ...merged.rPr };
     }
     if (def.pPr) {
-      merged.pPr = { ...def.pPr, ...merged.pPr };
+      merged.pPr = { ...definedProps(def.pPr), ...definedProps(merged.pPr ?? {}) };
     }
     cur = def.basedOn;
   }
@@ -6984,21 +6985,15 @@ function encodeParaInner(para, ctx, maxWidthPt) {
     spacingXml = `<w:spacing ${parts.join(" ")}/>`;
   }
   let indentXml = "";
-  let leftDxa = Math.round(Metric.ptToDxa(para.props.indentPt ?? 0));
-  const rightDxa = Math.round(Metric.ptToDxa(para.props.indentRightPt ?? 0));
-  const firstPt = para.props.firstLineIndentPt ?? 0;
   const indParts = [];
-  if (rightDxa > 0) indParts.push(`w:right="${rightDxa}"`);
-  if (firstPt > 0)
-    indParts.push(`w:firstLine="${Math.round(Metric.ptToDxa(firstPt))}"`);
-  if (firstPt < 0) {
-    const hangingDxa = Math.round(Metric.ptToDxa(-firstPt));
-    if (hangingDxa > 0) {
-      leftDxa = Math.max(0, leftDxa) + hangingDxa;
-      indParts.push(`w:hanging="${hangingDxa}"`);
-    }
+  if (para.props.indentPt !== void 0 || (para.props.firstLineIndentPt ?? 0) < 0)
+    indParts.push(`w:left="${Math.round(Metric.ptToDxa(para.props.indentPt ?? 0))}"`);
+  if (para.props.indentRightPt !== void 0)
+    indParts.push(`w:right="${Math.round(Metric.ptToDxa(para.props.indentRightPt))}"`);
+  if (para.props.firstLineIndentPt !== void 0) {
+    const first = Math.round(Metric.ptToDxa(para.props.firstLineIndentPt));
+    indParts.push(first < 0 ? `w:hanging="${-first}"` : `w:firstLine="${first}"`);
   }
-  if (leftDxa > 0) indParts.unshift(`w:left="${leftDxa}"`);
   if (indParts.length > 0) indentXml = `<w:ind ${indParts.join(" ")}/>`;
   const cjkLineBreakXml = "<w:kinsoku/><w:wordWrap/><w:overflowPunct/>";
   const omitEmptyLeftAlign = align === "left" && paraTextContent(para) === "";
@@ -10414,9 +10409,9 @@ var Pipeline = class _Pipeline {
   /** 파일을 열고 포맷을 자동 감지하거나 명시 */
   static open(input, fmt) {
     if (typeof input === "string") {
-      return new _Pipeline(new TextEncoder().encode(input), fmt ?? "md");
+      return new _Pipeline(new TextEncoder().encode(input), normalizeFormat(fmt) ?? "md");
     }
-    return new _Pipeline(input, fmt ?? detectFormat(input));
+    return new _Pipeline(input, normalizeFormat(fmt));
   }
   /** File/Blob 비동기 입력 */
   static async openAsync(input, fmt) {
@@ -10425,14 +10420,15 @@ var Pipeline = class _Pipeline {
     }
     const buf = await input.arrayBuffer();
     const data = new Uint8Array(buf);
-    const detectedFmt = fmt ?? (input instanceof File ? getExt(input.name) : void 0) ?? detectFormat(data);
+    const detectedFmt = normalizeFormat(fmt) ?? (typeof File !== "undefined" && input instanceof File ? getExt(input.name) : void 0);
     return new _Pipeline(data, detectedFmt);
   }
   /** 목표 포맷으로 변환 */
   async to(targetFmt, options) {
-    const decoder = registry.getDecoder(this.srcFmt);
-    const encoder = registry.getEncoder(targetFmt);
-    if (!decoder) return fail(`\uC9C0\uC6D0\uD558\uC9C0 \uC54A\uB294 \uC785\uB825 \uD3EC\uB9F7: ${this.srcFmt}`);
+    const srcFmt = this.srcFmt ?? await detectFormat(this.raw);
+    const decoder = registry.getDecoder(srcFmt);
+    const encoder = registry.getEncoder(normalizeFormat(targetFmt) ?? targetFmt);
+    if (!decoder) return fail(`\uC9C0\uC6D0\uD558\uC9C0 \uC54A\uB294 \uC785\uB825 \uD3EC\uB9F7: ${srcFmt}`);
     if (!encoder) return fail(`\uC9C0\uC6D0\uD558\uC9C0 \uC54A\uB294 \uCD9C\uB825 \uD3EC\uB9F7: ${targetFmt}`);
     const docResult = await decoder.decode(this.raw);
     if (!docResult.ok) return docResult;
@@ -10442,22 +10438,38 @@ var Pipeline = class _Pipeline {
   }
   /** DocRoot만 추출 (인코딩 없이) */
   async inspect() {
-    const decoder = registry.getDecoder(this.srcFmt);
-    if (!decoder) return fail(`\uB514\uCF54\uB354 \uC5C6\uC74C: ${this.srcFmt}`);
+    const srcFmt = this.srcFmt ?? await detectFormat(this.raw);
+    const decoder = registry.getDecoder(srcFmt);
+    if (!decoder) return fail(`\uB514\uCF54\uB354 \uC5C6\uC74C: ${srcFmt}`);
     return decoder.decode(this.raw);
   }
 };
-function detectFormat(data) {
-  if (data[0] === 208 && data[1] === 207 && data[2] === 17 && data[3] === 224) return "hwp";
-  if (data[0] === 80 && data[1] === 75) {
-    const str = new TextDecoder("utf-8", { fatal: false }).decode(data.slice(0, 4096));
-    if (str.includes("wordprocessingml")) return "docx";
-    if (str.includes("ha-xml")) return "hwpx";
-    if (str.includes("hwpml/")) return "hwpx";
-    if (str.includes("word/")) return "docx";
-    return "hwpx";
+async function detectFormat(data) {
+  if (BinaryKit.isOle2(data)) {
+    try {
+      const streams = BinaryKit.parseCfb(data);
+      const header = streams.get("FileHeader");
+      if (header && new TextDecoder().decode(header.subarray(0, 17)) === "HWP Document File") return "hwp";
+      if (streams.has("WordDocument")) return "doc";
+    } catch {
+    }
+    return "ole";
   }
+  if (data[0] === 80 && data[1] === 75) {
+    try {
+      const zip = await import_jszip.default.loadAsync(data);
+      if (zip.file("word/document.xml")) return "docx";
+      if (zip.file("Contents/content.hpf") || zip.file("Contents/section0.xml")) return "hwpx";
+    } catch {
+    }
+    return "zip";
+  }
+  const prefix = new TextDecoder().decode(data.subarray(0, 4096)).trimStart();
+  if (/^(?:<!doctype\s+html\b|<html\b)/i.test(prefix)) return "html";
   return "md";
+}
+function normalizeFormat(fmt) {
+  return fmt?.trim().toLowerCase().replace(/^\./, "") || void 0;
 }
 function getExt(name) {
   const parts = name.split(".");

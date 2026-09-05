@@ -664,23 +664,11 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
 
   // Indentation
   const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
-  const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
-  const rightVal = Number(indAttr?.["w:right"] ?? indAttr?.right ?? 0);
-  const firstLineVal = Number(
-    indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0,
-  );
-  const hangingVal = Number(indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0);
-  if (leftVal > 0) props.indentPt = Metric.dxaToPt(leftVal);
-  else if (styleInherited.pPr?.indentPt)
-    props.indentPt = styleInherited.pPr.indentPt;
-  if (rightVal > 0) props.indentRightPt = Metric.dxaToPt(rightVal);
-  else if (styleInherited.pPr?.indentRightPt)
-    props.indentRightPt = styleInherited.pPr.indentRightPt;
-  if (firstLineVal > 0) props.firstLineIndentPt = Metric.dxaToPt(firstLineVal);
-  else if (hangingVal > 0)
-    props.firstLineIndentPt = -Metric.dxaToPt(hangingVal);
-  else if (styleInherited.pPr?.firstLineIndentPt)
-    props.firstLineIndentPt = styleInherited.pPr.firstLineIndentPt;
+  const indentation = parseDocxIndentation(indAttr);
+  for (const key of ['indentPt', 'indentRightPt', 'firstLineIndentPt'] as const) {
+    const value = indentation[key] ?? styleInherited.pPr?.[key];
+    if (value !== undefined) props[key] = value;
+  }
 
   // Alignment from style if not set inline
   if (!alignVal && styleInherited.pPr?.align)
@@ -1304,28 +1292,13 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
         const spacingProps = parseDocxSpacingProps(pPr);
         const indAttr =
           pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
-        const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
-        const rightVal = Number(indAttr?.["w:right"] ?? indAttr?.right ?? 0);
-        const firstLineVal = Number(
-          indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0,
-        );
-        const hangingVal = Number(
-          indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0,
-        );
         const alignVal =
           pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ??
           pPr?.["w:jc"]?.[0]?._attr?.val;
         def.pPr = {
           ...spacingProps,
           align: alignVal,
-          indentPt: leftVal > 0 ? Metric.dxaToPt(leftVal) : undefined,
-          indentRightPt: rightVal > 0 ? Metric.dxaToPt(rightVal) : undefined,
-          firstLineIndentPt:
-            firstLineVal > 0
-              ? Metric.dxaToPt(firstLineVal)
-              : hangingVal > 0
-                ? -Metric.dxaToPt(hangingVal)
-                : undefined,
+          ...parseDocxIndentation(indAttr),
         };
       }
 
@@ -1335,6 +1308,30 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
     /* non-fatal */
   }
   return map;
+}
+
+/** ECMA-376 Part 1 §17.3.1.12: hanging takes precedence, including zero. */
+function parseDocxIndentation(attrs: Record<string, string>): Pick<ParaProps,
+  'indentPt' | 'indentRightPt' | 'firstLineIndentPt'> {
+  const result: Pick<ParaProps, 'indentPt' | 'indentRightPt' | 'firstLineIndentPt'> = {};
+  const read = (name: string): number | undefined => {
+    const raw = docxAttr(attrs, name);
+    if (raw === undefined) return undefined;
+    const value = Number(raw);
+    return Number.isFinite(value) ? Metric.dxaToPt(value) : undefined;
+  };
+  const left = read('left');
+  const right = read('right');
+  const hanging = read('hanging');
+  const first = hanging !== undefined ? -hanging : read('firstLine');
+  if (left !== undefined) result.indentPt = left;
+  if (right !== undefined) result.indentRightPt = right;
+  if (first !== undefined) result.firstLineIndentPt = first === 0 ? 0 : first;
+  return result;
+}
+
+function definedProps<T extends object>(value: T): Partial<T> {
+  return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as Partial<T>;
 }
 
 /** Resolve paragraph style inheritance chain (max depth 8) */
@@ -1354,7 +1351,7 @@ function resolveParaStyle(
       merged.rPr = { ...def.rPr, ...merged.rPr };
     }
     if (def.pPr) {
-      merged.pPr = { ...def.pPr, ...merged.pPr };
+      merged.pPr = { ...definedProps(def.pPr), ...definedProps(merged.pPr ?? {}) };
     }
     cur = def.basedOn;
   }

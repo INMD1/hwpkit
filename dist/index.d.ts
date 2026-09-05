@@ -245,7 +245,7 @@ interface Decoder {
 
 declare class Pipeline {
     private raw;
-    private srcFmt;
+    private srcFmt?;
     private constructor();
     /** 파일을 열고 포맷을 자동 감지하거나 명시 */
     static open(input: Uint8Array | string, fmt?: string): Pipeline;

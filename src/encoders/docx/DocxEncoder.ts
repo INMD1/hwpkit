@@ -698,25 +698,17 @@ function encodeParaInner(
   // w:left = 전체 왼쪽 여백(dxa), w:right = 전체 오른쪽 여백(dxa)
   // w:firstLine = 첫 줄 추가 들여쓰기(dxa, 양수), w:hanging = 내어쓰기(dxa, 양수값으로 표현)
   let indentXml = "";
-  let leftDxa = Math.round(Metric.ptToDxa(para.props.indentPt ?? 0));
-  const rightDxa = Math.round(Metric.ptToDxa(para.props.indentRightPt ?? 0));
-  const firstPt = para.props.firstLineIndentPt ?? 0;
-
   const indParts: string[] = [];
-  if (rightDxa > 0) indParts.push(`w:right="${rightDxa}"`);
-  if (firstPt > 0)
-    indParts.push(`w:firstLine="${Math.round(Metric.ptToDxa(firstPt))}"`);
-  if (firstPt < 0) {
-    const hangingDxa = Math.round(Metric.ptToDxa(-firstPt));
-    if (hangingDxa > 0) {
-      // w:hanging 은 w:left 기준에서 첫 줄을 왼쪽으로 당기는 값이므로
-      // 본문 왼쪽 여백에 hanging 폭을 더해 방출한다. 이 보정 덕분에
-      // 방출된 w:left 는 항상 w:hanging 이상이며 위반은 발생하지 않는다.
-      leftDxa = Math.max(0, leftDxa) + hangingDxa;
-      indParts.push(`w:hanging="${hangingDxa}"`);
-    }
+  // indentPt is the body margin. hanging locates the first line relative to
+  // that margin; adding it to w:left again causes cumulative round-trip drift.
+  if (para.props.indentPt !== undefined || (para.props.firstLineIndentPt ?? 0) < 0)
+    indParts.push(`w:left="${Math.round(Metric.ptToDxa(para.props.indentPt ?? 0))}"`);
+  if (para.props.indentRightPt !== undefined)
+    indParts.push(`w:right="${Math.round(Metric.ptToDxa(para.props.indentRightPt))}"`);
+  if (para.props.firstLineIndentPt !== undefined) {
+    const first = Math.round(Metric.ptToDxa(para.props.firstLineIndentPt));
+    indParts.push(first < 0 ? `w:hanging="${-first}"` : `w:firstLine="${first}"`);
   }
-  if (leftDxa > 0) indParts.unshift(`w:left="${leftDxa}"`);
   if (indParts.length > 0) indentXml = `<w:ind ${indParts.join(" ")}/>`;
 
   const cjkLineBreakXml = "<w:kinsoku/><w:wordWrap/><w:overflowPunct/>";
