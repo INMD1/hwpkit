@@ -376,6 +376,10 @@ interface CharPrDef {
   bg?: string;
 }
 interface ParaPrDef {
+  pageBreakBefore?: boolean;
+  keepWithNext?: boolean;
+  keepLines?: boolean;
+  widowControl?: boolean;
   id: number;
   align: string;
   leftHwp: number;
@@ -418,7 +422,7 @@ function paraShapeHwpToLayoutHwp(value: number): number {
  * null/undefined는 0 으로 처리하여 일관성 유지
  */
 function paraPrKey(p: ParaProps): string {
-  return `${p.align ?? "left"}|${p.verAlign ?? "baseline"}|${p.lineWrap ?? "break"}|${p.listOrd ?? ""}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.indentRightPt ?? 0}|${p.firstLineIndentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}|${p.lineHeightFixed ?? 0}|${p.styleId ?? ""}`;
+  return `${p.pageBreakBefore ?? false}|${p.keepWithNext ?? false}|${p.keepLines ?? false}|${p.widowControl ?? false}|${p.align ?? "left"}|${p.verAlign ?? "baseline"}|${p.lineWrap ?? "break"}|${p.listOrd ?? ""}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.indentRightPt ?? 0}|${p.firstLineIndentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}|${p.lineHeightFixed ?? 0}|${p.styleId ?? ""}`;
 }
 
 // ─── 인코딩 컨텍스트 ─────────────────────────────────────────
@@ -504,11 +508,16 @@ function registerParaPr(props: ParaProps, ctx: HwpxCtx): number {
   const lineWrapStr = props.lineWrap ? (LINE_WRAP_MAP[props.lineWrap] ?? "BREAK") : "BREAK";
 
   const def: ParaPrDef = {
+    pageBreakBefore: props.pageBreakBefore,
+    keepWithNext: props.keepWithNext,
+    keepLines: props.keepLines,
+    widowControl: props.widowControl,
     id,
     align: alignStr,
     verAlign: verAlignStr,
     lineWrap: lineWrapStr,
-    leftHwp: Metric.ptToHwp(props.indentPt ?? 0) * 2,
+    // HWPX stores the margin before applying a negative first-line indent.
+    leftHwp: Metric.ptToHwp((props.indentPt ?? 0) + Math.min(0, props.firstLineIndentPt ?? 0)) * 2,
     rightHwp: Metric.ptToHwp(props.indentRightPt ?? 0) * 2,
     intentHwp: Metric.ptToHwp(props.firstLineIndentPt ?? 0) * 2,
     prevHwp: Metric.ptToHwp(props.spaceBefore ?? 0) * 2,
@@ -682,7 +691,8 @@ export class HwpxEncoder extends BaseEncoder {
 
   async encode(doc: DocRoot): Promise<Outcome<Uint8Array>> {
     try {
-      const sheet = doc.kids[0];
+      const sheets: SheetNode[] = doc.kids.length ? doc.kids : [{ tag: "sheet", dims: A4, kids: [] }];
+      const sheet = sheets[0];
       const dims = normalizeDims(sheet?.dims ?? A4);
 
       const safeML = (dims.ml !== undefined && dims.ml >= 0) ? dims.ml : 70.87;
@@ -726,14 +736,17 @@ export class HwpxEncoder extends BaseEncoder {
       ctx.styleIdToHwpxId.set("Normal", 0);
 
       // 패스 1: Pre-scan — 모든 charPr/paraPr/이미지/테두리 사전 등록
-      scanContent(sheet?.kids ?? [], ctx);
-      if (sheet?.headers?.default) for (const p of sheet.headers.default) scanPara(p, ctx);
-      if (sheet?.footers?.default) for (const p of sheet.footers.default) scanPara(p, ctx);
+      for (const section of sheets) {
+        scanContent(section.kids, ctx);
+        for (const paras of Object.values(section.headers ?? {})) for (const p of paras ?? []) scanPara(p, ctx);
+        for (const paras of Object.values(section.footers ?? {})) for (const p of paras ?? []) scanPara(p, ctx);
+      }
 
-      // 패스 2: Encode — section 먼저 (borderFill 동적 등록 완료 후 header 생성)
-      const sectionData = this.stringToBytes(buildSectionXml(sheet, dims, ctx));
-      const headerData = this.stringToBytes(buildHeaderXml(dims, doc.meta, ctx));
-      const previewText = extractPreviewText(sheet);
+      // Build every section before writing the shared style/media catalog.
+      const sectionData = sheets.map(section => this.stringToBytes(
+        buildSectionXml(section, normalizeDims(section.dims), ctx)));
+      const headerData = this.stringToBytes(buildHeaderXml(dims, doc.meta, ctx, sheets.length));
+      const previewText = sheets.map(extractPreviewText).join("\n");
 
       const entries: { name: string; data: Uint8Array; mime: string; compression?: 'STORE' | 'DEFLATE' }[] = [
         {
@@ -759,12 +772,12 @@ export class HwpxEncoder extends BaseEncoder {
         },
         {
           name: "META-INF/container.rdf",
-          data: this.stringToBytes(CONTAINER_RDF),
+          data: this.stringToBytes(buildContainerRdf(sheets.length)),
           mime: "application/rdf+xml",
         },
         {
           name: "Contents/content.hpf",
-          data: this.stringToBytes(buildContentHpf(ctx, doc.meta)),
+          data: this.stringToBytes(buildContentHpf(ctx, doc.meta, sheets.length)),
           mime: "application/hwpml-package+xml",
         },
         {
@@ -772,11 +785,9 @@ export class HwpxEncoder extends BaseEncoder {
           data: headerData,
           mime: "application/xml",
         },
-        {
-          name: "Contents/section0.xml",
-          data: sectionData,
-          mime: "application/xml",
-        },
+        ...sectionData.map((data, index) => ({
+          name: `Contents/section${index}.xml`, data, mime: "application/xml",
+        })),
         {
           name: "Preview/PrvText.txt",
           data: this.stringToBytes(previewText),
@@ -836,19 +847,22 @@ const MANIFEST_XML =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
   `<odf:manifest xmlns:odf="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"/>`;
 
-const CONTAINER_RDF =
+function buildContainerRdf(sectionCount: number): string {
+  return (
   `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
   `<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">` +
   `<rdf:Description rdf:about=""><pkg:hasPart xmlns:pkg="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/header.xml"/></rdf:Description>` +
   `<rdf:Description rdf:about="Contents/header.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#HeaderFile"/></rdf:Description>` +
-  `<rdf:Description rdf:about=""><pkg:hasPart xmlns:pkg="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/section0.xml"/></rdf:Description>` +
-  `<rdf:Description rdf:about="Contents/section0.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#SectionFile"/></rdf:Description>` +
+  Array.from({ length: sectionCount }, (_, i) =>
+    `<rdf:Description rdf:about=""><pkg:hasPart xmlns:pkg="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/section${i}.xml"/></rdf:Description>` +
+    `<rdf:Description rdf:about="Contents/section${i}.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#SectionFile"/></rdf:Description>`).join("") +
   `<rdf:Description rdf:about=""><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#Document"/></rdf:Description>` +
-  `</rdf:RDF>`;
+  `</rdf:RDF>`);
+}
 
 // ─── content.hpf ─────────────────────────────────────────────
 
-function buildContentHpf(ctx: HwpxCtx, meta?: DocMeta): string {
+function buildContentHpf(ctx: HwpxCtx, meta?: DocMeta, sectionCount = 1): string {
   const title = esc(meta?.title ?? "");
   const creator = esc(meta?.author ?? "text");
   const subject = esc(meta?.subject ?? "text");
@@ -860,7 +874,7 @@ function buildContentHpf(ctx: HwpxCtx, meta?: DocMeta): string {
 
   let items =
     `<opf:item id="header"   href="Contents/header.xml"   media-type="application/xml"/>` +
-    `<opf:item id="section0" href="Contents/section0.xml" media-type="application/xml"/>` +
+    Array.from({ length: sectionCount }, (_, i) => `<opf:item id="section${i}" href="Contents/section${i}.xml" media-type="application/xml"/>`).join("") +
     `<opf:item id="settings" href="settings.xml"          media-type="application/xml"/>`;
 
   for (const bin of ctx.bins) {
@@ -894,7 +908,7 @@ function buildContentHpf(ctx: HwpxCtx, meta?: DocMeta): string {
     `<opf:meta name="trackchageConfig" content="text">0</opf:meta>` +
     `</opf:metadata>` +
     `<opf:manifest>${items}</opf:manifest>` +
-    `<opf:spine><opf:itemref idref="header" linear="yes"/><opf:itemref idref="section0" linear="yes"/></opf:spine>` +
+    `<opf:spine><opf:itemref idref="header" linear="yes"/>${Array.from({ length: sectionCount }, (_, i) => `<opf:itemref idref="section${i}" linear="yes"/>`).join("")}</opf:spine>` +
     `</opf:package>`
   );
 }
@@ -1008,7 +1022,7 @@ function buildHeaderSecPrListXml(dims: PageDims): string {
   );
 }
 
-function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
+function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx, sectionCount = 1): string {
   // 언어별 폰트 (LangFontBank → XML)
   const fontFacesXml = ctx.fontBank.toXml();
 
@@ -1049,7 +1063,7 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
       `<hh:paraPr id="${pp.id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="0" suppressLineNumbers="0" checked="0">` +
       `<hh:align horizontal="${pp.align}" vertical="${ver}"/>` +
       `<hh:heading type="NONE" idRef="0" level="0"/>` +
-      `<hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="${wrap}"/>` +
+      `<hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="${pp.widowControl ? 1 : 0}" keepWithNext="${pp.keepWithNext ? 1 : 0}" keepLines="${pp.keepLines ? 1 : 0}" pageBreakBefore="${pp.pageBreakBefore ? 1 : 0}" lineWrap="${wrap}"/>` +
       `<hh:autoSpacing eAsianEng="0" eAsianNum="0"/>` +
       `<hp:switch>` +
       `<hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">` +
@@ -1095,7 +1109,7 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx): string {
 
   return (
     `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>` +
-    `<hh:head ${NS} version="1.4" secCnt="1">` +
+    `<hh:head ${NS} version="1.4" secCnt="${sectionCount}">` +
     `<hh:beginNum page="1" footnote="1" endnote="1" pic="1" tbl="1" equation="1"/>` +
     `<hh:refList>` +
     fontFacesXml +
@@ -1574,12 +1588,12 @@ function encodeParaPositioned(
   const firstHorzPos = Math.max(
     0,
     paraShapeHwpToLayoutHwp(
-      (paraPr?.leftHwp ?? 0) + (paraPr?.intentHwp ?? 0),
+      (paraPr?.leftHwp ?? 0) + Math.max(0, paraPr?.intentHwp ?? 0),
     ),
   );
   const restHorzPos = Math.max(
     0,
-    paraShapeHwpToLayoutHwp(paraPr?.leftHwp ?? 0),
+    paraShapeHwpToLayoutHwp((paraPr?.leftHwp ?? 0) - Math.min(0, paraPr?.intentHwp ?? 0)),
   );
   const { xml: linesegXml, totalHeight } = buildLinesegarray(
     paraText,

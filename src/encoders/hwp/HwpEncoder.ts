@@ -418,6 +418,10 @@ function csKey(p: TextProps): string {
 function psKey(p: ParaProps): string {
   return [
     p.align ?? "left",
+    p.pageBreakBefore ?? false,
+    p.keepWithNext ?? false,
+    p.keepLines ?? false,
+    p.widowControl ?? false,
     p.heading ?? 0,
     p.listOrd === undefined ? "" : p.listOrd ? "number" : "bullet",
     p.listLv ?? 0,
@@ -503,9 +507,9 @@ function collectNode(node: ContentNode, bank: HwpStyleBank): void {
 
 // ─── DocInfo 레코드 빌더 ─────────────────────────────────────
 
-function mkDocumentProperties(): Uint8Array {
+function mkDocumentProperties(sectionCount: number): Uint8Array {
   return new BufWriter()
-    .u16(1)
+    .u16(sectionCount)
     .u16(1)
     .u16(1)
     .u16(1)
@@ -847,6 +851,10 @@ function mkParaShape(p: ParaProps): Uint8Array {
   const alignVal = ALIGN_CODE[p.align ?? "left"] ?? 1;
   const lineSpacingType = p.lineHeightFixed !== undefined ? 3 : 0;
   let attr1 = (lineSpacingType & 0x3) | ((alignVal & 0x7) << 2);
+  if (p.widowControl) attr1 |= 1 << 16;
+  if (p.keepWithNext) attr1 |= 1 << 17;
+  if (p.keepLines) attr1 |= 1 << 18;
+  if (p.pageBreakBefore) attr1 |= 1 << 19;
   if (p.heading !== undefined) {
     attr1 |= 1 << 23; // 문단 머리 모양=개요
     attr1 |= (p.heading - 1) << 25; // HWP 수준 필드는 0-based
@@ -864,7 +872,8 @@ function mkParaShape(p: ParaProps): Uint8Array {
   const paraShapeUnit = (pt: number) => Metric.ptToHwp(pt) * 2;
   return new BufWriter()
     .u32(attr1)
-    .i32(paraShapeUnit(p.indentPt ?? 0))
+    // Convert the model body margin back to HWP's margin before hanging.
+    .i32(paraShapeUnit((p.indentPt ?? 0) + Math.min(0, p.firstLineIndentPt ?? 0)))
     .i32(paraShapeUnit(p.indentRightPt ?? 0))
     .i32(paraShapeUnit(p.firstLineIndentPt ?? 0))
     .i32(paraShapeUnit(p.spaceBefore ?? 0))
@@ -902,10 +911,11 @@ interface BinImage {
 function buildDocInfoStream(
   bank: HwpStyleBank,
   images: BinImage[] = [],
+  sectionCount = 1,
 ): Uint8Array {
   const chunks: Uint8Array[] = [];
 
-  chunks.push(mkRec(TAG_DOCUMENT_PROPERTIES, 0, mkDocumentProperties()));
+  chunks.push(mkRec(TAG_DOCUMENT_PROPERTIES, 0, mkDocumentProperties(sectionCount)));
   chunks.push(mkRec(TAG_ID_MAPPINGS, 0, mkIdMappings(bank, images.length)));
 
   for (const img of images) {
@@ -2478,7 +2488,7 @@ function buildHwpFileHeader(): Uint8Array {
 function buildHwpOle2(
   fileHeaderData: Uint8Array,
   docInfoData: Uint8Array,
-  section0Data: Uint8Array,
+  sectionData: Uint8Array[],
   binImages: BinImage[] = [],
 ): Uint8Array {
   const SS = 512; // 정규 섹터 크기
@@ -2519,9 +2529,9 @@ function buildHwpOle2(
   });
   streams.push({
     name: "Section0",
-    data: section0Data,
+    data: sectionData[0],
     dirIdx: 4,
-    isMini: section0Data.length < 4096,
+    isMini: sectionData[0].length < 4096,
   });
 
   const prvTextDirIdx = binImages.length > 0 ? 6 + binImages.length : 5;
@@ -2542,6 +2552,11 @@ function buildHwpOle2(
       dirIdx: 6 + i,
       isMini: img.data.length < 4096,
     });
+  }
+
+  for (let i = 1; i < sectionData.length; i++) {
+    streams.push({ name: `Section${i}`, data: sectionData[i],
+      dirIdx: prvTextDirIdx + i, isMini: sectionData[i].length < 4096 });
   }
 
   // 미니 스트림 패킹 및 Mini FAT 체인 생성
@@ -2590,7 +2605,7 @@ function buildHwpOle2(
 
   // 디렉토리 섹터 크기 결정 (엔트리 개수 비례)
   const numDirEntries =
-    6 + (binImages.length > 0 ? 1 + binImages.length : 0);
+    6 + (binImages.length > 0 ? 1 + binImages.length : 0) + sectionData.length - 1;
   const dirN = Math.max(1, Math.ceil((numDirEntries * 128) / SS));
 
   // Mini FAT 섹터 크기 결정 (1 섹터당 128개 FAT 엔트리 수용)
@@ -2936,33 +2951,16 @@ function buildHwpOle2(
     diStream.data.length,
   );
 
-  // BodyText (3번)
+  const sectionStreams = streams.filter(stream => /^Section\d+$/.test(stream.name));
+  const sectionTree = buildSiblingTree(sectionStreams.map(stream => ({ idx: stream.dirIdx, name: stream.name })));
   const bodyLinks = rootLinks(3);
-  writeDirEntry(
-    3,
-    "BodyText",
-    1,
-    rootTree.colors.get(3) ?? 1,
-    bodyLinks.left,
-    bodyLinks.right,
-    4,
-    ENDOFCHAIN,
-    0,
-  );
-
-  // Section0 (4번)
-  const s0Stream = streamMap.get(4)!;
-  writeDirEntry(
-    4,
-    "Section0",
-    2,
-    1,
-    -1,
-    -1,
-    -1,
-    s0Stream.startSec!,
-    s0Stream.data.length,
-  );
+  writeDirEntry(3, "BodyText", 1, rootTree.colors.get(3) ?? 1,
+    bodyLinks.left, bodyLinks.right, sectionTree.root, 0, 0);
+  for (const stream of sectionStreams) {
+    const links = sectionTree.links.get(stream.dirIdx)!;
+    writeDirEntry(stream.dirIdx, stream.name, 2, sectionTree.colors.get(stream.dirIdx) ?? 1,
+      links.left, links.right, -1, stream.startSec!, stream.data.length);
+  }
 
   const prvTextStream = streamMap.get(prvTextDirIdx)!;
   const prvTextLinks = rootLinks(prvTextDirIdx);
@@ -2995,7 +2993,7 @@ function buildHwpOle2(
       binLinks.left,
       binLinks.right,
       binTree.root,
-      ENDOFCHAIN,
+      0,
       0,
     );
 
@@ -3169,19 +3167,16 @@ export class HwpEncoder extends BaseEncoder {
       }
 
       // 패스 2: 스트림 빌드
-      const bodyRaw = buildBodyTextStream(doc, bank, images);
-      const docInfoRaw = buildDocInfoStream(bank, images);
-
-      const verification = verifyHwpRecordStreams(docInfoRaw, bodyRaw);
-      if (!verification.ok) {
-        return fail(
-          `HwpEncoder: 레코드 참조 무결성 오류 - ${verification.errors.join("; ")}`,
-        );
+      const sections = doc.kids.length ? doc.kids : [{ tag: "sheet" as const, dims: A4, kids: [] }];
+      const bodyRaw = sections.map(sheet => buildBodyTextStream({ ...doc, kids: [sheet] }, bank, images));
+      const docInfoRaw = buildDocInfoStream(bank, images, sections.length);
+      for (const section of bodyRaw) {
+        const verification = verifyHwpRecordStreams(docInfoRaw, section);
+        if (!verification.ok) return fail(
+          `HwpEncoder: 레코드 참조 무결성 오류 - ${verification.errors.join("; ")}`);
       }
-
-      // HWP 5.0: Zlib 헤더 없는 Raw Deflate
       const docInfoCmp = pako.deflateRaw(docInfoRaw);
-      const bodyCmp = pako.deflateRaw(bodyRaw);
+      const bodyCmp = bodyRaw.map(section => pako.deflateRaw(section));
 
       const fileHdr = buildHwpFileHeader();
 

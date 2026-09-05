@@ -189,7 +189,8 @@ describe("paragraph and table layout defaults", () => {
     const zip = await JSZip.loadAsync(encoded.data);
     const headerXml = await zip.file("Contents/header.xml")!.async("string");
     expect(headerXml).toContain('<hc:indent value="-5620" unit="HWPUNIT"/>');
-    expect(headerXml).toContain('<hc:left value="5620" unit="HWPUNIT"/>');
+    // Body margin 28.1pt with -28.1pt hanging starts its first line at zero.
+    expect(headerXml).toContain('<hc:indent value="-5620" unit="HWPUNIT"/><hc:left value="0" unit="HWPUNIT"/>');
     expect(headerXml).toContain('<hc:right value="400" unit="HWPUNIT"/>');
     expect(headerXml).toContain('<hc:prev value="600" unit="HWPUNIT"/>');
     expect(headerXml).toContain('<hc:next value="200" unit="HWPUNIT"/>');

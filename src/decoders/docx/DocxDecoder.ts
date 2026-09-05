@@ -1,5 +1,6 @@
 import type {
   DocRoot,
+  SheetNode,
   ContentNode,
   ParaNode,
   SpanNode,
@@ -91,6 +92,17 @@ export class DocxDecoder extends BaseDecoder {
         }
       }
 
+      meta.evenAndOddHeaders = false;
+      const settings = getFile("word/settings.xml");
+      if (settings) {
+        try {
+          const parsed: any = await XmlKit.parseStrict(TextKit.decode(settings));
+          const node = parsed?.["w:settings"]?.[0]?.["w:evenAndOddHeaders"]?.[0];
+          if (node != null) meta.evenAndOddHeaders = !["0", "false", "off"].includes(
+            String(node?._attr?.["w:val"] ?? "1").toLowerCase());
+        } catch { /* malformed optional settings do not block body decoding */ }
+      }
+
       // Parse numbering.xml for list support
       const numXml = getFile("word/numbering.xml");
       let numMap: NumMap = new Map();
@@ -140,57 +152,45 @@ export class DocxDecoder extends BaseDecoder {
         paraStyleMap,
       };
 
-      const kids: ContentNode[] = [];
+      const sections: { kids: ContentNode[]; sp: any }[] = [];
+      let kids: ContentNode[] = [];
       for (const el of elements) {
         const nodes = shield.guard(
           () => decodeElement(el, decCtx),
           [buildPara([buildSpan("[요소 파싱 실패]")])],
           "docx:bodyElement",
         );
-        if (Array.isArray(nodes)) {
-          kids.push(...nodes);
-        } else {
-          kids.push(nodes);
-        }
-
-        // Inline sectPr in pPr = section break → insert page-break paragraph after
-        if (el.type === "para") {
-          const pPr = el.node?.["w:pPr"]?.[0] ?? el.node?.pPr?.[0] ?? {};
-          const inlineSectPr = pPr?.["w:sectPr"]?.[0] ?? pPr?.sectPr?.[0];
-          if (inlineSectPr) {
-            const typeAttr = inlineSectPr?.["w:type"]?.[0]?._attr;
-            const sectType = typeAttr?.["w:val"] ?? typeAttr?.val ?? "nextPage";
-            if (sectType !== "continuous") {
-              kids.push(
-                buildPara([{ tag: "span", props: {}, kids: [buildPb()] }]),
-              );
-            }
-          }
+        kids.push(...(Array.isArray(nodes) ? nodes : [nodes]));
+        const pPr = el.type === "para" ? (el.node?.["w:pPr"]?.[0] ?? el.node?.pPr?.[0]) : undefined;
+        const sp = pPr?.["w:sectPr"]?.[0] ?? pPr?.sectPr?.[0];
+        if (sp) {
+          // sectPr belongs to the section ending here, not to the next paragraph.
+          sections.push({ kids, sp });
+          kids = [];
         }
       }
-
-      // Decode header/footer
-      const headersMap = await decodeHeaderFooter(
-        "header",
-        body,
-        relsMap,
-        files,
-        decCtx,
-      );
-      const footersMap = await decodeHeaderFooter(
-        "footer",
-        body,
-        relsMap,
-        files,
-        decCtx,
-      );
-
+      sections.push({ kids, sp: body?.["w:sectPr"]?.[0] ?? body?.sectPr?.[0] });
+      const sheets: SheetNode[] = [];
+      let headers: SheetNode["headers"];
+      let footers: SheetNode["footers"];
+      for (const section of sections) {
+        const sectionBody = { "w:sectPr": [section.sp] };
+        const sectionDims = extractDims(sectionBody) ?? dims;
+        const ownHeaders = await decodeHeaderFooter("header", sectionBody, relsMap, files, decCtx);
+        const ownFooters = await decodeHeaderFooter("footer", sectionBody, relsMap, files, decCtx);
+        if (ownHeaders) headers = { ...headers, ...ownHeaders };
+        if (ownFooters) footers = { ...footers, ...ownFooters };
+        const sheet = buildSheet(section.kids.filter(Boolean), sectionDims, { headers, footers });
+        const titlePage = section.sp?.["w:titlePg"]?.[0] ?? section.sp?.titlePg?.[0];
+        sheet.differentFirstPage = titlePage != null && !["0", "false", "off"].includes(
+          String(titlePage?._attr?.["w:val"] ?? titlePage?._attr?.val ?? "1").toLowerCase());
+        const attr = section.sp?.["w:type"]?.[0]?._attr ?? section.sp?.type?.[0]?._attr;
+        const type = attr?.["w:val"] ?? attr?.val;
+        if (["nextPage", "continuous", "evenPage", "oddPage", "nextColumn"].includes(type)) sheet.sectionType = type;
+        sheets.push(sheet);
+      }
       warns.push(...shield.flush());
-      const sheet = buildSheet(kids.filter(Boolean) as ContentNode[], dims, {
-        headers: headersMap,
-        footers: footersMap,
-      });
-      return succeed(buildRoot(meta, [sheet]), warns);
+      return succeed(buildRoot(meta, sheets), warns);
     } catch (e: any) {
       warns.push(...shield.flush());
       return fail(`DOCX decode error: ${e?.message ?? String(e)}`, warns);
@@ -227,6 +227,10 @@ interface ParaStyleDef {
     font?: string;
   };
   pPr?: {
+    pageBreakBefore?: boolean;
+    keepWithNext?: boolean;
+    keepLines?: boolean;
+    widowControl?: boolean;
     align?: string;
     spaceBefore?: number;
     spaceAfter?: number;
@@ -695,12 +699,11 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
     }
   }
 
-  // pageBreakBefore: paragraph always starts on a new page
-  const pbBeforeNode =
-    pPr?.["w:pageBreakBefore"]?.[0] ?? pPr?.pageBreakBefore?.[0];
-  const hasPageBreakBefore =
-    pbBeforeNode != null &&
-    (pbBeforeNode?._attr?.["w:val"] ?? pbBeforeNode?._attr?.val ?? "1") !== "0";
+  const pagination = parsePaginationProps(pPr);
+  for (const key of ['pageBreakBefore', 'keepWithNext', 'keepLines', 'widowControl'] as const) {
+    const value = pagination[key] ?? styleInherited.pPr?.[key];
+    if (value !== undefined) props[key] = value;
+  }
 
   // Resolve all children (runs AND hyperlinks) in document order
   const children = p?.["_childOrder"] as string[] | undefined;
@@ -786,11 +789,6 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   }
 
   const filteredKids = kids.filter(Boolean) as ParaNode["kids"];
-
-  // Prepend pb span when pageBreakBefore is set
-  if (hasPageBreakBefore) {
-    filteredKids.unshift({ tag: "span", props: {}, kids: [buildPb()] });
-  }
 
   return buildPara(filteredKids, props);
 }
@@ -1230,7 +1228,7 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
       stylesRoot?.["w:docDefaults"]?.[0]?.["w:pPrDefault"]?.[0]?.["w:pPr"]?.[0] ??
       stylesRoot?.docDefaults?.[0]?.pPrDefault?.[0]?.pPr?.[0];
     map.set(DOCX_DEFAULT_STYLE_KEY, {
-      pPr: parseDocxSpacingProps(defaultsPPr, true),
+      pPr: { ...parseDocxSpacingProps(defaultsPPr, true), ...parsePaginationProps(defaultsPPr) },
     });
     const styleArr = toArr(stylesRoot?.["w:style"] ?? stylesRoot?.style);
     for (const style of styleArr) {
@@ -1297,6 +1295,7 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
           pPr?.["w:jc"]?.[0]?._attr?.val;
         def.pPr = {
           ...spacingProps,
+          ...parsePaginationProps(pPr),
           align: alignVal,
           ...parseDocxIndentation(indAttr),
         };
@@ -1308,6 +1307,19 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
     /* non-fatal */
   }
   return map;
+}
+
+function parsePaginationProps(pPr: any): Partial<ParaProps> {
+  const props: Partial<ParaProps> = {};
+  for (const [key, tag] of [['pageBreakBefore', 'pageBreakBefore'], ['keepWithNext', 'keepNext'],
+    ['keepLines', 'keepLines'], ['widowControl', 'widowControl']] as const) {
+    const node = pPr?.[`w:${tag}`]?.[0] ?? pPr?.[tag]?.[0];
+    if (node != null) {
+      const val = String(node?._attr?.['w:val'] ?? node?._attr?.val ?? '1').toLowerCase();
+      props[key] = !['0', 'false', 'off'].includes(val);
+    }
+  }
+  return props;
 }
 
 /** ECMA-376 Part 1 §17.3.1.12: hanging takes precedence, including zero. */

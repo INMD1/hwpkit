@@ -73,6 +73,10 @@ interface CharPrInfo {
 }
 
 interface ParaPrInfo {
+  pageBreakBefore?: boolean;
+  keepWithNext?: boolean;
+  keepLines?: boolean;
+  widowControl?: boolean;
   align?: string;
   indentPt?: number; // hc:left → 문단 전체 왼쪽 여백
   indentRightPt?: number; // hc:right → 문단 전체 오른쪽 여백
@@ -577,7 +581,9 @@ function extractParaPrs(headObj: any): Map<number, ParaPrInfo> {
 
         // HWPX paraPr 여백 값은 HWP 바이너리 PARA_SHAPE와 동일하게
         // 물리 HWPUNIT의 2배로 기록된다.
-        if (leftVal !== 0) indentPt = Metric.hwpToPt(leftVal / 2);
+        // As in HWP, negative indent extends the body to the right of hc:left.
+        const bodyLeft = leftVal - Math.min(0, indentVal);
+        if (bodyLeft !== 0) indentPt = Metric.hwpToPt(bodyLeft / 2);
         if (rightVal !== 0) indentRightPt = Metric.hwpToPt(rightVal / 2);
         if (indentVal !== 0) firstLineIndentPt = Metric.hwpToPt(indentVal / 2);
         if (prevVal > 0) spaceBefore = Metric.hwpToPt(prevVal / 2);
@@ -597,7 +603,12 @@ function extractParaPrs(headObj: any): Map<number, ParaPrInfo> {
         }
       }
 
+      const breakSetting = pp?.["hh:breakSetting"]?.[0]?._attr ?? {};
       map.set(id, {
+        pageBreakBefore: ['1', 'true'].includes(String(breakSetting.pageBreakBefore)),
+        keepWithNext: ['1', 'true'].includes(String(breakSetting.keepWithNext)),
+        keepLines: ['1', 'true'].includes(String(breakSetting.keepLines)),
+        widowControl: ['1', 'true'].includes(String(breakSetting.widowOrphan)),
         align,
         indentPt,
         indentRightPt,
@@ -620,7 +631,8 @@ function extractParaPrs(headObj: any): Map<number, ParaPrInfo> {
 
 // ─── Section decoding ──────────────────────────────────────
 
-function addParaItems(p: any, items: { type: string; node: any }[]): void {
+function addParaItems(p: any, items: { type: string; node: any }[], ctx: DecCtx): void {
+  const start = items.length;
   // Check if this paragraph contains a table in its runs
   const runs = getTag(p, "hp:run", "hp:RUN");
   for (const run of runs) {
@@ -633,7 +645,13 @@ function addParaItems(p: any, items: { type: string; node: any }[]): void {
   }
   // A table-only HWPX paragraph is still its positioning/flow anchor.  Hancom
   // exports the table first and keeps this paragraph immediately afterwards.
-  items.push({ type: "para", node: p });
+  const hasTables = items.length > start;
+  if (hasTables && decodePara(p, ctx).props.pageBreakBefore) {
+    items.splice(start, 0, { type: "tableBreak", node: p });
+    items.push({ type: "tableAnchor", node: p });
+  } else {
+    items.push({ type: "para", node: p });
+  }
 }
 
 function decodeSection(sec: any, dims: PageDims, ctx: DecCtx) {
@@ -653,17 +671,17 @@ function decodeSection(sec: any, dims: PageDims, ctx: DecCtx) {
     let ti = 0;
     for (const tag of childOrder) {
       if ((tag === "hp:p" || tag === "hp:P") && pi < paras.length) {
-        addParaItems(paras[pi++], items);
+        addParaItems(paras[pi++], items, ctx);
       } else if ((tag === "hp:tbl" || tag === "hp:TABLE") && ti < tbls.length) {
         items.push({ type: "table", node: tbls[ti++] });
       }
     }
     // Append any remaining (fallback)
-    while (pi < paras.length) addParaItems(paras[pi++], items);
+    while (pi < paras.length) addParaItems(paras[pi++], items, ctx);
     while (ti < tbls.length) items.push({ type: "table", node: tbls[ti++] });
   } else {
     // No order info — process paragraphs sequentially (fallback to previous logic)
-    for (const p of paras) addParaItems(p, items);
+    for (const p of paras) addParaItems(p, items, ctx);
     // Note: direct tables are appended after paras in this fallback
     for (const t of tbls) items.push({ type: "table", node: t });
   }
@@ -686,7 +704,13 @@ function decodeSection(sec: any, dims: PageDims, ctx: DecCtx) {
           return buildPara([buildSpan("[표 파싱 실패]")]);
         }
       }
-      return decodePara(item.node, ctx);
+      if (item.type === "tableBreak") return buildPara([], {
+        pageBreakBefore: true, keepWithNext: true,
+        lineHeightFixed: 0.05, lineHeightRule: "exact", spaceBefore: 0, spaceAfter: 0,
+      });
+      const para = decodePara(item.node, ctx);
+      if (item.type === "tableAnchor") para.props.pageBreakBefore = false;
+      return para;
     },
     () => buildPara([buildSpan("[파싱 실패]")]),
     "hwpx:content",
@@ -831,6 +855,10 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
 
   // Apply spacing/indent/lineHeight from paraPr definition
   if (paraPrDef) {
+    props.pageBreakBefore = paraPrDef.pageBreakBefore;
+    props.keepWithNext = paraPrDef.keepWithNext;
+    props.keepLines = paraPrDef.keepLines;
+    props.widowControl = paraPrDef.widowControl;
     if (paraPrDef.indentPt !== undefined) props.indentPt = paraPrDef.indentPt;
     if (paraPrDef.indentRightPt !== undefined)
       props.indentRightPt = paraPrDef.indentRightPt;
@@ -924,9 +952,9 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
     }
   }
 
-  // pageBreak="1" → prepend a pb node in its own span
+  // A paragraph-start break must not add an empty run/line before the text.
   if (pAttr.pageBreak === "1") {
-    kids.unshift({ tag: "span", props: {}, kids: [buildPb()] });
+    props.pageBreakBefore = true;
   }
 
   return buildPara(kids.filter(Boolean) as ParaNode["kids"], props);

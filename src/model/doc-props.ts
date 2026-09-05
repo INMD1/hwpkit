@@ -38,6 +38,10 @@ export interface TextProps {
   color?: string;
   bg?: string;
 }export interface ParaProps {
+  keepWithNext?: boolean;
+  keepLines?: boolean;
+  widowControl?: boolean;
+  pageBreakBefore?: boolean;
   align?: Align;
   heading?: Heading;
   styleId?: string;              // DOCX pStyle styleId (e.g. "Heading1", "TOC1")
@@ -123,6 +127,7 @@ export interface PageDims {
 }
 
 export interface DocMeta {
+  evenAndOddHeaders?: boolean;
   title?: string;
   author?: string;
   subject?: string;

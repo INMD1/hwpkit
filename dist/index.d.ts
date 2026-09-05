@@ -35,6 +35,10 @@ interface TextProps {
     bg?: string;
 }
 interface ParaProps {
+    keepWithNext?: boolean;
+    keepLines?: boolean;
+    widowControl?: boolean;
+    pageBreakBefore?: boolean;
     align?: Align;
     heading?: Heading;
     styleId?: string;
@@ -115,6 +119,7 @@ interface PageDims {
     footerPt?: number;
 }
 interface DocMeta {
+    evenAndOddHeaders?: boolean;
     title?: string;
     author?: string;
     subject?: string;
@@ -193,6 +198,9 @@ interface GridNode {
 }
 type ContentNode = ParaNode | GridNode;
 interface SheetNode {
+    differentFirstPage?: boolean;
+    /** How this section starts relative to the preceding section (OOXML sectPr/type). */
+    sectionType?: 'nextPage' | 'continuous' | 'evenPage' | 'oddPage' | 'nextColumn';
     tag: 'sheet';
     dims: PageDims;
     kids: ContentNode[];

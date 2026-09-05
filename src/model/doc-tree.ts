@@ -68,6 +68,9 @@ export interface GridNode {
 export type ContentNode = ParaNode | GridNode;
 
 export interface SheetNode {
+  differentFirstPage?: boolean;
+  /** How this section starts relative to the preceding section (OOXML sectPr/type). */
+  sectionType?: 'nextPage' | 'continuous' | 'evenPage' | 'oddPage' | 'nextColumn';
   tag: 'sheet';
   dims: PageDims;
   kids: ContentNode[];

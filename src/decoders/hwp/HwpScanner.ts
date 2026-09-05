@@ -77,6 +77,10 @@ interface HwpCharShape {
   textColor: string;
 }
 interface HwpParaShape {
+  pageBreakBefore?: boolean;
+  keepWithNext?: boolean;
+  keepLines?: boolean;
+  widowControl?: boolean;
   align: Align;
   spaceBefore: number;
   spaceAfter: number;
@@ -155,9 +159,15 @@ function parseRecords(data: Uint8Array): HwpRecord[] {
 }
 
 function tryInflate(data: Uint8Array): Uint8Array {
-  try { return pako.inflate(data); } catch {
-    try { return pako.inflateRaw(data); } catch { return data; }
+  // Pako can return undefined for an incomplete stream without throwing.
+  // Only accept actual bytes, and still try raw DEFLATE before falling back.
+  for (const inflate of [pako.inflate, pako.inflateRaw]) {
+    try {
+      const result = inflate(data);
+      if (result instanceof Uint8Array) return result;
+    } catch { /* try the next representation */ }
   }
+  return data;
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -357,6 +367,10 @@ function parseParaShape(d: Uint8Array): HwpParaShape {
 
   return {
     align,
+    pageBreakBefore: (attr & (1 << 19)) !== 0,
+    keepWithNext: (attr & (1 << 17)) !== 0,
+    keepLines: (attr & (1 << 18)) !== 0,
+    widowControl: (attr & (1 << 16)) !== 0,
     lineSpacingType,
     leftMargin:  d.length >= 8  ? i32(d, 4)  : 0,  // offset 4: 문단 몸체 왼쪽 여백 (HWPUNIT * 2)
     rightMargin: d.length >= 12 ? i32(d, 8)  : 0,  // offset 8: 문단 몸체 오른쪽 여백 (HWPUNIT * 2)
@@ -492,7 +506,7 @@ function parseBody(
       i++; // already handled above; skip at top level
     } else if (recs[i].tag === TAG_PARA_HEADER) {
       const r = shield.guard(
-        () => parseParagraphGroup(recs, i, di, shield, gsoCtx),
+        () => parseParagraphGroup(recs, i, di, shield, gsoCtx, content.length === 0),
         { nodes: [] as ContentNode[], next: i + 1 },
         `hwp:para@${i}`,
       );
@@ -509,6 +523,7 @@ function parseBody(
 
 function parseParagraphGroup(
   recs: HwpRecord[], start: number, di: DocInfo, shield: ShieldedParser, gsoCtx: GsoCtx,
+  firstBodyParagraph = false,
 ): { nodes: ContentNode[]; next: number } {
   const hdr = recs[start];
   const lv  = hdr.level;
@@ -666,8 +681,20 @@ function parseParagraphGroup(
       }
     }
 
-    // P5: 쪽나누기(divideSort & 4) → page-break 문단 먼저 출력
-    if (divideSort & 4) {
+    const leadingExplicitBreak = firstBodyParagraph && (divideSort & 4) !== 0 &&
+      !ps?.pageBreakBefore && grids.length === 0 && paraContent.length > 0;
+    // A literal leading page break creates a blank first page. Word ignores
+    // pageBreakBefore on its first paragraph, so keep the explicit break here.
+    if (leadingExplicitBreak) {
+      paraContent.unshift({ tag: 'span', props: {}, kids: [buildPb()] });
+    }
+    const hasPageBreakBefore = (divideSort & 4) !== 0 && !leadingExplicitBreak;
+    // A grid has no paragraph properties of its own, so retain a standalone
+    // break only when the break must precede a grid or has no following text.
+    if (
+      hasPageBreakBefore &&
+      (grids.length > 0 || paraContent.length === 0)
+    ) {
       nodes.push(buildPara([{ tag: 'span', props: {}, kids: [buildPb()] } as SpanNode]));
     }
     // P5: 표 → 앵커 문단 순서 (앵커 문단 드롭 금지)
@@ -690,9 +717,14 @@ function parseParagraphGroup(
       (paraContent.length === 0 || isWhitespaceSectionPara);
     const isPageBreakOnlyPara = (divideSort & 4) && paraContent.length === 0 && grids.length === 0;
     if (!isSectionOnlyPara && !isPageBreakOnlyPara) {
+      const paraProps = buildParaProps(ps, hwpStyleId, di);
+      if (hasPageBreakBefore && grids.length === 0)
+        paraProps.pageBreakBefore = true;
       nodes.push(buildPara(
-        paraContent.length > 0 ? paraContent as any : [buildSpan('')],
-        buildParaProps(ps, hwpStyleId, di),
+        paraContent.length > 0
+          ? paraContent as any
+          : resolveCharShapes([], csPairs, di),
+        paraProps,
       ));
     }
   }
@@ -1177,17 +1209,20 @@ function parseCellRec(
           }
           const kids = paraContent.length > 0 ? paraContent as any : [buildSpan('')];
           // P6: innerGrids 먼저, 앵커 문단 나중 (P5와 동일한 순서)
-          const isPageBreakOnlyPara = (cellDivide & 4) && paraContent.length === 0 && innerGrids.length === 0;
+          const hasPageBreakBefore = (cellDivide & 4) !== 0;
+          const isPageBreakOnlyPara = hasPageBreakBefore && paraContent.length === 0 && innerGrids.length === 0;
           const items: (ParaNode | GridNode)[] = [...innerGrids];
           if (!isPageBreakOnlyPara) {
-            items.push(
-              buildPara(
-                kids,
-                buildParaProps(ps, cellStyleId, di),
-              ),
-            );
+            const paraProps = buildParaProps(ps, cellStyleId, di);
+            if (hasPageBreakBefore && innerGrids.length === 0)
+              paraProps.pageBreakBefore = true;
+            items.push(buildPara(kids, paraProps));
           }
-          if (cellDivide & 4) items.unshift(buildPara([{ tag: 'span', props: {}, kids: [buildPb()] } as SpanNode]));
+          if (
+            hasPageBreakBefore &&
+            (innerGrids.length > 0 || paraContent.length === 0)
+          )
+            items.unshift(buildPara([{ tag: 'span', props: {}, kids: [buildPb()] } as SpanNode]));
           return { items, next: j };
         },
         { items: [buildPara([buildSpan('')])] as (ParaNode | GridNode)[], next: k + 1 },
@@ -1333,6 +1368,10 @@ function buildParaProps(
     }
   }
   if (ps.align && ps.align !== 'justify') p.align = ps.align;
+  p.pageBreakBefore = ps.pageBreakBefore;
+  p.keepWithNext = ps.keepWithNext;
+  p.keepLines = ps.keepLines;
+  p.widowControl = ps.widowControl;
   if (hwpStyleId === 18 && !p.align) p.align = 'justify';
   p.spaceBefore = Math.max(0, Metric.hwpToPt(ps.spaceBefore / 2));
   p.spaceAfter = Math.max(0, Metric.hwpToPt(ps.spaceAfter / 2));
@@ -1350,12 +1389,13 @@ function buildParaProps(
     p.lineHeight = ps.lineSpacing > 0 ? ps.lineSpacing / 100 : 1.6;
   }
   // HWP 5.0 ParaShape 여백 계열은 HWPUNIT의 2배 값으로 저장된다.
-  // leftMargin (offset 4) = 문단 몸체 왼쪽 여백 → indentPt (pt), ensure non-negative
-  const leftMarginPt = Math.max(0, Metric.hwpToPt(ps.leftMargin / 2));
-  if (leftMarginPt > 0) p.indentPt = leftMarginPt;
+  // HWP leftMargin anchors the first line when indent is negative. The common
+  // model stores the body margin, so include the hanging width at this boundary.
+  const leftMarginPt = Metric.hwpToPt((ps.leftMargin - Math.min(0, ps.indent)) / 2);
+  if (leftMarginPt !== 0) p.indentPt = leftMarginPt;
   // rightMargin (offset 8) = 문단 몸체 오른쪽 여백 → indentRightPt (pt)
-  const rightMarginPt = Math.max(0, Metric.hwpToPt(ps.rightMargin / 2));
-  if (rightMarginPt > 0) p.indentRightPt = rightMarginPt;
+  const rightMarginPt = Metric.hwpToPt(ps.rightMargin / 2);
+  if (rightMarginPt !== 0) p.indentRightPt = rightMarginPt;
   // indent (offset 12) = 첫 줄 들여쓰기(양수) / 내어쓰기(음수) → firstLineIndentPt
   if (ps.indent !== 0) p.firstLineIndentPt = Metric.hwpToPt(ps.indent / 2);
   if (ps.verAlign && ps.verAlign !== 'baseline') p.verAlign = ps.verAlign;
@@ -1437,9 +1477,14 @@ export class HwpScanner implements Decoder {
       // gsoCtx tracks sequential 'gso' encounter order — must be shared across all sections
       const gsoCtx: GsoCtx = { count: 0, objects: new Map() };
 
-      // Body sections
-      const allContent: ContentNode[] = [];
-      let pageDims: PageDims = A4;
+      // BodyText/SectionN is a logical HWP section, not just another chunk of
+      // the same page stream. Preserve each one so the DOCX encoder can emit a
+      // real section break with the matching page geometry.
+      const parsedSections: Array<{
+        content: ContentNode[];
+        dims: PageDims;
+      }> = [];
+      let inheritedDims: PageDims = { ...A4 };
 
       for (let s = 0; s < 100; s++) {
         const sec = streams.get(`BodyText/Section${s}`) ?? streams.get(`Section${s}`);
@@ -1448,8 +1493,11 @@ export class HwpScanner implements Decoder {
             const fb = findBodySection(streams);
             if (fb) {
               const r = parseBody(fb, compressed, di, shield, gsoCtx);
-              allContent.push(...r.content);
-              if (r.pageDims) pageDims = r.pageDims;
+              inheritedDims = r.pageDims ?? inheritedDims;
+              parsedSections.push({
+                content: r.content,
+                dims: inheritedDims,
+              });
             }
           }
           break;
@@ -1459,23 +1507,51 @@ export class HwpScanner implements Decoder {
           { content: [], pageDims: undefined },
           `hwp:sec${s}`,
         );
-        allContent.push(...r.content);
-        if (r.pageDims) pageDims = r.pageDims;
+        inheritedDims = r.pageDims ?? inheritedDims;
+        parsedSections.push({
+          content: r.content,
+          dims: inheritedDims,
+        });
       }
 
+      const allContent = parsedSections.flatMap((section) => section.content);
       if (objectMap.size > 0) {
         injectImagesIntoContent(allContent, objectMap, gsoCtx.objects);
       }
 
-      normalizeHancomParagraphAnchors(allContent, di);
+      for (const section of parsedSections) {
+        normalizeHancomParagraphAnchors(section.content, di);
+      }
 
       warns.push(...shield.flush());
-      const content = allContent.length > 0 ? allContent : [buildPara([buildSpan('')])];
-      // P8: 머리말/꼬리말을 gsoCtx에서 가져와 buildSheet에 전달
-      return succeed(buildRoot({}, [buildSheet(content, pageDims, {
-        headers: gsoCtx.headers ? { default: gsoCtx.headers } : undefined,
-        footers: gsoCtx.footers ? { default: gsoCtx.footers } : undefined,
-      })]), warns);
+      if (parsedSections.length === 0) {
+        parsedSections.push({
+          content: [buildPara([buildSpan('')])],
+          dims: inheritedDims,
+        });
+      }
+
+      const sheets = parsedSections.map((section, index) =>
+        buildSheet(
+          section.content.length > 0
+            ? section.content
+            : [buildPara([buildSpan('')])],
+          section.dims,
+          // Header/footer controls are currently collected once and inherited
+          // by later sections. Attach them to the first section explicitly.
+          index === 0
+            ? {
+                headers: gsoCtx.headers
+                  ? { default: gsoCtx.headers }
+                  : undefined,
+                footers: gsoCtx.footers
+                  ? { default: gsoCtx.footers }
+                  : undefined,
+              }
+            : undefined,
+        ),
+      );
+      return succeed(buildRoot({}, sheets), warns);
     } catch (e: any) {
       warns.push(...shield.flush());
       return fail(`HWP decode error: ${e?.message ?? String(e)}`, warns);

@@ -1369,7 +1369,8 @@ function extractParaPrs(headObj) {
         const indentVal = Number(indentEl?._attr?.value ?? 0);
         const prevVal = Number(prevEl?._attr?.value ?? 0);
         const nextVal = Number(nextEl?._attr?.value ?? 0);
-        if (leftVal !== 0) indentPt = Metric.hwpToPt(leftVal / 2);
+        const bodyLeft = leftVal - Math.min(0, indentVal);
+        if (bodyLeft !== 0) indentPt = Metric.hwpToPt(bodyLeft / 2);
         if (rightVal !== 0) indentRightPt = Metric.hwpToPt(rightVal / 2);
         if (indentVal !== 0) firstLineIndentPt = Metric.hwpToPt(indentVal / 2);
         if (prevVal > 0) spaceBefore = Metric.hwpToPt(prevVal / 2);
@@ -1385,7 +1386,12 @@ function extractParaPrs(headObj) {
           lineHeightFixed = Metric.hwpToPt(lsVal / 2);
         }
       }
+      const breakSetting = pp?.["hh:breakSetting"]?.[0]?._attr ?? {};
       map.set(id, {
+        pageBreakBefore: ["1", "true"].includes(String(breakSetting.pageBreakBefore)),
+        keepWithNext: ["1", "true"].includes(String(breakSetting.keepWithNext)),
+        keepLines: ["1", "true"].includes(String(breakSetting.keepLines)),
+        widowControl: ["1", "true"].includes(String(breakSetting.widowOrphan)),
         align,
         indentPt,
         indentRightPt,
@@ -1401,7 +1407,8 @@ function extractParaPrs(headObj) {
   }
   return map;
 }
-function addParaItems(p, items) {
+function addParaItems(p, items, ctx) {
+  const start = items.length;
   const runs = getTag(p, "hp:run", "hp:RUN");
   for (const run of runs) {
     const tbls = getTag(run, "hp:tbl", "hp:TABLE");
@@ -1411,7 +1418,13 @@ function addParaItems(p, items) {
       }
     }
   }
-  items.push({ type: "para", node: p });
+  const hasTables = items.length > start;
+  if (hasTables && decodePara(p, ctx).props.pageBreakBefore) {
+    items.splice(start, 0, { type: "tableBreak", node: p });
+    items.push({ type: "tableAnchor", node: p });
+  } else {
+    items.push({ type: "para", node: p });
+  }
 }
 function decodeSection(sec, dims, ctx) {
   const firstParas = getTag(sec, "hp:p", "hp:P");
@@ -1425,15 +1438,15 @@ function decodeSection(sec, dims, ctx) {
     let ti = 0;
     for (const tag of childOrder) {
       if ((tag === "hp:p" || tag === "hp:P") && pi < paras.length) {
-        addParaItems(paras[pi++], items);
+        addParaItems(paras[pi++], items, ctx);
       } else if ((tag === "hp:tbl" || tag === "hp:TABLE") && ti < tbls.length) {
         items.push({ type: "table", node: tbls[ti++] });
       }
     }
-    while (pi < paras.length) addParaItems(paras[pi++], items);
+    while (pi < paras.length) addParaItems(paras[pi++], items, ctx);
     while (ti < tbls.length) items.push({ type: "table", node: tbls[ti++] });
   } else {
-    for (const p of paras) addParaItems(p, items);
+    for (const p of paras) addParaItems(p, items, ctx);
     for (const t of tbls) items.push({ type: "table", node: t });
   }
   const kids = ctx.shield.guardAll(
@@ -1454,7 +1467,17 @@ function decodeSection(sec, dims, ctx) {
           return buildPara([buildSpan("[\uD45C \uD30C\uC2F1 \uC2E4\uD328]")]);
         }
       }
-      return decodePara(item.node, ctx);
+      if (item.type === "tableBreak") return buildPara([], {
+        pageBreakBefore: true,
+        keepWithNext: true,
+        lineHeightFixed: 0.05,
+        lineHeightRule: "exact",
+        spaceBefore: 0,
+        spaceAfter: 0
+      });
+      const para = decodePara(item.node, ctx);
+      if (item.type === "tableAnchor") para.props.pageBreakBefore = false;
+      return para;
     },
     () => buildPara([buildSpan("[\uD30C\uC2F1 \uC2E4\uD328]")]),
     "hwpx:content"
@@ -1556,6 +1579,10 @@ function decodePara(p, ctx) {
   };
   if (Number.isFinite(styleIdRef) && styleIdRef >= 0) props.hwpStyleId = styleIdRef;
   if (paraPrDef) {
+    props.pageBreakBefore = paraPrDef.pageBreakBefore;
+    props.keepWithNext = paraPrDef.keepWithNext;
+    props.keepLines = paraPrDef.keepLines;
+    props.widowControl = paraPrDef.widowControl;
     if (paraPrDef.indentPt !== void 0) props.indentPt = paraPrDef.indentPt;
     if (paraPrDef.indentRightPt !== void 0)
       props.indentRightPt = paraPrDef.indentRightPt;
@@ -1618,7 +1645,7 @@ function decodePara(p, ctx) {
     }
   }
   if (pAttr.pageBreak === "1") {
-    kids.unshift({ tag: "span", props: {}, kids: [buildPb()] });
+    props.pageBreakBefore = true;
   }
   return buildPara(kids.filter(Boolean), props);
 }
@@ -2021,15 +2048,14 @@ function parseRecords(data) {
   return out;
 }
 function tryInflate(data) {
-  try {
-    return import_pako2.default.inflate(data);
-  } catch {
+  for (const inflate of [import_pako2.default.inflate, import_pako2.default.inflateRaw]) {
     try {
-      return import_pako2.default.inflateRaw(data);
+      const result = inflate(data);
+      if (result instanceof Uint8Array) return result;
     } catch {
-      return data;
     }
   }
+  return data;
 }
 function parseFileHeader(buf) {
   if (buf.length < 40) return { compressed: true, encrypted: false };
@@ -2148,6 +2174,10 @@ function parseParaShape(d) {
   const listId = d.length >= 32 ? BinaryKit.readU16LE(d, 30) : 0;
   return {
     align,
+    pageBreakBefore: (attr & 1 << 19) !== 0,
+    keepWithNext: (attr & 1 << 17) !== 0,
+    keepLines: (attr & 1 << 18) !== 0,
+    widowControl: (attr & 1 << 16) !== 0,
     lineSpacingType,
     leftMargin: d.length >= 8 ? i32(d, 4) : 0,
     // offset 4: 문단 몸체 왼쪽 여백 (HWPUNIT * 2)
@@ -2236,7 +2266,7 @@ function parseBody(raw, compressed, di, shield, gsoCtx) {
       i++;
     } else if (recs[i].tag === TAG_PARA_HEADER) {
       const r = shield.guard(
-        () => parseParagraphGroup(recs, i, di, shield, gsoCtx),
+        () => parseParagraphGroup(recs, i, di, shield, gsoCtx, content.length === 0),
         { nodes: [], next: i + 1 },
         `hwp:para@${i}`
       );
@@ -2248,7 +2278,7 @@ function parseBody(raw, compressed, di, shield, gsoCtx) {
   }
   return { content, pageDims };
 }
-function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
+function parseParagraphGroup(recs, start, di, shield, gsoCtx, firstBodyParagraph = false) {
   const hdr = recs[start];
   const lv = hdr.level;
   const _nchars = hdr.data.length >= 4 ? BinaryKit.readU32LE(hdr.data, 0) & 2147483647 : 0;
@@ -2367,7 +2397,12 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
         paraContent.push(buildSpan(`__EXT_${ch.imgId}__`));
       }
     }
-    if (divideSort & 4) {
+    const leadingExplicitBreak = firstBodyParagraph && (divideSort & 4) !== 0 && !ps?.pageBreakBefore && grids.length === 0 && paraContent.length > 0;
+    if (leadingExplicitBreak) {
+      paraContent.unshift({ tag: "span", props: {}, kids: [buildPb()] });
+    }
+    const hasPageBreakBefore = (divideSort & 4) !== 0 && !leadingExplicitBreak;
+    if (hasPageBreakBefore && (grids.length > 0 || paraContent.length === 0)) {
       nodes.push(buildPara([{ tag: "span", props: {}, kids: [buildPb()] }]));
     }
     nodes.push(...grids);
@@ -2379,9 +2414,12 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
     const isSectionOnlyPara = hasSectionCtrl && grids.length === 0 && (paraContent.length === 0 || isWhitespaceSectionPara);
     const isPageBreakOnlyPara = divideSort & 4 && paraContent.length === 0 && grids.length === 0;
     if (!isSectionOnlyPara && !isPageBreakOnlyPara) {
+      const paraProps = buildParaProps(ps, hwpStyleId, di);
+      if (hasPageBreakBefore && grids.length === 0)
+        paraProps.pageBreakBefore = true;
       nodes.push(buildPara(
-        paraContent.length > 0 ? paraContent : [buildSpan("")],
-        buildParaProps(ps, hwpStyleId, di)
+        paraContent.length > 0 ? paraContent : resolveCharShapes([], csPairs, di),
+        paraProps
       ));
     }
   }
@@ -2785,17 +2823,17 @@ function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gs
             }
           }
           const kids = paraContent.length > 0 ? paraContent : [buildSpan("")];
-          const isPageBreakOnlyPara = cellDivide & 4 && paraContent.length === 0 && innerGrids.length === 0;
+          const hasPageBreakBefore = (cellDivide & 4) !== 0;
+          const isPageBreakOnlyPara = hasPageBreakBefore && paraContent.length === 0 && innerGrids.length === 0;
           const items = [...innerGrids];
           if (!isPageBreakOnlyPara) {
-            items.push(
-              buildPara(
-                kids,
-                buildParaProps(ps, cellStyleId, di)
-              )
-            );
+            const paraProps = buildParaProps(ps, cellStyleId, di);
+            if (hasPageBreakBefore && innerGrids.length === 0)
+              paraProps.pageBreakBefore = true;
+            items.push(buildPara(kids, paraProps));
           }
-          if (cellDivide & 4) items.unshift(buildPara([{ tag: "span", props: {}, kids: [buildPb()] }]));
+          if (hasPageBreakBefore && (innerGrids.length > 0 || paraContent.length === 0))
+            items.unshift(buildPara([{ tag: "span", props: {}, kids: [buildPb()] }]));
           return { items, next: j };
         },
         { items: [buildPara([buildSpan("")])], next: k + 1 },
@@ -2922,6 +2960,10 @@ function buildParaProps(ps, hwpStyleId, di) {
     }
   }
   if (ps.align && ps.align !== "justify") p.align = ps.align;
+  p.pageBreakBefore = ps.pageBreakBefore;
+  p.keepWithNext = ps.keepWithNext;
+  p.keepLines = ps.keepLines;
+  p.widowControl = ps.widowControl;
   if (hwpStyleId === 18 && !p.align) p.align = "justify";
   p.spaceBefore = Math.max(0, Metric.hwpToPt(ps.spaceBefore / 2));
   p.spaceAfter = Math.max(0, Metric.hwpToPt(ps.spaceAfter / 2));
@@ -2933,10 +2975,10 @@ function buildParaProps(ps, hwpStyleId, di) {
   } else {
     p.lineHeight = ps.lineSpacing > 0 ? ps.lineSpacing / 100 : 1.6;
   }
-  const leftMarginPt = Math.max(0, Metric.hwpToPt(ps.leftMargin / 2));
-  if (leftMarginPt > 0) p.indentPt = leftMarginPt;
-  const rightMarginPt = Math.max(0, Metric.hwpToPt(ps.rightMargin / 2));
-  if (rightMarginPt > 0) p.indentRightPt = rightMarginPt;
+  const leftMarginPt = Metric.hwpToPt((ps.leftMargin - Math.min(0, ps.indent)) / 2);
+  if (leftMarginPt !== 0) p.indentPt = leftMarginPt;
+  const rightMarginPt = Metric.hwpToPt(ps.rightMargin / 2);
+  if (rightMarginPt !== 0) p.indentRightPt = rightMarginPt;
   if (ps.indent !== 0) p.firstLineIndentPt = Metric.hwpToPt(ps.indent / 2);
   if (ps.verAlign && ps.verAlign !== "baseline") p.verAlign = ps.verAlign;
   if (ps.lineWrap && ps.lineWrap !== "break") p.lineWrap = ps.lineWrap;
@@ -2994,8 +3036,8 @@ var HwpScanner = class {
         objectMap.set(binNum - 1, buildImg(base64, mimeType, wPt, hPt));
       }
       const gsoCtx = { count: 0, objects: /* @__PURE__ */ new Map() };
-      const allContent = [];
-      let pageDims = A4;
+      const parsedSections = [];
+      let inheritedDims = { ...A4 };
       for (let s = 0; s < 100; s++) {
         const sec = streams.get(`BodyText/Section${s}`) ?? streams.get(`Section${s}`);
         if (!sec) {
@@ -3003,8 +3045,11 @@ var HwpScanner = class {
             const fb = findBodySection(streams);
             if (fb) {
               const r2 = parseBody(fb, compressed, di, shield, gsoCtx);
-              allContent.push(...r2.content);
-              if (r2.pageDims) pageDims = r2.pageDims;
+              inheritedDims = r2.pageDims ?? inheritedDims;
+              parsedSections.push({
+                content: r2.content,
+                dims: inheritedDims
+              });
             }
           }
           break;
@@ -3014,19 +3059,39 @@ var HwpScanner = class {
           { content: [], pageDims: void 0 },
           `hwp:sec${s}`
         );
-        allContent.push(...r.content);
-        if (r.pageDims) pageDims = r.pageDims;
+        inheritedDims = r.pageDims ?? inheritedDims;
+        parsedSections.push({
+          content: r.content,
+          dims: inheritedDims
+        });
       }
+      const allContent = parsedSections.flatMap((section) => section.content);
       if (objectMap.size > 0) {
         injectImagesIntoContent(allContent, objectMap, gsoCtx.objects);
       }
-      normalizeHancomParagraphAnchors(allContent, di);
+      for (const section of parsedSections) {
+        normalizeHancomParagraphAnchors(section.content, di);
+      }
       warns.push(...shield.flush());
-      const content = allContent.length > 0 ? allContent : [buildPara([buildSpan("")])];
-      return succeed(buildRoot({}, [buildSheet(content, pageDims, {
-        headers: gsoCtx.headers ? { default: gsoCtx.headers } : void 0,
-        footers: gsoCtx.footers ? { default: gsoCtx.footers } : void 0
-      })]), warns);
+      if (parsedSections.length === 0) {
+        parsedSections.push({
+          content: [buildPara([buildSpan("")])],
+          dims: inheritedDims
+        });
+      }
+      const sheets = parsedSections.map(
+        (section, index) => buildSheet(
+          section.content.length > 0 ? section.content : [buildPara([buildSpan("")])],
+          section.dims,
+          // Header/footer controls are currently collected once and inherited
+          // by later sections. Attach them to the first section explicitly.
+          index === 0 ? {
+            headers: gsoCtx.headers ? { default: gsoCtx.headers } : void 0,
+            footers: gsoCtx.footers ? { default: gsoCtx.footers } : void 0
+          } : void 0
+        )
+      );
+      return succeed(buildRoot({}, sheets), warns);
     } catch (e) {
       warns.push(...shield.flush());
       return fail(`HWP decode error: ${e?.message ?? String(e)}`, warns);
@@ -3214,6 +3279,18 @@ var DocxDecoder = class extends BaseDecoder {
         } catch {
         }
       }
+      meta.evenAndOddHeaders = false;
+      const settings = getFile("word/settings.xml");
+      if (settings) {
+        try {
+          const parsed = await XmlKit.parseStrict(TextKit.decode(settings));
+          const node = parsed?.["w:settings"]?.[0]?.["w:evenAndOddHeaders"]?.[0];
+          if (node != null) meta.evenAndOddHeaders = !["0", "false", "off"].includes(
+            String(node?._attr?.["w:val"] ?? "1").toLowerCase()
+          );
+        } catch {
+        }
+      }
       const numXml = getFile("word/numbering.xml");
       let numMap = /* @__PURE__ */ new Map();
       if (numXml) {
@@ -3253,52 +3330,45 @@ var DocxDecoder = class extends BaseDecoder {
         stylesMap,
         paraStyleMap
       };
-      const kids = [];
+      const sections = [];
+      let kids = [];
       for (const el of elements) {
         const nodes = shield.guard(
           () => decodeElement(el, decCtx),
           [buildPara([buildSpan("[\uC694\uC18C \uD30C\uC2F1 \uC2E4\uD328]")])],
           "docx:bodyElement"
         );
-        if (Array.isArray(nodes)) {
-          kids.push(...nodes);
-        } else {
-          kids.push(nodes);
-        }
-        if (el.type === "para") {
-          const pPr = el.node?.["w:pPr"]?.[0] ?? el.node?.pPr?.[0] ?? {};
-          const inlineSectPr = pPr?.["w:sectPr"]?.[0] ?? pPr?.sectPr?.[0];
-          if (inlineSectPr) {
-            const typeAttr = inlineSectPr?.["w:type"]?.[0]?._attr;
-            const sectType = typeAttr?.["w:val"] ?? typeAttr?.val ?? "nextPage";
-            if (sectType !== "continuous") {
-              kids.push(
-                buildPara([{ tag: "span", props: {}, kids: [buildPb()] }])
-              );
-            }
-          }
+        kids.push(...Array.isArray(nodes) ? nodes : [nodes]);
+        const pPr = el.type === "para" ? el.node?.["w:pPr"]?.[0] ?? el.node?.pPr?.[0] : void 0;
+        const sp = pPr?.["w:sectPr"]?.[0] ?? pPr?.sectPr?.[0];
+        if (sp) {
+          sections.push({ kids, sp });
+          kids = [];
         }
       }
-      const headersMap = await decodeHeaderFooter2(
-        "header",
-        body,
-        relsMap,
-        files,
-        decCtx
-      );
-      const footersMap = await decodeHeaderFooter2(
-        "footer",
-        body,
-        relsMap,
-        files,
-        decCtx
-      );
+      sections.push({ kids, sp: body?.["w:sectPr"]?.[0] ?? body?.sectPr?.[0] });
+      const sheets = [];
+      let headers;
+      let footers;
+      for (const section of sections) {
+        const sectionBody = { "w:sectPr": [section.sp] };
+        const sectionDims = extractDims2(sectionBody) ?? dims;
+        const ownHeaders = await decodeHeaderFooter2("header", sectionBody, relsMap, files, decCtx);
+        const ownFooters = await decodeHeaderFooter2("footer", sectionBody, relsMap, files, decCtx);
+        if (ownHeaders) headers = { ...headers, ...ownHeaders };
+        if (ownFooters) footers = { ...footers, ...ownFooters };
+        const sheet = buildSheet(section.kids.filter(Boolean), sectionDims, { headers, footers });
+        const titlePage = section.sp?.["w:titlePg"]?.[0] ?? section.sp?.titlePg?.[0];
+        sheet.differentFirstPage = titlePage != null && !["0", "false", "off"].includes(
+          String(titlePage?._attr?.["w:val"] ?? titlePage?._attr?.val ?? "1").toLowerCase()
+        );
+        const attr = section.sp?.["w:type"]?.[0]?._attr ?? section.sp?.type?.[0]?._attr;
+        const type = attr?.["w:val"] ?? attr?.val;
+        if (["nextPage", "continuous", "evenPage", "oddPage", "nextColumn"].includes(type)) sheet.sectionType = type;
+        sheets.push(sheet);
+      }
       warns.push(...shield.flush());
-      const sheet = buildSheet(kids.filter(Boolean), dims, {
-        headers: headersMap,
-        footers: footersMap
-      });
-      return succeed(buildRoot(meta, [sheet]), warns);
+      return succeed(buildRoot(meta, sheets), warns);
     } catch (e) {
       warns.push(...shield.flush());
       return fail(`DOCX decode error: ${e?.message ?? String(e)}`, warns);
@@ -3631,8 +3701,11 @@ function decodePara2(p, ctx) {
       props.listOrd = numId >= 2;
     }
   }
-  const pbBeforeNode = pPr?.["w:pageBreakBefore"]?.[0] ?? pPr?.pageBreakBefore?.[0];
-  const hasPageBreakBefore = pbBeforeNode != null && (pbBeforeNode?._attr?.["w:val"] ?? pbBeforeNode?._attr?.val ?? "1") !== "0";
+  const pagination = parsePaginationProps(pPr);
+  for (const key of ["pageBreakBefore", "keepWithNext", "keepLines", "widowControl"]) {
+    const value = pagination[key] ?? styleInherited.pPr?.[key];
+    if (value !== void 0) props[key] = value;
+  }
   const children = p?.["_childOrder"];
   const kids = [];
   if (Array.isArray(children)) {
@@ -3703,9 +3776,6 @@ function decodePara2(p, ctx) {
     kids.push(...legacyKids);
   }
   const filteredKids = kids.filter(Boolean);
-  if (hasPageBreakBefore) {
-    filteredKids.unshift({ tag: "span", props: {}, kids: [buildPb()] });
-  }
   return buildPara(filteredKids, props);
 }
 function decodeRunOrImage(run, ctx) {
@@ -4024,7 +4094,7 @@ async function parseParaStyleMap(xml) {
     const stylesRoot = obj?.["w:styles"]?.[0] ?? obj?.styles?.[0] ?? obj;
     const defaultsPPr = stylesRoot?.["w:docDefaults"]?.[0]?.["w:pPrDefault"]?.[0]?.["w:pPr"]?.[0] ?? stylesRoot?.docDefaults?.[0]?.pPrDefault?.[0]?.pPr?.[0];
     map.set(DOCX_DEFAULT_STYLE_KEY, {
-      pPr: parseDocxSpacingProps(defaultsPPr, true)
+      pPr: { ...parseDocxSpacingProps(defaultsPPr, true), ...parsePaginationProps(defaultsPPr) }
     });
     const styleArr = toArr2(stylesRoot?.["w:style"] ?? stylesRoot?.style);
     for (const style of styleArr) {
@@ -4069,6 +4139,7 @@ async function parseParaStyleMap(xml) {
         const alignVal = pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ?? pPr?.["w:jc"]?.[0]?._attr?.val;
         def.pPr = {
           ...spacingProps,
+          ...parsePaginationProps(pPr),
           align: alignVal,
           ...parseDocxIndentation(indAttr)
         };
@@ -4078,6 +4149,22 @@ async function parseParaStyleMap(xml) {
   } catch {
   }
   return map;
+}
+function parsePaginationProps(pPr) {
+  const props = {};
+  for (const [key, tag] of [
+    ["pageBreakBefore", "pageBreakBefore"],
+    ["keepWithNext", "keepNext"],
+    ["keepLines", "keepLines"],
+    ["widowControl", "widowControl"]
+  ]) {
+    const node = pPr?.[`w:${tag}`]?.[0] ?? pPr?.[tag]?.[0];
+    if (node != null) {
+      const val = String(node?._attr?.["w:val"] ?? node?._attr?.val ?? "1").toLowerCase();
+      props[key] = !["0", "false", "off"].includes(val);
+    }
+  }
+  return props;
 }
 function parseDocxIndentation(attrs) {
   const result = {};
@@ -5314,7 +5401,7 @@ function paraShapeHwpToLayoutHwp(value) {
   return Math.round(value / 2);
 }
 function paraPrKey(p) {
-  return `${p.align ?? "left"}|${p.verAlign ?? "baseline"}|${p.lineWrap ?? "break"}|${p.listOrd ?? ""}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.indentRightPt ?? 0}|${p.firstLineIndentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}|${p.lineHeightFixed ?? 0}|${p.styleId ?? ""}`;
+  return `${p.pageBreakBefore ?? false}|${p.keepWithNext ?? false}|${p.keepLines ?? false}|${p.widowControl ?? false}|${p.align ?? "left"}|${p.verAlign ?? "baseline"}|${p.lineWrap ?? "break"}|${p.listOrd ?? ""}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.indentRightPt ?? 0}|${p.firstLineIndentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}|${p.lineHeightFixed ?? 0}|${p.styleId ?? ""}`;
 }
 function registerCharPr(props, ctx) {
   const key = charPrKey(props);
@@ -5371,11 +5458,16 @@ function registerParaPr(props, ctx) {
   const verAlignStr = props.verAlign ? V_ALIGN_MAP[props.verAlign] ?? "BASELINE" : "BASELINE";
   const lineWrapStr = props.lineWrap ? LINE_WRAP_MAP[props.lineWrap] ?? "BREAK" : "BREAK";
   const def = {
+    pageBreakBefore: props.pageBreakBefore,
+    keepWithNext: props.keepWithNext,
+    keepLines: props.keepLines,
+    widowControl: props.widowControl,
     id,
     align: alignStr,
     verAlign: verAlignStr,
     lineWrap: lineWrapStr,
-    leftHwp: Metric.ptToHwp(props.indentPt ?? 0) * 2,
+    // HWPX stores the margin before applying a negative first-line indent.
+    leftHwp: Metric.ptToHwp((props.indentPt ?? 0) + Math.min(0, props.firstLineIndentPt ?? 0)) * 2,
     rightHwp: Metric.ptToHwp(props.indentRightPt ?? 0) * 2,
     intentHwp: Metric.ptToHwp(props.firstLineIndentPt ?? 0) * 2,
     prevHwp: Metric.ptToHwp(props.spaceBefore ?? 0) * 2,
@@ -5518,7 +5610,8 @@ var HwpxEncoder = class extends BaseEncoder {
   }
   async encode(doc) {
     try {
-      const sheet = doc.kids[0];
+      const sheets = doc.kids.length ? doc.kids : [{ tag: "sheet", dims: A4, kids: [] }];
+      const sheet = sheets[0];
       const dims = normalizeDims(sheet?.dims ?? A4);
       const safeML = dims.ml !== void 0 && dims.ml >= 0 ? dims.ml : 70.87;
       const safeMR = dims.mr !== void 0 && dims.mr >= 0 ? dims.mr : 70.87;
@@ -5553,12 +5646,16 @@ var HwpxEncoder = class extends BaseEncoder {
         charPrIDRef: 0
       });
       ctx.styleIdToHwpxId.set("Normal", 0);
-      scanContent(sheet?.kids ?? [], ctx);
-      if (sheet?.headers?.default) for (const p of sheet.headers.default) scanPara(p, ctx);
-      if (sheet?.footers?.default) for (const p of sheet.footers.default) scanPara(p, ctx);
-      const sectionData = this.stringToBytes(buildSectionXml(sheet, dims, ctx));
-      const headerData = this.stringToBytes(buildHeaderXml(dims, doc.meta, ctx));
-      const previewText = extractPreviewText(sheet);
+      for (const section of sheets) {
+        scanContent(section.kids, ctx);
+        for (const paras of Object.values(section.headers ?? {})) for (const p of paras ?? []) scanPara(p, ctx);
+        for (const paras of Object.values(section.footers ?? {})) for (const p of paras ?? []) scanPara(p, ctx);
+      }
+      const sectionData = sheets.map((section) => this.stringToBytes(
+        buildSectionXml(section, normalizeDims(section.dims), ctx)
+      ));
+      const headerData = this.stringToBytes(buildHeaderXml(dims, doc.meta, ctx, sheets.length));
+      const previewText = sheets.map(extractPreviewText).join("\n");
       const entries = [
         {
           name: "mimetype",
@@ -5583,12 +5680,12 @@ var HwpxEncoder = class extends BaseEncoder {
         },
         {
           name: "META-INF/container.rdf",
-          data: this.stringToBytes(CONTAINER_RDF),
+          data: this.stringToBytes(buildContainerRdf(sheets.length)),
           mime: "application/rdf+xml"
         },
         {
           name: "Contents/content.hpf",
-          data: this.stringToBytes(buildContentHpf(ctx, doc.meta)),
+          data: this.stringToBytes(buildContentHpf(ctx, doc.meta, sheets.length)),
           mime: "application/hwpml-package+xml"
         },
         {
@@ -5596,11 +5693,11 @@ var HwpxEncoder = class extends BaseEncoder {
           data: headerData,
           mime: "application/xml"
         },
-        {
-          name: "Contents/section0.xml",
-          data: sectionData,
+        ...sectionData.map((data, index) => ({
+          name: `Contents/section${index}.xml`,
+          data,
           mime: "application/xml"
-        },
+        })),
         {
           name: "Preview/PrvText.txt",
           data: this.stringToBytes(previewText),
@@ -5626,8 +5723,10 @@ var HwpxEncoder = class extends BaseEncoder {
 var VERSION_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" tagetApplication="WORDPROCESSOR" major="5" minor="1" micro="0" buildNumber="1" os="1" xmlVersion="1.4" application="Hancom Office Hangul" appVersion="11, 0, 0, 8227 WIN32LEWindows_10"/>`;
 var CONTAINER_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><ocf:container xmlns:ocf="urn:oasis:names:tc:opendocument:xmlns:container" xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf"><ocf:rootfiles><ocf:rootfile full-path="Contents/content.hpf" media-type="application/hwpml-package+xml"/><ocf:rootfile full-path="Preview/PrvText.txt" media-type="text/plain"/><ocf:rootfile full-path="META-INF/container.rdf" media-type="application/rdf+xml"/></ocf:rootfiles></ocf:container>`;
 var MANIFEST_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><odf:manifest xmlns:odf="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"/>`;
-var CONTAINER_RDF = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about=""><pkg:hasPart xmlns:pkg="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/header.xml"/></rdf:Description><rdf:Description rdf:about="Contents/header.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#HeaderFile"/></rdf:Description><rdf:Description rdf:about=""><pkg:hasPart xmlns:pkg="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/section0.xml"/></rdf:Description><rdf:Description rdf:about="Contents/section0.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#SectionFile"/></rdf:Description><rdf:Description rdf:about=""><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#Document"/></rdf:Description></rdf:RDF>`;
-function buildContentHpf(ctx, meta) {
+function buildContainerRdf(sectionCount) {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about=""><pkg:hasPart xmlns:pkg="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/header.xml"/></rdf:Description><rdf:Description rdf:about="Contents/header.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#HeaderFile"/></rdf:Description>` + Array.from({ length: sectionCount }, (_, i) => `<rdf:Description rdf:about=""><pkg:hasPart xmlns:pkg="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/section${i}.xml"/></rdf:Description><rdf:Description rdf:about="Contents/section${i}.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#SectionFile"/></rdf:Description>`).join("") + `<rdf:Description rdf:about=""><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#Document"/></rdf:Description></rdf:RDF>`;
+}
+function buildContentHpf(ctx, meta, sectionCount = 1) {
   const title = esc(meta?.title ?? "");
   const creator = esc(meta?.author ?? "text");
   const subject = esc(meta?.subject ?? "text");
@@ -5635,13 +5734,13 @@ function buildContentHpf(ctx, meta) {
   const keyword = esc(meta?.keywords ?? "text");
   const created = meta?.created ?? (/* @__PURE__ */ new Date()).toISOString().replace(/\.\d{3}Z$/, "Z");
   const modified = meta?.modified ?? created;
-  let items = `<opf:item id="header"   href="Contents/header.xml"   media-type="application/xml"/><opf:item id="section0" href="Contents/section0.xml" media-type="application/xml"/><opf:item id="settings" href="settings.xml"          media-type="application/xml"/>`;
+  let items = `<opf:item id="header"   href="Contents/header.xml"   media-type="application/xml"/>` + Array.from({ length: sectionCount }, (_, i) => `<opf:item id="section${i}" href="Contents/section${i}.xml" media-type="application/xml"/>`).join("") + `<opf:item id="settings" href="settings.xml"          media-type="application/xml"/>`;
   for (const bin of ctx.bins) {
     const ext = bin.name.split(".").pop()?.toLowerCase() ?? "png";
     const ct = ext === "png" ? "image/png" : ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "gif" ? "image/gif" : ext === "wmf" ? "image/x-wmf" : ext === "emf" ? "image/x-emf" : "image/bmp";
     items += `<opf:item id="${bin.id}" href="BinData/${bin.name}" media-type="${ct}" isEmbeded="1"/>`;
   }
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><opf:package ${NS} version="" unique-identifier="" id=""><opf:metadata><opf:title>${title}</opf:title><opf:language>ko</opf:language><opf:meta name="creator"      content="text">${creator}</opf:meta><opf:meta name="subject"      content="text">${subject}</opf:meta><opf:meta name="description"  content="text">${desc}</opf:meta><opf:meta name="CreatedDate"  content="text">${created}</opf:meta><opf:meta name="ModifiedDate" content="text">${modified}</opf:meta><opf:meta name="keyword"      content="text">${keyword}</opf:meta><opf:meta name="trackchageConfig" content="text">0</opf:meta></opf:metadata><opf:manifest>${items}</opf:manifest><opf:spine><opf:itemref idref="header" linear="yes"/><opf:itemref idref="section0" linear="yes"/></opf:spine></opf:package>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><opf:package ${NS} version="" unique-identifier="" id=""><opf:metadata><opf:title>${title}</opf:title><opf:language>ko</opf:language><opf:meta name="creator"      content="text">${creator}</opf:meta><opf:meta name="subject"      content="text">${subject}</opf:meta><opf:meta name="description"  content="text">${desc}</opf:meta><opf:meta name="CreatedDate"  content="text">${created}</opf:meta><opf:meta name="ModifiedDate" content="text">${modified}</opf:meta><opf:meta name="keyword"      content="text">${keyword}</opf:meta><opf:meta name="trackchageConfig" content="text">0</opf:meta></opf:metadata><opf:manifest>${items}</opf:manifest><opf:spine><opf:itemref idref="header" linear="yes"/>${Array.from({ length: sectionCount }, (_, i) => `<opf:itemref idref="section${i}" linear="yes"/>`).join("")}</opf:spine></opf:package>`;
 }
 function buildSettingsXml() {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><ha:HWPApplicationSetting xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"><ha:CaretPosition listIDRef="0" paraIDRef="0" pos="0"/><config:config-item-set name="PrintInfo"><config:config-item name="PrintAutoFootNote" type="boolean">false</config:config-item><config:config-item name="PrintAutoHeadNote" type="boolean">false</config:config-item><config:config-item name="PrintMethod" type="short">4</config:config-item><config:config-item name="OverlapSize" type="short">0</config:config-item><config:config-item name="PrintCropMark" type="short">0</config:config-item><config:config-item name="BinderHoleType" type="short">0</config:config-item><config:config-item name="ZoomX" type="short">100</config:config-item><config:config-item name="ZoomY" type="short">100</config:config-item></config:config-item-set></ha:HWPApplicationSetting>`;
@@ -5652,7 +5751,7 @@ function buildNumberingsXml() {
 function buildBulletsXml() {
   return `<hh:bullets itemCnt="1"><hh:bullet id="1" char="&#x2022;" useImage="0"><hh:paraHead level="0" align="LEFT" useInstWidth="0" autoIndent="1" widthAdjust="0" textOffsetType="PERCENT" textOffset="50" numFormat="DIGIT" charPrIDRef="0" checkable="0"/></hh:bullet></hh:bullets>`;
 }
-function buildHeaderXml(dims, meta, ctx) {
+function buildHeaderXml(dims, meta, ctx, sectionCount = 1) {
   const fontFacesXml = ctx.fontBank.toXml();
   let charPrXml = "";
   for (const cp of ctx.charPrs) {
@@ -5669,14 +5768,14 @@ function buildHeaderXml(dims, meta, ctx) {
     const wrap = pp.lineWrap ?? "BREAK";
     const lsType = pp.lineSpacingFixed !== void 0 ? "AT_LEAST" : "PERCENT";
     const lsValue = pp.lineSpacingFixed !== void 0 ? pp.lineSpacingFixed : pp.lineSpacing;
-    paraPrXml += `<hh:paraPr id="${pp.id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="0" suppressLineNumbers="0" checked="0"><hh:align horizontal="${pp.align}" vertical="${ver}"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="${wrap}"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/><hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar"><hh:margin><hc:indent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="${pp.rightHwp}" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/></hp:case><hp:default><hh:margin><hc:indent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="${pp.rightHwp}" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/></hp:default></hp:switch><hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>`;
+    paraPrXml += `<hh:paraPr id="${pp.id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="0" suppressLineNumbers="0" checked="0"><hh:align horizontal="${pp.align}" vertical="${ver}"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="${pp.widowControl ? 1 : 0}" keepWithNext="${pp.keepWithNext ? 1 : 0}" keepLines="${pp.keepLines ? 1 : 0}" pageBreakBefore="${pp.pageBreakBefore ? 1 : 0}" lineWrap="${wrap}"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/><hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar"><hh:margin><hc:indent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="${pp.rightHwp}" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/></hp:case><hp:default><hh:margin><hc:indent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="${pp.rightHwp}" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/></hp:default></hp:switch><hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>`;
   }
   const borderFillXml = ctx.borderFillBank.toXml();
   const denseStyles = materializeContiguousStyles(ctx.hwpxStyles);
   const stylesXml2 = `<hh:styles itemCnt="${denseStyles.length}">` + denseStyles.map(
     (s) => `<hh:style id="${s.id}" type="PARA" name="${esc(s.name)}" engName="${esc(s.engName)}" paraPrIDRef="${s.paraPrIDRef}" charPrIDRef="${s.charPrIDRef}" nextStyleIDRef="0" langID="1042" lockForm="0"/>`
   ).join("") + `</hh:styles>`;
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hh:head ${NS} version="1.4" secCnt="1"><hh:beginNum page="1" footnote="1" endnote="1" pic="1" tbl="1" equation="1"/><hh:refList>` + fontFacesXml + borderFillXml + `<hh:charProperties itemCnt="${ctx.charPrs.length}">${charPrXml}</hh:charProperties><hh:tabProperties itemCnt="1"><hh:tabPr id="0" autoTabLeft="0" autoTabRight="0"/></hh:tabProperties>` + buildNumberingsXml() + buildBulletsXml() + `<hh:paraProperties itemCnt="${ctx.paraPrs.length}">${paraPrXml}</hh:paraProperties>` + stylesXml2 + `</hh:refList><hh:compatibleDocument targetProgram="HWP201X"><hh:layoutCompatibility/></hh:compatibleDocument><hh:docOption><hh:linkinfo path="" pageInherit="0" footnoteInherit="0"/></hh:docOption><hh:trackchageConfig flags="56"/></hh:head>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hh:head ${NS} version="1.4" secCnt="${sectionCount}"><hh:beginNum page="1" footnote="1" endnote="1" pic="1" tbl="1" equation="1"/><hh:refList>` + fontFacesXml + borderFillXml + `<hh:charProperties itemCnt="${ctx.charPrs.length}">${charPrXml}</hh:charProperties><hh:tabProperties itemCnt="1"><hh:tabPr id="0" autoTabLeft="0" autoTabRight="0"/></hh:tabProperties>` + buildNumberingsXml() + buildBulletsXml() + `<hh:paraProperties itemCnt="${ctx.paraPrs.length}">${paraPrXml}</hh:paraProperties>` + stylesXml2 + `</hh:refList><hh:compatibleDocument targetProgram="HWP201X"><hh:layoutCompatibility/></hh:compatibleDocument><hh:docOption><hh:linkinfo path="" pageInherit="0" footnoteInherit="0"/></hh:docOption><hh:trackchageConfig flags="56"/></hh:head>`;
 }
 function buildHeaderFooterRunXml(sheet, dims, ctx) {
   const headers = sheet.headers || {};
@@ -5968,12 +6067,12 @@ function encodeParaPositioned(para, ctx, vertPos, secPr = "", availWidth, hfRun 
   const firstHorzPos = Math.max(
     0,
     paraShapeHwpToLayoutHwp(
-      (paraPr?.leftHwp ?? 0) + (paraPr?.intentHwp ?? 0)
+      (paraPr?.leftHwp ?? 0) + Math.max(0, paraPr?.intentHwp ?? 0)
     )
   );
   const restHorzPos = Math.max(
     0,
-    paraShapeHwpToLayoutHwp(paraPr?.leftHwp ?? 0)
+    paraShapeHwpToLayoutHwp((paraPr?.leftHwp ?? 0) - Math.min(0, paraPr?.intentHwp ?? 0))
   );
   const { xml: linesegXml, totalHeight } = buildLinesegarray(
     paraText2,
@@ -6527,44 +6626,62 @@ var DocxEncoder = class extends BaseEncoder {
         nextId: 10,
         nextImgNum: 1,
         warns: [],
-        imgMap: /* @__PURE__ */ new WeakMap()
+        imgMap: /* @__PURE__ */ new WeakMap(),
+        paragraphStyleIds: /* @__PURE__ */ new Set(),
+        sectionParts: []
       };
       collectImages(allKids, ctx);
-      const headerContents = [...firstSheet?.headers?.default ?? []];
-      const footerContents = [...firstSheet?.footers?.default ?? []];
-      const hasHeader = headerContents.length > 0;
-      const hasFooter = footerContents.length > 0;
-      if (hasHeader) collectImages(headerContents, ctx);
-      if (hasFooter) collectImages(footerContents, ctx);
+      const parts = [];
       const fonts = collectFonts(allKids);
-      if (hasHeader) collectFonts(headerContents, fonts);
-      if (hasFooter) collectFonts(footerContents, fonts);
+      sheets.forEach((sheet, sectionIndex) => {
+        const sectionParts = [];
+        for (const kind of ["header", "footer"]) {
+          const source = kind === "header" ? sheet.headers : sheet.footers;
+          for (const type of ["default", "first", "even"]) {
+            const contents = source?.[type];
+            if (contents === void 0) continue;
+            const part = {
+              kind,
+              type,
+              contents,
+              dims: normalizeDims(sheet.dims),
+              rId: `rId${ctx.nextId++}`,
+              name: `${kind}${parts.filter((p) => p.kind === kind).length + 1}.xml`
+            };
+            parts.push(part);
+            sectionParts.push(part);
+            collectImages(contents, ctx);
+            collectFonts(contents, fonts);
+          }
+        }
+        ctx.sectionParts[sectionIndex] = sectionParts;
+      });
       fonts.add("\uD568\uCD08\uB86C\uBC14\uD0D5");
       fonts.add("\uB9D1\uC740 \uACE0\uB515");
       const hasFontTable = fonts.size > 0;
-      const headerRId = hasHeader ? `rId${ctx.nextId++}` : "";
-      const footerRId = hasFooter ? `rId${ctx.nextId++}` : "";
       const numInfo = collectNumbering(allKids);
-      const kids = allKids;
-      const mainDocumentXml = documentXml(kids, dims, ctx, headerRId, footerRId);
-      const headerXml = hasHeader ? headerFooterXml("hdr", headerContents, ctx, dims) : "";
-      const footerXml = hasFooter ? headerFooterXml("ftr", footerContents, ctx, dims) : "";
+      const mainDocumentXml = documentXml(sheets, ctx);
+      const partXmls = parts.map((part) => {
+        ctx.dims = part.dims;
+        return headerFooterXml(part.kind === "header" ? "hdr" : "ftr", part.contents, ctx, part.dims);
+      });
+      ctx.dims = dims;
       const entries = [
         {
           name: "[Content_Types].xml",
-          data: this.stringToBytes(contentTypes(images, hasHeader, hasFooter, hasFontTable))
+          data: this.stringToBytes(contentTypes(images, parts, hasFontTable))
         },
         { name: "_rels/.rels", data: this.stringToBytes(pkgRels()) },
         {
           name: "word/document.xml",
           data: this.stringToBytes(mainDocumentXml)
         },
-        { name: "word/styles.xml", data: this.stringToBytes(stylesXml()) },
-        { name: "word/settings.xml", data: this.stringToBytes(settingsXml()) },
+        { name: "word/styles.xml", data: this.stringToBytes(stylesXml(ctx.paragraphStyleIds)) },
+        { name: "word/settings.xml", data: this.stringToBytes(settingsXml(doc.meta.evenAndOddHeaders ?? parts.some((part) => part.type === "even"))) },
         {
           name: "word/_rels/document.xml.rels",
           data: this.stringToBytes(
-            docRels(images, headerRId, footerRId, numInfo.hasLists, hasFontTable)
+            docRels(images, parts, numInfo.hasLists, hasFontTable)
           )
         },
         { name: "docProps/app.xml", data: this.stringToBytes(appXml()) },
@@ -6585,26 +6702,10 @@ var DocxEncoder = class extends BaseEncoder {
           data: this.stringToBytes(fontTableXml(fonts))
         });
       }
-      if (hasHeader) {
-        entries.push({
-          name: "word/header1.xml",
-          data: this.stringToBytes(headerXml)
-        });
-        entries.push({
-          name: "word/_rels/header1.xml.rels",
-          data: this.stringToBytes(imagePartRels(images))
-        });
-      }
-      if (hasFooter) {
-        entries.push({
-          name: "word/footer1.xml",
-          data: this.stringToBytes(footerXml)
-        });
-        entries.push({
-          name: "word/_rels/footer1.xml.rels",
-          data: this.stringToBytes(imagePartRels(images))
-        });
-      }
+      parts.forEach((part, index) => {
+        entries.push({ name: `word/${part.name}`, data: this.stringToBytes(partXmls[index]) });
+        entries.push({ name: `word/_rels/${part.name}.rels`, data: this.stringToBytes(imagePartRels(images)) });
+      });
       for (const img of images) {
         entries.push({ name: `word/media/${img.name}`, data: img.data });
       }
@@ -6719,7 +6820,7 @@ function collectNumbering(kids) {
   }
   return { hasLists: hasBullet || hasNumbered, hasBullet, hasNumbered };
 }
-function contentTypes(images, hasHeader, hasFooter, hasFontTable) {
+function contentTypes(images, parts, hasFontTable) {
   const imgDefaults = /* @__PURE__ */ new Set();
   for (const img of images) imgDefaults.add(img.ext);
   let defaults = `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
@@ -6734,12 +6835,10 @@ function contentTypes(images, hasHeader, hasFooter, hasFontTable) {
   <Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>
   <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
   <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>`;
-  if (hasHeader)
+  for (const part of parts) {
     overrides += `
-  <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>`;
-  if (hasFooter)
-    overrides += `
-  <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>`;
+  <Override PartName="/word/${part.name}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${part.kind}+xml"/>`;
+  }
   if (hasFontTable)
     overrides += `
   <Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/>`;
@@ -6757,7 +6856,7 @@ function pkgRels() {
   <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
 </Relationships>`;
 }
-function docRels(images, headerRId, footerRId, hasLists, hasFontTable) {
+function docRels(images, parts, hasLists, hasFontTable) {
   let rels = `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
   <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>`;
   if (hasLists) {
@@ -6772,13 +6871,9 @@ function docRels(images, headerRId, footerRId, hasLists, hasFontTable) {
     rels += `
   <Relationship Id="${img.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${img.name}"/>`;
   }
-  if (headerRId) {
+  for (const part of parts) {
     rels += `
-  <Relationship Id="${headerRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>`;
-  }
-  if (footerRId) {
-    rels += `
-  <Relationship Id="${footerRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>`;
+  <Relationship Id="${part.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${part.kind}" Target="${part.name}"/>`;
   }
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -6810,7 +6905,18 @@ function coreXml(meta) {
   <dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified>
 </cp:coreProperties>`;
 }
-function stylesXml() {
+function stylesXml(usedIds) {
+  const known = /* @__PURE__ */ new Set([
+    ...Array.from({ length: 34 }, (_, i) => String(i)),
+    "Normal",
+    "Heading1",
+    "Heading2",
+    "Heading3",
+    "Header",
+    "Footer",
+    "ListParagraph"
+  ]);
+  const extraStyles = [...usedIds].filter((id) => !known.has(id)).sort().map((id) => `<w:style w:type="paragraph" w:customStyle="1" w:styleId="${id}"><w:name w:val="HWP paragraph ${id}"/><w:basedOn w:val="Normal"/></w:style>`).join("\n");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:docDefaults>
@@ -6824,6 +6930,7 @@ function stylesXml() {
       <w:jc w:val="both"/>
     </w:pPr></w:pPrDefault>
   </w:docDefaults>
+  ${extraStyles}
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
   <w:style w:type="paragraph" w:styleId="0"><w:name w:val="\uBC14\uD0D5\uAE00"/><w:basedOn w:val="Normal"/></w:style>
   <w:style w:type="paragraph" w:styleId="1"><w:name w:val="\uBCF8\uBB38"/><w:basedOn w:val="Normal"/></w:style>
@@ -6868,9 +6975,10 @@ function stylesXml() {
   <w:style w:type="table" w:styleId="TableGrid"><w:name w:val="Table Grid"/><w:tblPr><w:tblBorders><w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/><w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/><w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/><w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/><w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/><w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/></w:tblBorders></w:tblPr></w:style>
 </w:styles>`;
 }
-function settingsXml() {
+function settingsXml(evenAndOdd = false) {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  ${evenAndOdd ? "<w:evenAndOddHeaders/>" : ""}
   <w:zoom w:percent="100"/>
   <w:bordersDoNotSurroundHeader/>
   <w:bordersDoNotSurroundFooter/>
@@ -6927,42 +7035,88 @@ function headerFooterXml(type, contents, ctx, dims) {
 ${body}
 </${tag}>`;
 }
-function documentXml(kids, dims, ctx, headerRId, footerRId) {
-  const body = kids.map((k) => encodeContent(k, ctx, dims)).join("\n");
-  let sectRefs = "";
-  if (headerRId)
-    sectRefs += `
-      <w:headerReference w:type="default" r:id="${headerRId}"/>`;
-  if (footerRId)
-    sectRefs += `
-      <w:footerReference w:type="default" r:id="${footerRId}"/>`;
+function documentXml(sheets, ctx) {
+  const bodyParts = [];
+  for (let sectionIndex = 0; sectionIndex < sheets.length; sectionIndex++) {
+    const sheet = sheets[sectionIndex];
+    const dims = normalizeDims(sheet?.dims ?? A4);
+    ctx.dims = dims;
+    const kids = sheet?.kids ?? [];
+    const isFinalSection = sectionIndex === sheets.length - 1;
+    if (isFinalSection) {
+      bodyParts.push(...kids.map((kid) => encodeContent(kid, ctx, dims)));
+      continue;
+    }
+    const boundarySectPr = sectionPropertiesXml(
+      dims,
+      ctx.sectionParts[sectionIndex] ?? [],
+      sheet.sectionType ?? "nextPage",
+      sheet.differentFirstPage
+    );
+    const lastKid = kids[kids.length - 1];
+    if (lastKid?.tag === "para") {
+      for (let kidIndex = 0; kidIndex < kids.length - 1; kidIndex++) {
+        bodyParts.push(encodeContent(kids[kidIndex], ctx, dims));
+      }
+      bodyParts.push(encodeParaInner(lastKid, ctx, void 0, boundarySectPr));
+    } else {
+      bodyParts.push(...kids.map((kid) => encodeContent(kid, ctx, dims)));
+      bodyParts.push(
+        `    <w:p><w:pPr>${boundarySectPr}</w:pPr></w:p>`
+      );
+    }
+  }
+  const finalSheet = sheets[sheets.length - 1];
+  const finalDims = normalizeDims(finalSheet?.dims ?? A4);
+  const finalSectPr = sectionPropertiesXml(
+    finalDims,
+    ctx.sectionParts[sheets.length - 1] ?? [],
+    finalSheet?.sectionType,
+    finalSheet?.differentFirstPage
+  );
+  const body = bodyParts.join("\n");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
   <w:body>
 ${body}
-    <w:sectPr>${sectRefs}
-      <w:pgSz w:w="${Metric.ptToDxa(dims.wPt)}" w:h="${Metric.ptToDxa(dims.hPt)}"${dims.orient === "landscape" ? ' w:orient="landscape"' : ""}/>
-      <w:pgMar w:top="${Metric.ptToDxa(dims.mt)}" w:right="${Metric.ptToDxa(dims.mr)}" w:bottom="${Metric.ptToDxa(dims.mb)}" w:left="${Metric.ptToDxa(dims.ml)}" w:header="${Metric.ptToDxa(dims.headerPt ?? 42.52)}" w:footer="${Metric.ptToDxa(dims.footerPt ?? 42.52)}" w:gutter="0"/>
-    </w:sectPr>
+    ${finalSectPr}
   </w:body>
 </w:document>`;
+}
+function sectionPropertiesXml(dims, references, breakType, differentFirstPage) {
+  const parts = [];
+  for (const ref of references) {
+    parts.push(`<w:${ref.kind}Reference w:type="${ref.type}" r:id="${ref.rId}"/>`);
+  }
+  if (breakType) parts.push(`<w:type w:val="${breakType}"/>`);
+  parts.push(
+    `<w:pgSz w:w="${Metric.ptToDxa(dims.wPt)}" w:h="${Metric.ptToDxa(dims.hPt)}"${dims.orient === "landscape" ? ' w:orient="landscape"' : ""}/>`
+  );
+  parts.push(
+    `<w:pgMar w:top="${Metric.ptToDxa(dims.mt)}" w:right="${Metric.ptToDxa(dims.mr)}" w:bottom="${Metric.ptToDxa(dims.mb)}" w:left="${Metric.ptToDxa(dims.ml)}" w:header="${Metric.ptToDxa(dims.headerPt ?? 42.52)}" w:footer="${Metric.ptToDxa(dims.footerPt ?? 42.52)}" w:gutter="0"/>`
+  );
+  if (differentFirstPage ?? references.some((ref) => ref.type === "first")) parts.push("<w:titlePg/>");
+  return `<w:sectPr>${parts.join("")}</w:sectPr>`;
 }
 function encodeContent(node, ctx, dims) {
   return node.tag === "grid" ? encodeGrid(node, ctx, dims) : encodeParaInner(node, ctx);
 }
-function encodeParaInner(para, ctx, maxWidthPt) {
+function encodeParaInner(para, ctx, maxWidthPt, sectionPrXml = "") {
   const align = para.props.align;
   let headStyle = "";
   if (para.props.hwpStyleId !== void 0) {
+    ctx.paragraphStyleIds.add(String(para.props.hwpStyleId));
     headStyle = `<w:pStyle w:val="${para.props.hwpStyleId}"/>`;
   } else if (para.props.heading) {
+    ctx.paragraphStyleIds.add(`Heading${para.props.heading}`);
     headStyle = `<w:pStyle w:val="Heading${para.props.heading}"/>`;
   }
   let numPr = "";
   if (para.props.listOrd !== void 0) {
     const numId = para.props.listOrd ? 2 : 1;
     const ilvl = para.props.listLv ?? 0;
-    numPr = `<w:pStyle w:val="ListParagraph"/><w:numPr><w:ilvl w:val="${ilvl}"/><w:numId w:val="${numId}"/></w:numPr>`;
+    if (!headStyle) headStyle = `<w:pStyle w:val="ListParagraph"/>`;
+    numPr = `<w:numPr><w:ilvl w:val="${ilvl}"/><w:numId w:val="${numId}"/></w:numPr>`;
   }
   let spacingXml = "";
   const { spaceBefore, spaceAfter, lineHeight, lineHeightFixed, lineHeightRule } = para.props;
@@ -6996,6 +7150,12 @@ function encodeParaInner(para, ctx, maxWidthPt) {
   }
   if (indParts.length > 0) indentXml = `<w:ind ${indParts.join(" ")}/>`;
   const cjkLineBreakXml = "<w:kinsoku/><w:wordWrap/><w:overflowPunct/>";
+  const paginationXml = [
+    ["pageBreakBefore", "pageBreakBefore"],
+    ["keepWithNext", "keepNext"],
+    ["keepLines", "keepLines"],
+    ["widowControl", "widowControl"]
+  ].filter(([key]) => para.props[key] !== void 0).map(([key, tag]) => para.props[key] ? `<w:${tag}/>` : `<w:${tag} w:val="0"/>`).join("");
   const omitEmptyLeftAlign = align === "left" && paraTextContent(para) === "";
   const jcXml = align && !omitEmptyLeftAlign ? `<w:jc w:val="${docxJcValue(align)}"/>` : "";
   const runs = para.kids.map((k) => {
@@ -7008,7 +7168,7 @@ function encodeParaInner(para, ctx, maxWidthPt) {
     return "";
   }).join("");
   return `    <w:p>
-      <w:pPr>${headStyle}${numPr}${spacingXml}${indentXml}${cjkLineBreakXml}${jcXml}</w:pPr>
+      <w:pPr>${headStyle}${paginationXml}${numPr}${spacingXml}${indentXml}${cjkLineBreakXml}${jcXml}${sectionPrXml}</w:pPr>
       ${runs}
     </w:p>`;
 }
@@ -8550,6 +8710,10 @@ function csKey(p) {
 function psKey(p) {
   return [
     p.align ?? "left",
+    p.pageBreakBefore ?? false,
+    p.keepWithNext ?? false,
+    p.keepLines ?? false,
+    p.widowControl ?? false,
     p.heading ?? 0,
     p.listOrd === void 0 ? "" : p.listOrd ? "number" : "bullet",
     p.listLv ?? 0,
@@ -8615,8 +8779,8 @@ function collectNode(node, bank) {
     }
   }
 }
-function mkDocumentProperties() {
-  return new BufWriter().u16(1).u16(1).u16(1).u16(1).u16(1).u16(1).u16(1).u32(0).u32(0).u32(0).build();
+function mkDocumentProperties(sectionCount) {
+  return new BufWriter().u16(sectionCount).u16(1).u16(1).u16(1).u16(1).u16(1).u16(1).u32(0).u32(0).u32(0).build();
 }
 function mkIdMappings(bank, nBinData = 0) {
   const w = new BufWriter();
@@ -8808,6 +8972,10 @@ function mkParaShape(p) {
   const alignVal = ALIGN_CODE[p.align ?? "left"] ?? 1;
   const lineSpacingType = p.lineHeightFixed !== void 0 ? 3 : 0;
   let attr1 = lineSpacingType & 3 | (alignVal & 7) << 2;
+  if (p.widowControl) attr1 |= 1 << 16;
+  if (p.keepWithNext) attr1 |= 1 << 17;
+  if (p.keepLines) attr1 |= 1 << 18;
+  if (p.pageBreakBefore) attr1 |= 1 << 19;
   if (p.heading !== void 0) {
     attr1 |= 1 << 23;
     attr1 |= p.heading - 1 << 25;
@@ -8820,14 +8988,14 @@ function mkParaShape(p) {
     Math.ceil(Metric.ptToHwp(10) * 1.15) * 2
   ) : Math.max(100, p.lineHeight ? Math.round(p.lineHeight * 100) : 160);
   const paraShapeUnit = (pt) => Metric.ptToHwp(pt) * 2;
-  return new BufWriter().u32(attr1).i32(paraShapeUnit(p.indentPt ?? 0)).i32(paraShapeUnit(p.indentRightPt ?? 0)).i32(paraShapeUnit(p.firstLineIndentPt ?? 0)).i32(paraShapeUnit(p.spaceBefore ?? 0)).i32(paraShapeUnit(p.spaceAfter ?? 0)).i32(lineSpaceValue).u16(0).u16(p.listOrd === void 0 ? 0 : 1).u16(1).i16(0).i16(0).i16(0).i16(0).u32(0).u32(lineSpacingType).u32(lineSpaceValue).u32(0).build();
+  return new BufWriter().u32(attr1).i32(paraShapeUnit((p.indentPt ?? 0) + Math.min(0, p.firstLineIndentPt ?? 0))).i32(paraShapeUnit(p.indentRightPt ?? 0)).i32(paraShapeUnit(p.firstLineIndentPt ?? 0)).i32(paraShapeUnit(p.spaceBefore ?? 0)).i32(paraShapeUnit(p.spaceAfter ?? 0)).i32(lineSpaceValue).u16(0).u16(p.listOrd === void 0 ? 0 : 1).u16(1).i16(0).i16(0).i16(0).i16(0).u32(0).u32(lineSpacingType).u32(lineSpaceValue).u32(0).build();
 }
 function mkBinData(id, ext) {
   return new BufWriter().u16(33).u16(id).u16(ext.length).utf16(ext).build();
 }
-function buildDocInfoStream(bank, images = []) {
+function buildDocInfoStream(bank, images = [], sectionCount = 1) {
   const chunks = [];
-  chunks.push(mkRec(TAG_DOCUMENT_PROPERTIES, 0, mkDocumentProperties()));
+  chunks.push(mkRec(TAG_DOCUMENT_PROPERTIES, 0, mkDocumentProperties(sectionCount)));
   chunks.push(mkRec(TAG_ID_MAPPINGS2, 0, mkIdMappings(bank, images.length)));
   for (const img of images) {
     chunks.push(mkRec(TAG_BIN_DATA2, 1, mkBinData(img.id, img.ext)));
@@ -9842,7 +10010,7 @@ function buildHwpFileHeader() {
   }
   return buf;
 }
-function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = []) {
+function buildHwpOle2(fileHeaderData, docInfoData, sectionData, binImages = []) {
   const SS = 512;
   const MSS = 64;
   const ENDOFCHAIN = 4294967294;
@@ -9869,9 +10037,9 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
   });
   streams.push({
     name: "Section0",
-    data: section0Data,
+    data: sectionData[0],
     dirIdx: 4,
-    isMini: section0Data.length < 4096
+    isMini: sectionData[0].length < 4096
   });
   const prvTextDirIdx = binImages.length > 0 ? 6 + binImages.length : 5;
   const prvTextData = new BufWriter().utf16("HWPKit Preview\r\n").build();
@@ -9889,6 +10057,14 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
       data: img.data,
       dirIdx: 6 + i,
       isMini: img.data.length < 4096
+    });
+  }
+  for (let i = 1; i < sectionData.length; i++) {
+    streams.push({
+      name: `Section${i}`,
+      data: sectionData[i],
+      dirIdx: prvTextDirIdx + i,
+      isMini: sectionData[i].length < 4096
     });
   }
   const miniStreams = streams.filter((s) => s.isMini);
@@ -9924,7 +10100,7 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
     return out2;
   });
   const regNs = regPads.map((p) => p.length / SS);
-  const numDirEntries = 6 + (binImages.length > 0 ? 1 + binImages.length : 0);
+  const numDirEntries = 6 + (binImages.length > 0 ? 1 + binImages.length : 0) + sectionData.length - 1;
   const dirN = Math.max(1, Math.ceil(numDirEntries * 128 / SS));
   const miniFatN = Math.ceil(miniSectorList.length / 128);
   const miniStreamN = Math.ceil(miniStreamData.length / SS);
@@ -10194,6 +10370,8 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
     diStream.startSec,
     diStream.data.length
   );
+  const sectionStreams = streams.filter((stream) => /^Section\d+$/.test(stream.name));
+  const sectionTree = buildSiblingTree(sectionStreams.map((stream) => ({ idx: stream.dirIdx, name: stream.name })));
   const bodyLinks = rootLinks(3);
   writeDirEntry(
     3,
@@ -10202,22 +10380,24 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
     rootTree.colors.get(3) ?? 1,
     bodyLinks.left,
     bodyLinks.right,
-    4,
-    ENDOFCHAIN,
+    sectionTree.root,
+    0,
     0
   );
-  const s0Stream = streamMap.get(4);
-  writeDirEntry(
-    4,
-    "Section0",
-    2,
-    1,
-    -1,
-    -1,
-    -1,
-    s0Stream.startSec,
-    s0Stream.data.length
-  );
+  for (const stream of sectionStreams) {
+    const links = sectionTree.links.get(stream.dirIdx);
+    writeDirEntry(
+      stream.dirIdx,
+      stream.name,
+      2,
+      sectionTree.colors.get(stream.dirIdx) ?? 1,
+      links.left,
+      links.right,
+      -1,
+      stream.startSec,
+      stream.data.length
+    );
+  }
   const prvTextStream = streamMap.get(prvTextDirIdx);
   const prvTextLinks = rootLinks(prvTextDirIdx);
   writeDirEntry(
@@ -10247,7 +10427,7 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
       binLinks.left,
       binLinks.right,
       binTree.root,
-      ENDOFCHAIN,
+      0,
       0
     );
     for (let i = 0; i < binImages.length; i++) {
@@ -10367,16 +10547,17 @@ var HwpEncoder = class extends BaseEncoder {
       for (const sheet of doc.kids) {
         for (const node of sheet.kids) collectImages3(node);
       }
-      const bodyRaw = buildBodyTextStream(doc, bank, images);
-      const docInfoRaw = buildDocInfoStream(bank, images);
-      const verification = verifyHwpRecordStreams(docInfoRaw, bodyRaw);
-      if (!verification.ok) {
-        return fail(
+      const sections = doc.kids.length ? doc.kids : [{ tag: "sheet", dims: A4, kids: [] }];
+      const bodyRaw = sections.map((sheet) => buildBodyTextStream({ ...doc, kids: [sheet] }, bank, images));
+      const docInfoRaw = buildDocInfoStream(bank, images, sections.length);
+      for (const section of bodyRaw) {
+        const verification = verifyHwpRecordStreams(docInfoRaw, section);
+        if (!verification.ok) return fail(
           `HwpEncoder: \uB808\uCF54\uB4DC \uCC38\uC870 \uBB34\uACB0\uC131 \uC624\uB958 - ${verification.errors.join("; ")}`
         );
       }
       const docInfoCmp = import_pako3.default.deflateRaw(docInfoRaw);
-      const bodyCmp = import_pako3.default.deflateRaw(bodyRaw);
+      const bodyCmp = bodyRaw.map((section) => import_pako3.default.deflateRaw(section));
       const fileHdr = buildHwpFileHeader();
       if (fileHdr.length !== 256) {
         return fail(
