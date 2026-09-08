@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/hwpkit.svg)](https://www.npmjs.com/package/hwpkit)
 [![license](https://img.shields.io/npm/l/hwpkit.svg)](https://github.com/INMD1/hwpkit/blob/main/license.md)
 
-**HWP / HWPX / DOCX / Markdown / HTML 문서 변환 라이브러리**
+**HWP / HWPX / DOCX / Markdown / HTML 문서 변환 및 DOC 입력 라이브러리**
 
 한국 문서 포맷(HWP, HWPX)과 국제 표준(DOCX, Markdown)을 상호 변환하는 TypeScript 라이브러리입니다.
 브라우저와 Node.js 환경 모두에서 동작하며, 데이터 무결성과 무중단 변환을 최우선으로 설계했습니다.
@@ -30,11 +30,16 @@
 | DOCX | O | O | O | O | O | X | X |
 | Markdown | O | O | O | O | O | X | X |
 | HTML | O | O | O | O | O | X | X |
-| DOC / PDF | X | X | X | X | X | X | X |
+| DOC | △ | △ | △ | △ | △ | X | X |
+| PDF | X | X | X | X | X | X | X |
 
 `O`는 디코더·인코더 구현과 제목·한글 본문·표 셀 내용의 기본 왕복 검증을 뜻합니다.
 복잡한 표·수식·이미지 배치·페이지 레이아웃의 완전 보존을 보증하지 않습니다.
-Markdown/HTML은 페이지 서식을 모두 표현하지 못합니다. `.doc`은 `.docx`의 별칭이 아니며 현재 미지원입니다.
+Markdown/HTML은 페이지 서식을 모두 표현하지 못합니다. `.doc`은 `.docx`의 별칭이 아닙니다.
+`△`: Word 97–2003 바이너리 DOC 본문·문단·줄바꿈 읽기를 지원합니다. 기본 브라우저 모드는
+표 셀 내용을 문단으로 읽으며, 서식·그림·머리말/꼬리말 손실을 `warns`로 알립니다.
+아래 로컬 LibreOffice 연결을 사용하면 DOCX를 거쳐 서식·표·그림을 공통 문서 모델로 가져옵니다.
+암호화된 DOC는 암호를 해제한 뒤 입력하세요. DOC 출력은 지원하지 않습니다.
 PDF는 연구용 명세/렌더링 비교 대상이고 라이브러리 입력·출력 형식은 아닙니다.
 
 2026-09-05: 최신 커밋 `887661c` 기준 5×5 조합 재점검.
@@ -60,7 +65,9 @@ npm run playground
 
 playground는 `src/index.ts`를 직접 불러오므로 라이브러리 수정이 즉시 반영됩니다.
 입출력 형식 목록도 같은 라이브러리 레지스트리에서 가져옵니다.
-HWP/HWPX/DOCX 파일은 내용으로 자동 감지하며, Markdown/HTML은 직접 입력하거나 파일로 열 수 있습니다.
+HWP/HWPX/DOCX/DOC 파일은 내용으로 자동 감지하며, Markdown/HTML은 직접 입력하거나 파일로 열 수 있습니다.
+개발 서버의 DOC 변환은 로컬 LibreOffice가 필요하며 파일 크기는 25 MiB까지입니다.
+정적 playground 빌드는 DOC 본문 읽기 모드로 동작하며 손실 범위를 경고로 표시합니다.
 HTML 조각을 직접 붙여 넣을 때는 입력 포맷을 HTML로 선택하세요.
 DocRoot 검사에서 들여쓰기·페이지 분리 속성, 구역별 용지·머리말·꼬리말을 확인할 수 있습니다.
 HTML 미리보기는 한컴의 실제 페이지 배치를 재현하는 렌더러가 아닙니다.
@@ -96,6 +103,34 @@ const converted = await pipeline.to('docx');
 // Markdown 문자열 직접 입력
 const mdResult = await Pipeline.open('# Hello\n\nWorld').to('docx');
 ```
+
+### DOC → HWP / HWPX / DOCX
+
+```typescript
+import { Pipeline, configureDocConverter } from 'hwpkit-dev';
+import { createLibreOfficeDocConverter } from 'hwpkit-dev/node';
+
+// Node.js: LibreOffice가 설치된 로컬 환경에서 한 번 설정합니다.
+configureDocConverter(createLibreOfficeDocConverter({ timeoutMs: 60_000 }));
+const result = await Pipeline.open(docBytes, 'doc').to('hwpx');
+// .to('hwp'), .to('docx')도 같은 방법으로 사용합니다.
+```
+
+위 패키지 이름은 현재 `package.json`의 `hwpkit-dev` 기준입니다.
+브라우저/서버 앱은 `configureDocConverter(async docBytes => docxBytes)`로 자체 변환기를
+연결할 수 있습니다. 연결하지 않으면 외부 프로그램 없이 본문 읽기 모드로 동작합니다.
+설정한 변환기가 실패하면 실패 결과를 반환하며, 서식을 버리는 모드로 자동 전환하지 않습니다.
+LibreOffice 연결은 파일을 외부 서비스에 업로드하지 않고, 임시 문서와 프로필을 정리합니다.
+
+검증 명령:
+
+```bash
+npm test
+HWPKIT_TEST_LIBREOFFICE=1 npm test -- src/node/LibreOfficeDoc.test.ts
+node tools/audit-conversions.mjs /path/to/documents /tmp/conversion-audit.json
+```
+
+[2026-09-08 파일 열기·DOC 입력 점검](docs/opening-and-doc-audit-2026-09-08.md)
 
 ### Decoder / Encoder 직접 사용
 

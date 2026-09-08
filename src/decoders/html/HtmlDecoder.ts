@@ -53,6 +53,7 @@ function tokenize(html: string): Token[] {
     if (html[i] === '<') {
       if (html[i + 1] === '!') {
         const end = html.indexOf('>', i);
+        if (end === -1) break;
         i = end + 1;
         continue;
       }
@@ -72,7 +73,7 @@ function tokenize(html: string): Token[] {
         const attrRegex = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
         let m;
         while ((m = attrRegex.exec(attrsStr)) !== null) {
-          attrs[m[1].toLowerCase()] = m[2] ?? m[3] ?? m[4] ?? '';
+          attrs[m[1].toLowerCase()] = decodeHtmlEntities(m[2] ?? m[3] ?? m[4] ?? '');
         }
       }
 
@@ -88,14 +89,23 @@ function tokenize(html: string): Token[] {
     } else {
       const end = html.indexOf('<', i);
       const text = end === -1 ? html.slice(i) : html.slice(i, end);
-      if (text.trim()) {
-        tokens.push({ type: 'text', content: text });
+      if (text) {
+        tokens.push({ type: 'text', content: decodeHtmlEntities(text) });
       }
       i = end === -1 ? html.length : end;
     }
   }
 
   return tokens;
+}
+
+function decodeHtmlEntities(text: string): string {
+  const named: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0' };
+  return text.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (entity, name: string) => {
+    if (name[0] !== '#') return named[name.toLowerCase()] ?? entity;
+    const code = name[1].toLowerCase() === 'x' ? parseInt(name.slice(2), 16) : Number(name.slice(1));
+    return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff) ? String.fromCodePoint(code) : '\ufffd';
+  });
 }
 
 function parseTokens(tokens: Token[]): ContentNode[] {
@@ -338,8 +348,8 @@ function collectInline(tokens: Token[], start: number, stopTags: string[]): { no
           i++;
       }
     } else if (t.type === 'text') {
-      if (t.content?.trim()) {
-        nodes.push(buildSpan(t.content!.trim()));
+      if (t.content) {
+        nodes.push(buildSpan(t.content.replace(/[\t\r\n ]+/g, ' ')));
       }
       i++;
     } else {

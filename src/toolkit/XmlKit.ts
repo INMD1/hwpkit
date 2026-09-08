@@ -26,6 +26,13 @@ function parseXmlStrict(xml: string): Promise<unknown> {
         const frame = stack[stack.length - 1];
         const cur = frame.obj['_text'];
         frame.obj['_text'] = typeof cur === 'string' ? cur + text : text;
+        // Preserve mixed text/element order (e.g. hp:t with lineBreak/tab).
+        if (/^(?:hp:)?(?:t|T|CHAR)$/.test(frame.tag)) {
+          const content = (frame.obj['_content'] ??= []) as unknown[];
+          if (typeof content[content.length - 1] === 'string') {
+            content[content.length - 1] = (content[content.length - 1] as string) + text;
+          } else content.push(text);
+        }
       }
     };
 
@@ -50,6 +57,9 @@ function parseXmlStrict(xml: string): Promise<unknown> {
         // Track child order for document-order iteration
         if (!parent['_childOrder']) parent['_childOrder'] = [];
         (parent['_childOrder'] as string[]).push(tag);
+        if (/^(?:hp:)?(?:t|T|CHAR)$/.test(stack[stack.length - 1].tag)) {
+          ((parent['_content'] ??= []) as unknown[]).push({ tag, node: obj });
+        }
       }
     });
 

@@ -40,7 +40,7 @@ import pako from "pako";
 import { TextKit } from "../../toolkit/TextKit";
 import { fitColumnWidths } from "../../toolkit/TableGeometry";
 import { BaseEncoder } from "../../core/BaseEncoder";
-import { verifyHwpRecordStreams } from "./verify";
+import { parseHwpRecords, verifyHwpRecordStreams } from "./verify";
 
 // ─── HWP 5.0 태그 ID ────────────────────────────────────────
 const T = 16; // HWPTAG_BEGIN
@@ -1016,8 +1016,9 @@ function mkParaHeader(
   divideSort = 0,
 ): Uint8Array {
   return new BufWriter()
-    // HWP 5.0 PARA_HEADER는 글자 수의 최상위 비트를 유효 플래그로 요구한다.
-    .u32((nchars >>> 0) | 0x80000000)
+    // Bit 31 marks the LAST paragraph in a list, not a validity flag.
+    // Set it after all section/cell paragraphs have been emitted.
+    .u32(nchars & 0x7fffffff)
     .u32(ctrlMask)
     .u16(psId)
     .u8(Math.max(0, Math.min(255, Math.trunc(styleId))))
@@ -1028,6 +1029,24 @@ function mkParaHeader(
     .u32(instanceId)
     .u16(0)
     .build(); // 24 bytes
+}
+
+/** Hancom-produced files set bit 31 only at the end of each section/cell list. */
+function markParagraphListEnds(stream: Uint8Array): Uint8Array {
+  const pending = new Map<number, Uint8Array>();
+  const mark = (level: number, data: Uint8Array) => {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    view.setUint32(0, view.getUint32(0, true) | 0x80000000, true);
+    pending.delete(level);
+  };
+  for (const record of parseHwpRecords(stream)) {
+    for (const [level, data] of pending) {
+      if (level > record.level || (level === record.level && record.tag !== TAG_PARA_HEADER)) mark(level, data);
+    }
+    if (record.tag === TAG_PARA_HEADER) pending.set(record.level, record.data);
+  }
+  for (const [level, data] of pending) mark(level, data);
+  return stream;
 }
 
 function mkParaText(text: string): Uint8Array {
@@ -1668,8 +1687,12 @@ function encodePara(
         }
         for (const t of span.kids) {
           if (t.tag === "txt") {
-            text += t.content;
-            pos += t.content.length;
+            // Tabs occupy eight UTF-16 words in HWP (§4.1 control characters).
+            // A one-word tab makes readers skip the seven following characters.
+            const encoded = TextKit.stripControl(t.content.replace(/\r\n|\r/g, '\n'))
+              .replace(/\t/g, '\t\0\0\0\0\0\0\t');
+            text += encoded;
+            pos += encoded.length;
           } else if (t.tag === "br") {
             text += "\n";
             pos += 1;
@@ -3168,7 +3191,8 @@ export class HwpEncoder extends BaseEncoder {
 
       // 패스 2: 스트림 빌드
       const sections = doc.kids.length ? doc.kids : [{ tag: "sheet" as const, dims: A4, kids: [] }];
-      const bodyRaw = sections.map(sheet => buildBodyTextStream({ ...doc, kids: [sheet] }, bank, images));
+      const bodyRaw = sections.map(sheet => markParagraphListEnds(
+        buildBodyTextStream({ ...doc, kids: [sheet] }, bank, images)));
       const docInfoRaw = buildDocInfoStream(bank, images, sections.length);
       for (const section of bodyRaw) {
         const verification = verifyHwpRecordStreams(docInfoRaw, section);

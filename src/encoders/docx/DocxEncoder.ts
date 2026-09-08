@@ -62,6 +62,7 @@ export class DocxEncoder extends BaseEncoder {
         imgMap: new WeakMap(),
         paragraphStyleIds: new Set(),
         sectionParts: [],
+        hyperlinks: new Map(),
       };
 
       // Collect images from all content
@@ -115,7 +116,7 @@ export class DocxEncoder extends BaseEncoder {
         {
           name: "word/_rels/document.xml.rels",
           data: this.stringToBytes(
-            docRels(images, parts, numInfo.hasLists, hasFontTable),
+            docRels(images, parts, numInfo.hasLists, hasFontTable, ctx.hyperlinks),
           ),
         },
         { name: "docProps/app.xml", data: this.stringToBytes(appXml()) },
@@ -142,7 +143,7 @@ export class DocxEncoder extends BaseEncoder {
 
       parts.forEach((part, index) => {
         entries.push({ name: `word/${part.name}`, data: this.stringToBytes(partXmls[index]) });
-        entries.push({ name: `word/_rels/${part.name}.rels`, data: this.stringToBytes(imagePartRels(images)) });
+        entries.push({ name: `word/_rels/${part.name}.rels`, data: this.stringToBytes(imagePartRels(images, ctx.hyperlinks)) });
       });
 
       // Add image media files
@@ -169,6 +170,7 @@ interface HeaderFooterPart {
 }
 
 interface EncCtx {
+  hyperlinks: Map<string, string>;
   sectionParts: HeaderFooterPart[][];
   paragraphStyleIds: Set<string>;
   images: ImageEntry[];
@@ -395,6 +397,7 @@ function docRels(
   parts: HeaderFooterPart[],
   hasLists?: boolean,
   hasFontTable?: boolean,
+  hyperlinks: Map<string, string> = new Map(),
 ): string {
   let rels = `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
   <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>`;
@@ -415,6 +418,7 @@ function docRels(
   for (const part of parts) {
     rels += `\n  <Relationship Id="${part.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${part.kind}" Target="${part.name}"/>`;
   }
+  rels += hyperlinkRelationships(hyperlinks);
 
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -424,7 +428,11 @@ function docRels(
 
 /** Relationships are scoped to each OOXML part, so header/footer drawings
  * cannot reuse image relationships declared only by document.xml. */
-function imagePartRels(images: ImageEntry[]): string {
+function hyperlinkRelationships(links: Map<string, string>): string {
+  return [...links].map(([target, id]) => `<Relationship Id="${id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${esc(target)}" TargetMode="External"/>`).join('');
+}
+
+function imagePartRels(images: ImageEntry[], links: Map<string, string>): string {
   const rels = images
     .map(
       (img) =>
@@ -433,7 +441,7 @@ function imagePartRels(images: ImageEntry[]): string {
     .join("\n  ");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  ${rels}
+  ${rels}${hyperlinkRelationships(links)}
 </Relationships>`;
 }
 
@@ -787,6 +795,14 @@ function encodeParaInner(
     .map((k) => {
       if (k.tag === "span") return encodeRun(k, ctx);
       if (k.tag === "img") return encodeImage(k, ctx, maxWidthPt);
+      if (k.tag === "link") {
+        const content = k.kids.map(span => encodeRun(span, ctx)).join('');
+        if (!k.href) return content;
+        if (k.href.startsWith('#')) return `<w:hyperlink w:anchor="${esc(k.href.slice(1))}">${content}</w:hyperlink>`;
+        let id = ctx.hyperlinks.get(k.href);
+        if (!id) { id = `rId${ctx.nextId++}`; ctx.hyperlinks.set(k.href, id); }
+        return `<w:hyperlink r:id="${id}">${content}</w:hyperlink>`;
+      }
       // P9: PageNumNode가 para.kids에 직접 있는 경우 (머리말/꼬리말 등)
       if (k.tag === "pagenum") {
         const instr = k.format === "total" ? " NUMPAGES " : " PAGE ";
@@ -964,10 +980,17 @@ function encodeRun(span: SpanNode, _ctx: EncCtx): string {
     if (kid.tag === "txt") {
       // __EXT_N__ or __EXT_N_W<w>_H<h>__ 자리표시자 제거
       const content = kid.content.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "");
-      if (content || rPr.length > 0) {
-        parts.push(
-          `<w:r><w:rPr>${rPr.join("")}</w:rPr><w:t xml:space="preserve">${esc(content)}</w:t></w:r>`,
-        );
+      // w:t renders no line breaks: emit each line and a <w:br/> between them.
+      const lines = TextKit.splitLines(content);
+      const textRun = (t: string) =>
+        `<w:r><w:rPr>${rPr.join("")}</w:rPr><w:t xml:space="preserve">${esc(t).replace(/\t/g, '</w:t><w:tab/><w:t xml:space="preserve">')}</w:t></w:r>`;
+      if (content) {
+        for (let li = 0; li < lines.length; li++) {
+          if (lines[li] !== "") parts.push(textRun(lines[li]));
+          if (li < lines.length - 1) parts.push(`<w:r><w:br/></w:r>`);
+        }
+      } else if (rPr.length > 0) {
+        parts.push(textRun(""));
       }
     } else if (kid.tag === "pagenum") {
       // P9: format === 'total' → NUMPAGES 필드, 나머지 → PAGE 필드

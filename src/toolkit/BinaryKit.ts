@@ -27,13 +27,17 @@ export const BinaryKit = {
   parseCfb(data: Uint8Array): Map<string, Uint8Array> {
     const streams = new Map<string, Uint8Array>();
 
-    if (!this.isOle2(data)) {
+    if (!this.isOle2(data) || data.length < 512) {
       throw new Error('Not a valid OLE2 file');
     }
 
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     const sectorSize   = 1 << view.getUint16(30, true);
     const miniSectorSz = 1 << view.getUint16(32, true);
+    const majorVersion = view.getUint16(26, true);
+    if (!((majorVersion === 3 && sectorSize === 512) || (majorVersion === 4 && sectorSize === 4096)) || miniSectorSz !== 64) {
+      throw new Error('Unsupported CFB sector size/version');
+    }
     const dirFirstSec  = view.getUint32(48, true);
     const miniStreamCutoff = view.getUint32(56, true);
     const miniFatFirst = view.getUint32(60, true);
@@ -43,8 +47,11 @@ export const BinaryKit = {
     const ENDOFCHAIN = 0xFFFFFFFE;
     const FREESECT   = 0xFFFFFFFF;
 
-    const sectorAt = (sec: number): Uint8Array =>
-      data.subarray(512 + sec * sectorSize, 512 + (sec + 1) * sectorSize);
+    const sectorAt = (sec: number): Uint8Array => {
+      const offset = (sec + 1) * sectorSize;
+      if (!Number.isInteger(sec) || sec < 0 || offset + sectorSize > data.length) throw new Error('CFB sector outside file');
+      return data.subarray(offset, offset + sectorSize);
+    };
 
     // Build FAT from DIFAT
     const fatSecNums: number[] = [];
@@ -55,7 +62,10 @@ export const BinaryKit = {
     }
     if (difatFirst !== ENDOFCHAIN && difatFirst !== FREESECT) {
       let difSec = difatFirst;
+      const seen = new Set<number>();
       while (difSec !== ENDOFCHAIN && difSec !== FREESECT) {
+        if (seen.has(difSec)) throw new Error('Cyclic CFB DIFAT chain');
+        seen.add(difSec);
         const sec = sectorAt(difSec);
         const sv = new DataView(sec.buffer, sec.byteOffset, sec.byteLength);
         for (let i = 0; i < (sectorSize / 4) - 1; i++) {
@@ -79,7 +89,10 @@ export const BinaryKit = {
     const readChain = (startSec: number): Uint8Array => {
       const chunks: Uint8Array[] = [];
       let sec = startSec;
+      const seen = new Set<number>();
       while (sec !== ENDOFCHAIN && sec !== FREESECT && sec < fat.length) {
+        if (seen.has(sec)) throw new Error('Cyclic CFB FAT chain');
+        seen.add(sec);
         chunks.push(sectorAt(sec));
         sec = fat[sec];
       }
@@ -138,9 +151,13 @@ export const BinaryKit = {
       const chunks: Uint8Array[] = [];
       let sec = startSec;
       let remaining = size;
+      const seen = new Set<number>();
       while (sec !== ENDOFCHAIN && sec !== FREESECT && sec < miniFat.length && remaining > 0) {
+        if (seen.has(sec)) throw new Error('Cyclic CFB mini FAT chain');
+        seen.add(sec);
         const off = sec * miniSectorSz;
         const chunk = miniStreamData.subarray(off, off + Math.min(miniSectorSz, remaining));
+        if (chunk.length === 0) throw new Error('CFB mini sector outside stream');
         chunks.push(chunk);
         remaining -= chunk.length;
         sec = miniFat[sec];
@@ -149,8 +166,11 @@ export const BinaryKit = {
     };
 
     // DFS traversal
+    const visited = new Set<number>();
     const visit = (id: number, path: string): void => {
       if (id < 0 || id >= dirEntries.length) return;
+      if (visited.has(id)) throw new Error('Cyclic CFB directory');
+      visited.add(id);
       const entry = dirEntries[id];
       const fullPath = path ? `${path}/${entry.name}` : entry.name;
 

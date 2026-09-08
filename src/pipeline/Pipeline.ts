@@ -10,6 +10,7 @@ import { registry } from './registry';
 import '../decoders/hwpx/HwpxDecoder';
 import '../decoders/hwp/HwpScanner';
 import '../decoders/docx/DocxDecoder';
+import '../decoders/doc/DocDecoder';
 import '../decoders/md/MdDecoder';
 import '../decoders/html/HtmlDecoder';
 import '../encoders/hwpx/HwpxEncoder';
@@ -36,7 +37,11 @@ export class Pipeline {
     }
     const buf = await input.arrayBuffer();
     const data = new Uint8Array(buf);
-    const detectedFmt = normalizeFormat(fmt) ?? (typeof File !== 'undefined' && input instanceof File ? getExt(input.name) : undefined);
+    const extension = typeof File !== 'undefined' && input instanceof File ? getExt(input.name) : undefined;
+    // Office documents are often saved with a stale extension. Inspect their
+    // container; keep explicit caller choices and text-file extension hints.
+    const hint = extension === 'txt' ? 'md' : extension === 'htm' ? 'html' : extension;
+    const detectedFmt = normalizeFormat(fmt) ?? (hint && ['hwp', 'hwpx', 'docx', 'doc'].includes(hint) ? undefined : hint);
     return new Pipeline(data, detectedFmt);
   }
 
@@ -87,6 +92,8 @@ async function detectFormat(data: Uint8Array): Promise<string> {
     return 'zip';
   }
   const prefix = new TextDecoder().decode(data.subarray(0, 4096)).trimStart();
+  if (prefix.startsWith('%PDF-')) return 'pdf';
+  if (prefix.startsWith('{\\rtf')) return 'rtf';
   if (/^(?:<!doctype\s+html\b|<html\b)/i.test(prefix)) return 'html';
   return 'md';
 }

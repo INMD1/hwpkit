@@ -41,8 +41,9 @@ describe('public conversion matrix (content smoke test, not layout certification
     if (!result.ok) throw new Error(result.error);
     expect(new TreeWalker().extractText(result.data)).toContain('late entry');
   });
-  it('rejects DOC explicitly and never registers it as DOCX', async () => {
-    expect(registry.getDecoder('doc')).toBeUndefined();
+  it('registers a distinct binary DOC input and rejects fake DOC and DOC output', async () => {
+    expect(registry.getDecoder('doc')).toBeDefined();
+    expect(registry.getDecoder('doc')).not.toBe(registry.getDecoder('docx'));
     expect(registry.getEncoder('doc')).toBeUndefined();
     expect((await Pipeline.open('text', 'doc').to('docx')).ok).toBe(false);
     expect((await Pipeline.open('text').to('doc')).ok).toBe(false);
@@ -57,7 +58,7 @@ describe('public conversion matrix (content smoke test, not layout certification
     new DataView(bytes.buffer).setUint16(offset + 64, 26, true);
     const result = await Pipeline.open(bytes).inspect();
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain('doc');
+    if (!result.ok) expect(result.error.toLowerCase()).toContain('doc');
   });
   it('rejects an unrelated ZIP and normalizes explicit format names', async () => {
     const zip = new JSZip().file('readme.txt', 'not a document');
@@ -71,6 +72,18 @@ describe('public conversion matrix (content smoke test, not layout certification
       expect((await pipeline.inspect()).ok).toBe(true);
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+
+  it('detects a HWPX File whose extension incorrectly says HWP', async () => {
+    const file = new File([new Uint8Array(fixtures.get('hwpx')!)], 'renamed.hwp');
+    expect((await (await Pipeline.openAsync(file)).inspect()).ok).toBe(true);
+    expect((await (await Pipeline.openAsync(file, 'hwp')).inspect()).ok).toBe(false);
+  });
+
+  it('does not interpret PDF or RTF bytes as Markdown', async () => {
+    for (const text of ['%PDF-1.7\n', '{\\rtf1 hello}']) {
+      expect((await Pipeline.open(new TextEncoder().encode(text)).to('hwp')).ok).toBe(false);
     }
   });
 

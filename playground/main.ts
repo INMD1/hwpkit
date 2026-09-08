@@ -1,5 +1,18 @@
-import { Pipeline, registry } from 'hwpkit';
+/// <reference types="vite/client" />
+import { Pipeline, registry, configureDocConverter } from 'hwpkit';
 import type { AnyNode, DocRoot } from 'hwpkit';
+
+// The development server uses local LibreOffice for DOC formatting/tables/images.
+// Static builds use the portable body-text decoder and show its limitations.
+if (import.meta.env.DEV) {
+  configureDocConverter(async bytes => {
+    const response = await fetch('/api/doc-to-docx', {
+      method: 'POST', headers: { 'Content-Type': 'application/msword' }, body: new Uint8Array(bytes),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    return new Uint8Array(await response.arrayBuffer());
+  });
+}
 
 // ─── DOM refs ───────────────────────────────────────────────
 const inputEl    = document.getElementById('input')    as HTMLTextAreaElement;

@@ -28,8 +28,8 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // src/index.ts
-var index_exports = {};
-__export(index_exports, {
+var src_exports = {};
+__export(src_exports, {
   A4: () => A4,
   A4_LANDSCAPE: () => A4_LANDSCAPE,
   ArchiveKit: () => ArchiveKit,
@@ -52,6 +52,7 @@ __export(index_exports, {
   buildRow: () => buildRow,
   buildSheet: () => buildSheet,
   buildSpan: () => buildSpan,
+  configureDocConverter: () => configureDocConverter,
   countNodes: () => countNodes,
   fail: () => fail,
   normalizeDims: () => normalizeDims,
@@ -66,7 +67,7 @@ __export(index_exports, {
   validateRoot: () => validateRoot,
   walkNode: () => walkNode
 });
-module.exports = __toCommonJS(index_exports);
+module.exports = __toCommonJS(src_exports);
 
 // src/pipeline/Pipeline.ts
 var import_jszip = __toESM(require("jszip"));
@@ -84,12 +85,16 @@ var BinaryKit = {
   },
   parseCfb(data) {
     const streams = /* @__PURE__ */ new Map();
-    if (!this.isOle2(data)) {
+    if (!this.isOle2(data) || data.length < 512) {
       throw new Error("Not a valid OLE2 file");
     }
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     const sectorSize = 1 << view.getUint16(30, true);
     const miniSectorSz = 1 << view.getUint16(32, true);
+    const majorVersion = view.getUint16(26, true);
+    if (!(majorVersion === 3 && sectorSize === 512 || majorVersion === 4 && sectorSize === 4096) || miniSectorSz !== 64) {
+      throw new Error("Unsupported CFB sector size/version");
+    }
     const dirFirstSec = view.getUint32(48, true);
     const miniStreamCutoff = view.getUint32(56, true);
     const miniFatFirst = view.getUint32(60, true);
@@ -97,7 +102,11 @@ var BinaryKit = {
     const difatFirst = view.getUint32(68, true);
     const ENDOFCHAIN = 4294967294;
     const FREESECT = 4294967295;
-    const sectorAt = (sec) => data.subarray(512 + sec * sectorSize, 512 + (sec + 1) * sectorSize);
+    const sectorAt = (sec) => {
+      const offset = (sec + 1) * sectorSize;
+      if (!Number.isInteger(sec) || sec < 0 || offset + sectorSize > data.length) throw new Error("CFB sector outside file");
+      return data.subarray(offset, offset + sectorSize);
+    };
     const fatSecNums = [];
     for (let i = 0; i < 109; i++) {
       const s = view.getUint32(76 + i * 4, true);
@@ -106,7 +115,10 @@ var BinaryKit = {
     }
     if (difatFirst !== ENDOFCHAIN && difatFirst !== FREESECT) {
       let difSec = difatFirst;
+      const seen = /* @__PURE__ */ new Set();
       while (difSec !== ENDOFCHAIN && difSec !== FREESECT) {
+        if (seen.has(difSec)) throw new Error("Cyclic CFB DIFAT chain");
+        seen.add(difSec);
         const sec = sectorAt(difSec);
         const sv = new DataView(sec.buffer, sec.byteOffset, sec.byteLength);
         for (let i = 0; i < sectorSize / 4 - 1; i++) {
@@ -128,7 +140,10 @@ var BinaryKit = {
     const readChain = (startSec) => {
       const chunks = [];
       let sec = startSec;
+      const seen = /* @__PURE__ */ new Set();
       while (sec !== ENDOFCHAIN && sec !== FREESECT && sec < fat.length) {
+        if (seen.has(sec)) throw new Error("Cyclic CFB FAT chain");
+        seen.add(sec);
         chunks.push(sectorAt(sec));
         sec = fat[sec];
       }
@@ -169,17 +184,24 @@ var BinaryKit = {
       const chunks = [];
       let sec = startSec;
       let remaining = size;
+      const seen = /* @__PURE__ */ new Set();
       while (sec !== ENDOFCHAIN && sec !== FREESECT && sec < miniFat.length && remaining > 0) {
+        if (seen.has(sec)) throw new Error("Cyclic CFB mini FAT chain");
+        seen.add(sec);
         const off = sec * miniSectorSz;
         const chunk = miniStreamData.subarray(off, off + Math.min(miniSectorSz, remaining));
+        if (chunk.length === 0) throw new Error("CFB mini sector outside stream");
         chunks.push(chunk);
         remaining -= chunk.length;
         sec = miniFat[sec];
       }
       return concatUint8(chunks).subarray(0, size);
     };
+    const visited = /* @__PURE__ */ new Set();
     const visit = (id, path) => {
       if (id < 0 || id >= dirEntries.length) return;
+      if (visited.has(id)) throw new Error("Cyclic CFB directory");
+      visited.add(id);
       const entry = dirEntries[id];
       const fullPath = path ? `${path}/${entry.name}` : entry.name;
       if (entry.type === 2) {
@@ -698,10 +720,17 @@ function parseXmlStrict(xml) {
       stack.push({ tag: node.name, obj });
     });
     const appendText = (text) => {
+      var _a;
       if (stack.length > 0 && text) {
         const frame = stack[stack.length - 1];
         const cur = frame.obj["_text"];
         frame.obj["_text"] = typeof cur === "string" ? cur + text : text;
+        if (/^(?:hp:)?(?:t|T|CHAR)$/.test(frame.tag)) {
+          const content = (_a = frame.obj)["_content"] ?? (_a["_content"] = []);
+          if (typeof content[content.length - 1] === "string") {
+            content[content.length - 1] = content[content.length - 1] + text;
+          } else content.push(text);
+        }
       }
     };
     parser.on("text", (text) => appendText(text));
@@ -722,6 +751,9 @@ function parseXmlStrict(xml) {
         }
         if (!parent["_childOrder"]) parent["_childOrder"] = [];
         parent["_childOrder"].push(tag);
+        if (/^(?:hp:)?(?:t|T|CHAR)$/.test(stack[stack.length - 1].tag)) {
+          (parent["_content"] ?? (parent["_content"] = [])).push({ tag, node: obj });
+        }
       }
     });
     try {
@@ -765,13 +797,17 @@ var TextKit = {
     return new TextEncoder().encode(text);
   },
   escapeXml(s) {
-    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+    return s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF\uD800-\uDFFF]/gu, "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
   },
   unescapeXml(s) {
     return s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'");
   },
   normalizeWhitespace(s) {
     return s.replace(/\s+/g, " ").trim();
+  },
+  /** Split a run of text on line breaks, dropping empty segments. */
+  splitLines(s) {
+    return s.split(/\r\n|\r|\n/);
   },
   stripControl(s) {
     return s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
@@ -1557,6 +1593,25 @@ function decodeHeaderFooter(sec, kind, ctx) {
     return void 0;
   }
 }
+function decodeHwpxText(t) {
+  const kids = [];
+  const pushText = (value) => {
+    kids.push({ tag: "txt", content: value.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "") });
+  };
+  if (Array.isArray(t?._content)) {
+    for (const part of t._content) {
+      if (typeof part === "string") pushText(part);
+      else {
+        const name = part.tag.split(":").pop();
+        if (name === "lineBreak" || name === "br") kids.push({ tag: "br" });
+        else if (name === "tab") pushText("	");
+        else if (name === "fwSpace") pushText("\u3000");
+        else if (name === "nbSpace") pushText("\xA0");
+      }
+    }
+  } else pushText(typeof t === "string" ? t : t?._text ?? t?._ ?? t?.["#text"] ?? "");
+  return kids;
+}
 function decodePara(p, ctx) {
   const pAttr = p?._attr ?? {};
   const paraPrIdRef = Number(pAttr.paraPrIDRef ?? -1);
@@ -1633,15 +1688,28 @@ function decodePara(p, ctx) {
     }
     const runPics = collectPics(run);
     const textNodes = getTag(run, "hp:t", "hp:T", "hp:CHAR");
-    const content = textNodes.map((t) => {
-      const val = typeof t === "string" ? t : t?._text ?? t?._ ?? t?.["#text"] ?? "";
-      return val.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "");
-    }).join("");
+    const textVals = textNodes.map(decodeHwpxText);
+    const runKids = [];
+    const runOrder = run?._childOrder ?? [];
+    if (runOrder.length) {
+      let ti = 0;
+      for (const tag of runOrder) {
+        if (tag === "hp:t" || tag === "hp:T" || tag === "hp:CHAR" || tag === "CHAR") {
+          runKids.push(...textVals[ti++] ?? []);
+        } else if (tag === "hp:br" || tag === "hp:BR" || tag === "BR") {
+          runKids.push({ tag: "br" });
+        }
+      }
+    } else {
+      for (const v of textVals) runKids.push(...v);
+    }
+    const content = runKids.filter((k) => k.tag === "txt").map((k) => k.content).join("");
     if (content === "" && (run?.["hp:secPr"]?.[0] || run?.["hp:SECPR"]?.[0]) && runPics.length === 0 && pageNums.length === 0)
       continue;
     if (content !== "" || runPics.length === 0 && pageNums.length === 0) {
       const spanProps = content === "" ? {} : resolveCharPr(run, ctx);
-      kids.push(buildSpan(content, spanProps));
+      if (runKids.length) kids.push({ tag: "span", props: spanProps, kids: runKids });
+      else kids.push(buildSpan("", spanProps));
     }
   }
   if (pAttr.pageBreak === "1") {
@@ -3731,7 +3799,8 @@ function decodePara2(p, ctx) {
         const hl = hlArr[hi++];
         if (hl) {
           const rId = hl?._attr?.["r:id"] ?? hl?._attr?.id;
-          const url = rId ? ctx.relsMap.get(rId) : "";
+          const anchor = hl?._attr?.["w:anchor"] ?? hl?._attr?.anchor;
+          const url = rId ? ctx.relsMap.get(rId) : anchor ? `#${anchor}` : "";
           const hlRuns = toArr2(hl?.["w:r"] ?? hl?.r);
           const hlKids = hlRuns.map(
             (r) => decodeRun(r, ctx, {
@@ -3973,22 +4042,45 @@ function decodeRun(run, ctx, styleRpr) {
   const fldChar = run?.["w:fldChar"]?.[0]?._attr ?? run?.fldChar?.[0]?._attr;
   const instrText = run?.["w:instrText"]?.[0];
   const brNodes = toArr2(run?.["w:br"] ?? run?.br ?? []);
-  for (const br of brNodes) {
-    const brType = br?._attr?.["w:type"] ?? br?._attr?.type;
-    if (brType === "page") {
-      return { tag: "span", props, kids: [buildPb()] };
+  const textNodes = toArr2(run?.["w:t"] ?? run?.t);
+  const childOrder = run?._childOrder ?? [];
+  const textVals = textNodes.map(
+    (t) => typeof t === "string" ? t : t?._ ?? t?._text ?? ""
+  );
+  const kids = [];
+  if (childOrder.length) {
+    let ti = 0;
+    let bi = 0;
+    for (const tag of childOrder) {
+      if (tag === "w:t" || tag === "t") {
+        kids.push({ tag: "txt", content: textVals[ti++] ?? "" });
+      } else if (tag === "w:tab" || tag === "tab") {
+        kids.push({ tag: "txt", content: "	" });
+      } else if (tag === "w:br" || tag === "br") {
+        const br = brNodes[bi++];
+        const brType = br?._attr?.["w:type"] ?? br?._attr?.type;
+        kids.push(brType === "page" ? buildPb() : buildBr());
+      }
+    }
+  } else {
+    for (const v of textVals) if (v) kids.push({ tag: "txt", content: v });
+    for (const br of brNodes) {
+      const brType = br?._attr?.["w:type"] ?? br?._attr?.type;
+      kids.push(brType === "page" ? buildPb() : buildBr());
     }
   }
-  const textNodes = toArr2(run?.["w:t"] ?? run?.t);
-  const content = textNodes.map((t) => typeof t === "string" ? t : t?._ ?? t?._text ?? "").join("");
   if (instrText) {
     const instrStr = typeof instrText === "string" ? instrText : instrText?._text ?? "";
     if (instrStr.trim().toUpperCase() === "PAGE") {
-      const pageNum = { tag: "pagenum", format: "decimal" };
-      return { tag: "span", props, kids: [pageNum] };
+      return {
+        tag: "span",
+        props,
+        kids: [{ tag: "pagenum", format: "decimal" }, ...kids]
+      };
     }
   }
-  return buildSpan(content, props);
+  if (!kids.length) kids.push({ tag: "txt", content: "" });
+  return { tag: "span", props, kids };
 }
 function parseBorderDef(bdrNode) {
   const sides = [
@@ -4582,209 +4674,113 @@ function parseVertAlign(v) {
   return VERT_ALIGN_MAP[v ?? ""];
 }
 
-// src/decoders/md/MdDecoder.ts
-var MdDecoder = class extends BaseDecoder {
+// src/decoders/doc/DocDecoder.ts
+var docConverter;
+function configureDocConverter(converter) {
+  docConverter = converter;
+}
+var DocDecoder = class extends BaseDecoder {
   getFormat() {
-    return "md";
+    return "doc";
+  }
+  getAliases() {
+    return ["application/msword"];
   }
   async decode(data) {
-    const shield = new ShieldedParser();
-    const warns = [];
     try {
-      const text = this.bytesToString(data);
-      const lines = text.split(/\r?\n/);
-      const kids = [];
-      let i = 0;
-      while (i < lines.length) {
-        const line = lines[i];
-        const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
-        if (headingMatch) {
-          const level = headingMatch[1].length;
-          kids.push(buildPara([buildSpan(headingMatch[2], { b: level <= 2 })], { heading: level }));
-          i++;
-          continue;
-        }
-        if (line.includes("|") && i + 1 < lines.length && lines[i + 1].match(/^\s*\|?\s*[-:]+\s*\|/)) {
-          const tableResult = shield.guard(() => parseMdTable(lines, i), null, `md:table@${i}`);
-          if (tableResult) {
-            kids.push(tableResult.node);
-            i = tableResult.nextLine;
-            continue;
-          }
-        }
-        if (line.match(/^[-*_]{3,}$/)) {
-          kids.push(buildPara([buildSpan("")], {}));
-          i++;
-          continue;
-        }
-        const listMatch = line.match(/^(\s*)([-*+]|\d+\.)\s+(.+)$/);
-        if (listMatch) {
-          kids.push(buildPara(parseInline(listMatch[3]), {
-            listLv: Math.floor(listMatch[1].length / 2),
-            listOrd: /\d+\./.test(listMatch[2]),
-            listMark: listMatch[2]
-          }));
-          i++;
-          continue;
-        }
-        const bqMatch = line.match(/^>\s*(.*)$/);
-        if (bqMatch) {
-          kids.push(buildPara([buildSpan(bqMatch[1])], { indentPt: 28 }));
-          i++;
-          continue;
-        }
-        if (line.startsWith("```")) {
-          const codeLines = [];
-          i++;
-          while (i < lines.length && !lines[i].startsWith("```")) {
-            codeLines.push(lines[i]);
-            i++;
-          }
-          i++;
-          kids.push(buildPara([buildSpan(codeLines.join("\n"), { font: "Courier New" })], {}));
-          continue;
-        }
-        if (line.trim() === "") {
-          i++;
-          continue;
-        }
-        const alignMatch = line.match(/^<div\s+align="(center|right|left)">(.*?)<\/div>$/i);
-        if (alignMatch) {
-          const align = alignMatch[1].toLowerCase();
-          kids.push(buildPara(parseInline(alignMatch[2]), { align }));
-          i++;
-          continue;
-        }
-        kids.push(buildPara(parseInline(line), {}));
-        i++;
+      const streams = BinaryKit.parseCfb(data);
+      const word = streams.get("WordDocument");
+      if (!word || word.length < 32) throw new Error("WordDocument \uC2A4\uD2B8\uB9BC\uC774 \uC5C6\uAC70\uB098 \uC190\uC0C1\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+      const view = new DataView(word.buffer, word.byteOffset, word.byteLength);
+      if (view.getUint16(0, true) !== 42476) throw new Error("Word DOC \uC11C\uBA85\uC774 \uC544\uB2D9\uB2C8\uB2E4.");
+      const flags = view.getUint16(10, true);
+      if (flags & 33024) throw new Error("\uC554\uD638\uD654\uB41C DOC\uB294 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uC554\uD638\uB97C \uD574\uC81C\uD55C \uB4A4 \uB2E4\uC2DC \uBCC0\uD658\uD558\uC138\uC694.");
+      if (docConverter) {
+        const docx = await docConverter(data);
+        return new DocxDecoder().decode(docx);
       }
-      warns.push(...shield.flush());
-      const sheet = buildSheet(kids.length > 0 ? kids : [buildPara([buildSpan("")])], A4);
-      return succeed(buildRoot({}, [sheet]), warns);
+      const version = view.getUint16(2, true);
+      if (version < 193) throw new Error("Word 97 \uC774\uC804 DOC\uB294 DOCX \uBCC0\uD658\uAE30\uB97C \uC124\uC815\uD574\uC57C \uD569\uB2C8\uB2E4.");
+      const table = streams.get(flags & 512 ? "1Table" : "0Table");
+      if (!table) throw new Error("DOC Table \uC2A4\uD2B8\uB9BC\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.");
+      let offset = 32;
+      const csw = view.getUint16(offset, true);
+      offset += 2 + csw * 2;
+      const cslw = view.getUint16(offset, true);
+      offset += 2;
+      if (cslw < 4) throw new Error("\uC798\uBABB\uB41C DOC FibRgLw\uC785\uB2C8\uB2E4.");
+      const bodyLength = view.getUint32(offset + 3 * 4, true);
+      offset += cslw * 4;
+      const pairCount = view.getUint16(offset, true);
+      offset += 2;
+      if (pairCount <= 33) throw new Error("DOC CLX \uCC38\uC870\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.");
+      const clxOffset = view.getUint32(offset + 33 * 8, true);
+      const clxLength = view.getUint32(offset + 33 * 8 + 4, true);
+      if (clxLength === 0 || clxOffset + clxLength > table.length) throw new Error("DOC CLX \uBC94\uC704\uAC00 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+      const clx = table.subarray(clxOffset, clxOffset + clxLength);
+      const cv = new DataView(clx.buffer, clx.byteOffset, clx.byteLength);
+      let pos = 0;
+      while (pos < clx.length && clx[pos] === 1) pos += 3 + cv.getUint16(pos + 1, true);
+      if (clx[pos] !== 2) throw new Error("DOC piece table\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.");
+      const size = cv.getUint32(pos + 1, true);
+      pos += 5;
+      if (size < 4 || (size - 4) % 12 !== 0 || pos + size > clx.length) throw new Error("\uC190\uC0C1\uB41C DOC piece table\uC785\uB2C8\uB2E4.");
+      const count = (size - 4) / 12;
+      const pcdOffset = pos + (count + 1) * 4;
+      const chunks = [];
+      let covered = 0;
+      for (let i = 0; i < count; i++) {
+        const start = cv.getUint32(pos + i * 4, true);
+        const end = cv.getUint32(pos + (i + 1) * 4, true);
+        if (i === 0 && start !== 0 || end < start) throw new Error("DOC \uBB38\uC790 \uC704\uCE58\uAC00 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+        if (start >= bodyLength) break;
+        const length = Math.min(end, bodyLength) - start;
+        const fc = cv.getUint32(pcdOffset + i * 8 + 2, true);
+        const compressed = (fc & 1073741824) !== 0;
+        const byteOffset = (fc & 1073741823) / (compressed ? 2 : 1);
+        const byteLength = length * (compressed ? 1 : 2);
+        if (!Number.isInteger(byteOffset) || byteOffset + byteLength > word.length) throw new Error("DOC \uD14D\uC2A4\uD2B8 \uBC94\uC704\uAC00 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+        const bytes = word.subarray(byteOffset, byteOffset + byteLength);
+        chunks.push(new TextDecoder(compressed ? "windows-1252" : "utf-16le").decode(bytes));
+        covered += length;
+      }
+      if (covered !== bodyLength) throw new Error("DOC \uBCF8\uBB38\uC774 \uC798\uB838\uC2B5\uB2C8\uB2E4.");
+      const text = fieldResults(chunks.join(""));
+      const paragraphs = [];
+      for (const line of text.replace(/\x07/g, "\r").split("\r")) {
+        const pages = line.split("\f");
+        const para = buildPara([]);
+        pages.forEach((page, i) => {
+          if (i) {
+            const span = buildSpan("");
+            span.kids = [buildPb()];
+            para.kids.push(span);
+          }
+          para.kids.push(buildSpan(page.replace(/\x0b/g, "\n").replace(/[\x00-\x08\x0e-\x1f]/g, "")));
+        });
+        paragraphs.push(para);
+      }
+      if (text.endsWith("\r") && paragraphs.length > 1) paragraphs.pop();
+      return succeed(buildRoot({}, [buildSheet(paragraphs)]), [
+        "DOC \uAE30\uBCF8 \uC77D\uAE30 \uBAA8\uB4DC: \uBCF8\uBB38 \uD14D\uC2A4\uD2B8\xB7\uBB38\uB2E8\xB7\uC904\uBC14\uAFC8\uC744 \uBCC0\uD658\uD569\uB2C8\uB2E4. \uC11C\uC2DD, \uD45C \uAD6C\uC870, \uADF8\uB9BC, \uBA38\uB9AC\uB9D0/\uAF2C\uB9AC\uB9D0\uC740 \uBCF4\uC874\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uC804\uCCB4 \uBCC0\uD658\uC740 configureDocConverter \uB610\uB294 hwpkit-dev/node\uC758 createLibreOfficeDocConverter\uB97C \uC0AC\uC6A9\uD558\uC138\uC694."
+      ]);
     } catch (e) {
-      warns.push(...shield.flush());
-      return fail(`MD decode error: ${e?.message ?? String(e)}`, warns);
+      return fail(`DOC \uB514\uCF54\uB529 \uC624\uB958: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 };
-function parseInline(text) {
-  const result = [];
-  let rem = text;
-  while (rem.length > 0) {
-    let m = rem.match(/^(.*?)!\[([^\]]*)\]\((data:([^;]+);base64,([^)]+))\)(.*)/s);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      const mime = m[4];
-      const validMimes = ["image/png", "image/jpeg", "image/gif", "image/bmp"];
-      result.push(buildImg(m[5], validMimes.includes(mime) ? mime : "image/png", 100, 100, m[2] || void 0));
-      rem = m[6];
-      continue;
-    }
-    m = rem.match(/^(.*?)!\[([^\]]*)\]\(([^)]+)\)(.*)/s);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(`[\uC774\uBBF8\uC9C0: ${m[2] || m[3]}]`));
-      rem = m[4];
-      continue;
-    }
-    m = rem.match(/^(.*?)\*\*\*(.+?)\*\*\*(.*)/s);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(m[2], { b: true, i: true }));
-      rem = m[3];
-      continue;
-    }
-    m = rem.match(/^(.*?)\*\*(.+?)\*\*(.*)/s);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(m[2], { b: true }));
-      rem = m[3];
-      continue;
-    }
-    m = rem.match(/^(.*?)\*(.+?)\*(.*)/s);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(m[2], { i: true }));
-      rem = m[3];
-      continue;
-    }
-    m = rem.match(/^(.*?)~~(.+?)~~(.*)/s);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(m[2], { s: true }));
-      rem = m[3];
-      continue;
-    }
-    m = rem.match(/^(.*?)<u>(.+?)<\/u>(.*)/si);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(m[2], { u: true }));
-      rem = m[3];
-      continue;
-    }
-    m = rem.match(/^(.*?)<sup>(.+?)<\/sup>(.*)/si);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(m[2], { sup: true }));
-      rem = m[3];
-      continue;
-    }
-    m = rem.match(/^(.*?)<sub>(.+?)<\/sub>(.*)/si);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(m[2], { sub: true }));
-      rem = m[3];
-      continue;
-    }
-    m = rem.match(/^(.*?)`(.+?)`(.*)/s);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(m[2], { font: "Courier New" }));
-      rem = m[3];
-      continue;
-    }
-    result.push(buildSpan(rem));
-    break;
+function fieldResults(text) {
+  const fields = [];
+  let result = "";
+  for (const ch of text) {
+    if (ch === "") fields.push(false);
+    else if (ch === "" && fields.length) fields[fields.length - 1] = true;
+    else if (ch === "" && fields.length) fields.pop();
+    else if (fields.every(Boolean)) result += ch;
   }
-  return result.length > 0 ? result : [buildSpan(text)];
+  return result;
 }
-function parseMdTable(lines, startLine) {
-  const parse = (line) => {
-    const cells = [];
-    let cell = "";
-    for (let i = 0; i < line.length; i++) {
-      if (line[i] === "\\" && line[i + 1] === "|") {
-        cell += "|";
-        i++;
-      } else if (line[i] === "|") {
-        cells.push(cell.trim());
-        cell = "";
-      } else {
-        cell += line[i];
-      }
-    }
-    cells.push(cell.trim());
-    if (cells[0] === "") cells.shift();
-    if (cells[cells.length - 1] === "") cells.pop();
-    return cells;
-  };
-  const headers = parse(lines[startLine]);
-  let cur = startLine + 2;
-  const rows = [];
-  while (cur < lines.length) {
-    if (!lines[cur].includes("|")) break;
-    const cells = parse(lines[cur]);
-    if (cells.length === 0) break;
-    rows.push(cells);
-    cur++;
-  }
-  const allRows = [headers, ...rows];
-  const gridRows = allRows.map(
-    (row, ri) => buildRow(row.map((cell) => buildCell([buildPara([buildSpan(cell, ri === 0 ? { b: true } : {})])])))
-  );
-  return { node: buildGrid(gridRows), nextLine: cur };
-}
-registry.registerDecoder(new MdDecoder());
+registry.registerDecoder(new DocDecoder());
 
 // src/decoders/html/HtmlDecoder.ts
 var HtmlDecoder = class extends BaseDecoder {
@@ -4814,6 +4810,7 @@ function tokenize(html) {
     if (html[i] === "<") {
       if (html[i + 1] === "!") {
         const end2 = html.indexOf(">", i);
+        if (end2 === -1) break;
         i = end2 + 1;
         continue;
       }
@@ -4830,7 +4827,7 @@ function tokenize(html) {
         const attrRegex = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
         let m;
         while ((m = attrRegex.exec(attrsStr)) !== null) {
-          attrs[m[1].toLowerCase()] = m[2] ?? m[3] ?? m[4] ?? "";
+          attrs[m[1].toLowerCase()] = decodeHtmlEntities(m[2] ?? m[3] ?? m[4] ?? "");
         }
       }
       tokens.push({
@@ -4844,13 +4841,21 @@ function tokenize(html) {
     } else {
       const end = html.indexOf("<", i);
       const text = end === -1 ? html.slice(i) : html.slice(i, end);
-      if (text.trim()) {
-        tokens.push({ type: "text", content: text });
+      if (text) {
+        tokens.push({ type: "text", content: decodeHtmlEntities(text) });
       }
       i = end === -1 ? html.length : end;
     }
   }
   return tokens;
+}
+function decodeHtmlEntities(text) {
+  const named = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: "\xA0" };
+  return text.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (entity, name) => {
+    if (name[0] !== "#") return named[name.toLowerCase()] ?? entity;
+    const code = name[1].toLowerCase() === "x" ? parseInt(name.slice(2), 16) : Number(name.slice(1));
+    return code > 0 && code <= 1114111 && !(code >= 55296 && code <= 57343) ? String.fromCodePoint(code) : "\uFFFD";
+  });
 }
 function parseTokens(tokens) {
   const kids = [];
@@ -5062,8 +5067,8 @@ function collectInline(tokens, start, stopTags) {
           i++;
       }
     } else if (t.type === "text") {
-      if (t.content?.trim()) {
-        nodes.push(buildSpan(t.content.trim()));
+      if (t.content) {
+        nodes.push(buildSpan(t.content.replace(/[\t\r\n ]+/g, " ")));
       }
       i++;
     } else {
@@ -5085,6 +5090,232 @@ function skipBlock(tokens, start, name) {
   return i;
 }
 registry.registerDecoder(new HtmlDecoder());
+
+// src/decoders/md/MdDecoder.ts
+var MdDecoder = class extends BaseDecoder {
+  getFormat() {
+    return "md";
+  }
+  async decode(data) {
+    const shield = new ShieldedParser();
+    const warns = [];
+    try {
+      const text = this.bytesToString(data);
+      const lines = text.split(/\r?\n/);
+      const kids = [];
+      let i = 0;
+      while (i < lines.length) {
+        const line = lines[i];
+        const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+        if (headingMatch) {
+          const level = headingMatch[1].length;
+          kids.push(buildPara(parseInline(headingMatch[2]).map((node) => node.tag === "span" ? { ...node, props: { b: level <= 2, ...node.props } } : node), { heading: level }));
+          i++;
+          continue;
+        }
+        if (line.includes("|") && i + 1 < lines.length && lines[i + 1].match(/^\s*\|?\s*[-:]+\s*\|/)) {
+          const tableResult = shield.guard(() => parseMdTable(lines, i), null, `md:table@${i}`);
+          if (tableResult) {
+            kids.push(tableResult.node);
+            i = tableResult.nextLine;
+            continue;
+          }
+        }
+        if (line.match(/^[-*_]{3,}$/)) {
+          kids.push(buildPara([buildSpan("")], {}));
+          i++;
+          continue;
+        }
+        const listMatch = line.match(/^(\s*)([-*+]|\d+\.)\s+(.+)$/);
+        if (listMatch) {
+          kids.push(buildPara(parseInline(listMatch[3]), {
+            listLv: Math.floor(listMatch[1].length / 2),
+            listOrd: /\d+\./.test(listMatch[2]),
+            listMark: listMatch[2]
+          }));
+          i++;
+          continue;
+        }
+        const bqMatch = line.match(/^>\s*(.*)$/);
+        if (bqMatch) {
+          kids.push(buildPara([buildSpan(bqMatch[1])], { indentPt: 28 }));
+          i++;
+          continue;
+        }
+        if (line.startsWith("```")) {
+          const codeLines = [];
+          i++;
+          while (i < lines.length && !lines[i].startsWith("```")) {
+            codeLines.push(lines[i]);
+            i++;
+          }
+          i++;
+          kids.push(buildPara([buildSpan(codeLines.join("\n"), { font: "Courier New" })], {}));
+          continue;
+        }
+        if (line.trim() === "") {
+          i++;
+          continue;
+        }
+        if (/^\s*<table\b/i.test(line)) {
+          const block = [];
+          let depth = 0;
+          do {
+            const part = lines[i++];
+            block.push(part);
+            for (const tag of part.matchAll(/<\/?table\b[^>]*>/gi)) depth += tag[0][1] === "/" ? -1 : 1;
+          } while (i < lines.length && depth > 0);
+          const html = await new HtmlDecoder().decode(this.stringToBytes(block.join("\n")));
+          if (!html.ok) return html;
+          kids.push(...html.data.kids.flatMap((sheet2) => sheet2.kids));
+          warns.push(...html.warns);
+          continue;
+        }
+        const alignMatch = line.match(/^<div\s+align="(center|right|left)">(.*?)<\/div>$/i);
+        if (alignMatch) {
+          const align = alignMatch[1].toLowerCase();
+          kids.push(buildPara(parseInline(alignMatch[2]), { align }));
+          i++;
+          continue;
+        }
+        kids.push(buildPara(parseInline(line), {}));
+        i++;
+      }
+      warns.push(...shield.flush());
+      const sheet = buildSheet(kids.length > 0 ? kids : [buildPara([buildSpan("")])], A4);
+      return succeed(buildRoot({}, [sheet]), warns);
+    } catch (e) {
+      warns.push(...shield.flush());
+      return fail(`MD decode error: ${e?.message ?? String(e)}`, warns);
+    }
+  }
+};
+function parseInline(text) {
+  const result = [];
+  let rem = text;
+  while (rem.length > 0) {
+    let m = rem.match(/^(.*?)!\[([^\]]*)\]\((data:([^;]+);base64,([^)]+))\)(.*)/s);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      const mime = m[4];
+      const validMimes = ["image/png", "image/jpeg", "image/gif", "image/bmp"];
+      result.push(buildImg(m[5], validMimes.includes(mime) ? mime : "image/png", 100, 100, m[2] || void 0));
+      rem = m[6];
+      continue;
+    }
+    m = rem.match(/^(.*?)!\[([^\]]*)\]\(([^)]+)\)(.*)/s);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(`[\uC774\uBBF8\uC9C0: ${m[2] || m[3]}]`));
+      rem = m[4];
+      continue;
+    }
+    m = rem.match(/^(.*?)\[([^\]]+)\]\(([^)]*)\)(.*)/s);
+    if (m) {
+      if (m[1]) result.push(...parseInline(m[1]));
+      const label = parseInline(m[2]).flatMap((node) => node.tag === "span" ? [node] : node.tag === "link" ? node.kids : [buildSpan(node.alt ?? "")]);
+      result.push({ tag: "link", href: m[3], kids: label });
+      rem = m[4];
+      continue;
+    }
+    m = rem.match(/^(.*?)\*\*\*(.+?)\*\*\*(.*)/s);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(m[2], { b: true, i: true }));
+      rem = m[3];
+      continue;
+    }
+    m = rem.match(/^(.*?)\*\*(.+?)\*\*(.*)/s);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(m[2], { b: true }));
+      rem = m[3];
+      continue;
+    }
+    m = rem.match(/^(.*?)\*(.+?)\*(.*)/s);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(m[2], { i: true }));
+      rem = m[3];
+      continue;
+    }
+    m = rem.match(/^(.*?)~~(.+?)~~(.*)/s);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(m[2], { s: true }));
+      rem = m[3];
+      continue;
+    }
+    m = rem.match(/^(.*?)<u>(.+?)<\/u>(.*)/si);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(m[2], { u: true }));
+      rem = m[3];
+      continue;
+    }
+    m = rem.match(/^(.*?)<sup>(.+?)<\/sup>(.*)/si);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(m[2], { sup: true }));
+      rem = m[3];
+      continue;
+    }
+    m = rem.match(/^(.*?)<sub>(.+?)<\/sub>(.*)/si);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(m[2], { sub: true }));
+      rem = m[3];
+      continue;
+    }
+    m = rem.match(/^(.*?)`(.+?)`(.*)/s);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(m[2], { font: "Courier New" }));
+      rem = m[3];
+      continue;
+    }
+    result.push(buildSpan(rem));
+    break;
+  }
+  return result.length > 0 ? result : [buildSpan(text)];
+}
+function parseMdTable(lines, startLine) {
+  const parse = (line) => {
+    const cells = [];
+    let cell = "";
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === "\\" && line[i + 1] === "|") {
+        cell += "|";
+        i++;
+      } else if (line[i] === "|") {
+        cells.push(cell.trim());
+        cell = "";
+      } else {
+        cell += line[i];
+      }
+    }
+    cells.push(cell.trim());
+    if (cells[0] === "") cells.shift();
+    if (cells[cells.length - 1] === "") cells.pop();
+    return cells;
+  };
+  const headers = parse(lines[startLine]);
+  let cur = startLine + 2;
+  const rows = [];
+  while (cur < lines.length) {
+    if (!lines[cur].includes("|")) break;
+    const cells = parse(lines[cur]);
+    if (cells.length === 0) break;
+    rows.push(cells);
+    cur++;
+  }
+  const allRows = [headers, ...rows];
+  const gridRows = allRows.map(
+    (row, ri) => buildRow(row.map((cell) => buildCell([buildPara(parseInline(cell).map((node) => node.tag === "span" ? { ...node, props: { ...ri === 0 ? { b: true } : {}, ...node.props } } : node))])))
+  );
+  return { node: buildGrid(gridRows), nextLine: cur };
+}
+registry.registerDecoder(new MdDecoder());
 
 // src/core/BaseEncoder.ts
 var BaseEncoder = class {
@@ -5778,7 +6009,7 @@ function buildHeaderXml(dims, meta, ctx, sectionCount = 1) {
     const wrap = pp.lineWrap ?? "BREAK";
     const lsType = pp.lineSpacingFixed !== void 0 ? "AT_LEAST" : "PERCENT";
     const lsValue = pp.lineSpacingFixed !== void 0 ? pp.lineSpacingFixed : pp.lineSpacing;
-    paraPrXml += `<hh:paraPr id="${pp.id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="0" suppressLineNumbers="0" checked="0"><hh:align horizontal="${pp.align}" vertical="${ver}"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="${pp.widowControl ? 1 : 0}" keepWithNext="${pp.keepWithNext ? 1 : 0}" keepLines="${pp.keepLines ? 1 : 0}" pageBreakBefore="${pp.pageBreakBefore ? 1 : 0}" lineWrap="${wrap}"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/><hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar"><hh:margin><hc:indent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="${pp.rightHwp}" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/></hp:case><hp:default><hh:margin><hc:indent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="${pp.rightHwp}" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/></hp:default></hp:switch><hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>`;
+    paraPrXml += `<hh:paraPr id="${pp.id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="0" suppressLineNumbers="0" checked="0"><hh:align horizontal="${pp.align}" vertical="${ver}"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="${pp.widowControl ? 1 : 0}" keepWithNext="${pp.keepWithNext ? 1 : 0}" keepLines="${pp.keepLines ? 1 : 0}" pageBreakBefore="${pp.pageBreakBefore ? 1 : 0}" lineWrap="${wrap}"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/><hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar"><hh:margin><hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="${pp.rightHwp}" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/></hp:case><hp:default><hh:margin><hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="${pp.rightHwp}" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/></hp:default></hp:switch><hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>`;
   }
   const borderFillXml = ctx.borderFillBank.toXml();
   const denseStyles = materializeContiguousStyles(ctx.hwpxStyles);
@@ -6185,10 +6416,15 @@ function encodeRunInner(span) {
   let xml = "";
   for (const kid of span.kids) {
     if (kid.tag === "txt") {
-      const content = esc(kid.content);
-      if (content) xml += `<hp:t xml:space="preserve">${content}</hp:t>`;
+      const raw = kid.content.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "");
+      if (!raw) continue;
+      const lines = TextKit.splitLines(raw);
+      for (let li = 0; li < lines.length; li++) {
+        if (lines[li] !== "") xml += `<hp:t xml:space="preserve">${esc(lines[li]).replace(/\t/g, '<hp:tab width="4000" leader="0" type="1"/>')}</hp:t>`;
+        if (li < lines.length - 1) xml += `<hp:t><hp:lineBreak/></hp:t>`;
+      }
     } else if (kid.tag === "br") {
-      xml += `<hp:br/>`;
+      xml += `<hp:t><hp:lineBreak/></hp:t>`;
     } else if (kid.tag === "pagenum") {
       const fmt = kid.format === "roman" ? "ROMAN_LOWER" : kid.format === "romanCaps" ? "ROMAN_UPPER" : "DIGIT";
       const numType = kid.format === "total" ? "TOTAL_PAGE" : "PAGE";
@@ -6635,7 +6871,8 @@ var DocxEncoder = class extends BaseEncoder {
         warns: [],
         imgMap: /* @__PURE__ */ new WeakMap(),
         paragraphStyleIds: /* @__PURE__ */ new Set(),
-        sectionParts: []
+        sectionParts: [],
+        hyperlinks: /* @__PURE__ */ new Map()
       };
       collectImages(allKids, ctx);
       const parts = [];
@@ -6688,7 +6925,7 @@ var DocxEncoder = class extends BaseEncoder {
         {
           name: "word/_rels/document.xml.rels",
           data: this.stringToBytes(
-            docRels(images, parts, numInfo.hasLists, hasFontTable)
+            docRels(images, parts, numInfo.hasLists, hasFontTable, ctx.hyperlinks)
           )
         },
         { name: "docProps/app.xml", data: this.stringToBytes(appXml()) },
@@ -6711,7 +6948,7 @@ var DocxEncoder = class extends BaseEncoder {
       }
       parts.forEach((part, index) => {
         entries.push({ name: `word/${part.name}`, data: this.stringToBytes(partXmls[index]) });
-        entries.push({ name: `word/_rels/${part.name}.rels`, data: this.stringToBytes(imagePartRels(images)) });
+        entries.push({ name: `word/_rels/${part.name}.rels`, data: this.stringToBytes(imagePartRels(images, ctx.hyperlinks)) });
       });
       for (const img of images) {
         entries.push({ name: `word/media/${img.name}`, data: img.data });
@@ -6863,7 +7100,7 @@ function pkgRels() {
   <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
 </Relationships>`;
 }
-function docRels(images, parts, hasLists, hasFontTable) {
+function docRels(images, parts, hasLists, hasFontTable, hyperlinks = /* @__PURE__ */ new Map()) {
   let rels = `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
   <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>`;
   if (hasLists) {
@@ -6882,18 +7119,22 @@ function docRels(images, parts, hasLists, hasFontTable) {
     rels += `
   <Relationship Id="${part.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${part.kind}" Target="${part.name}"/>`;
   }
+  rels += hyperlinkRelationships(hyperlinks);
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   ${rels}
 </Relationships>`;
 }
-function imagePartRels(images) {
+function hyperlinkRelationships(links) {
+  return [...links].map(([target, id]) => `<Relationship Id="${id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${esc2(target)}" TargetMode="External"/>`).join("");
+}
+function imagePartRels(images, links) {
   const rels = images.map(
     (img) => `<Relationship Id="${img.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${img.name}"/>`
   ).join("\n  ");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  ${rels}
+  ${rels}${hyperlinkRelationships(links)}
 </Relationships>`;
 }
 function appXml() {
@@ -7171,6 +7412,17 @@ function encodeParaInner(para, ctx, maxWidthPt, sectionPrXml = "") {
   const runs = para.kids.map((k) => {
     if (k.tag === "span") return encodeRun(k, ctx);
     if (k.tag === "img") return encodeImage2(k, ctx, maxWidthPt);
+    if (k.tag === "link") {
+      const content = k.kids.map((span) => encodeRun(span, ctx)).join("");
+      if (!k.href) return content;
+      if (k.href.startsWith("#")) return `<w:hyperlink w:anchor="${esc2(k.href.slice(1))}">${content}</w:hyperlink>`;
+      let id = ctx.hyperlinks.get(k.href);
+      if (!id) {
+        id = `rId${ctx.nextId++}`;
+        ctx.hyperlinks.set(k.href, id);
+      }
+      return `<w:hyperlink r:id="${id}">${content}</w:hyperlink>`;
+    }
     if (k.tag === "pagenum") {
       const instr = k.format === "total" ? " NUMPAGES " : " PAGE ";
       return `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>${instr}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`;
@@ -7242,10 +7494,15 @@ function encodeRun(span, _ctx) {
   for (const kid of span.kids) {
     if (kid.tag === "txt") {
       const content = kid.content.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "");
-      if (content || rPr.length > 0) {
-        parts.push(
-          `<w:r><w:rPr>${rPr.join("")}</w:rPr><w:t xml:space="preserve">${esc2(content)}</w:t></w:r>`
-        );
+      const lines = TextKit.splitLines(content);
+      const textRun = (t) => `<w:r><w:rPr>${rPr.join("")}</w:rPr><w:t xml:space="preserve">${esc2(t).replace(/\t/g, '</w:t><w:tab/><w:t xml:space="preserve">')}</w:t></w:r>`;
+      if (content) {
+        for (let li = 0; li < lines.length; li++) {
+          if (lines[li] !== "") parts.push(textRun(lines[li]));
+          if (li < lines.length - 1) parts.push(`<w:r><w:br/></w:r>`);
+        }
+      } else if (rPr.length > 0) {
+        parts.push(textRun(""));
       }
     } else if (kid.tag === "pagenum") {
       const instr = kid.format === "total" ? " NUMPAGES " : " PAGE ";
@@ -8224,6 +8481,26 @@ function verifyHwpRecordStreams(docInfoRaw, sectionRaw) {
     );
   }
   const charShapeCount = countTag(docInfoRecords, TAG_CHAR_SHAPE2);
+  const pendingParagraphs = /* @__PURE__ */ new Map();
+  const checkListEnd = (record, isLast) => {
+    if (record.data.length >= 4 && Boolean(readU32(record.data, 0) & 2147483648) !== isLast) {
+      errors.push(`PARA_HEADER at offset ${record.offset} has an incorrect paragraph-list end bit`);
+    }
+  };
+  for (const record of bodyRecords) {
+    for (const [level, previous] of pendingParagraphs) {
+      if (level > record.level || level === record.level && record.tag !== TAG_PARA_HEADER2) {
+        checkListEnd(previous, true);
+        pendingParagraphs.delete(level);
+      }
+    }
+    if (record.tag === TAG_PARA_HEADER2) {
+      const previous = pendingParagraphs.get(record.level);
+      if (previous) checkListEnd(previous, false);
+      pendingParagraphs.set(record.level, record);
+    }
+  }
+  for (const record of pendingParagraphs.values()) checkListEnd(record, true);
   const binDataCount = countTag(docInfoRecords, TAG_BIN_DATA);
   const paraShapeCount = countTag(docInfoRecords, TAG_PARA_SHAPE2);
   const styleCount = countTag(docInfoRecords, TAG_STYLE2);
@@ -8296,9 +8573,6 @@ function verifyHwpRecordStreams(docInfoRaw, sectionRaw) {
     const csCount = readU16(header.data, 12);
     const lineAlignCount = readU16(header.data, 16);
     const label = `PARA_HEADER at offset ${header.offset}`;
-    if ((rawCharCount & 2147483648) === 0) {
-      errors.push(`${label} has no 0x80000000 character-count bit`);
-    }
     if (paraShapeId >= paraShapeCount) {
       errors.push(
         `${label} references paraShapeId ${paraShapeId}, but only ${paraShapeCount} PARA_SHAPE record(s) exist`
@@ -9085,7 +9359,23 @@ function mkPageDef(dims) {
   return new BufWriter().u32(Metric.ptToHwp(dims.wPt)).u32(Metric.ptToHwp(dims.hPt)).u32(Metric.ptToHwp(dims.ml)).u32(Metric.ptToHwp(dims.mr)).u32(Metric.ptToHwp(rawTopPt)).u32(Metric.ptToHwp(rawBottomPt)).u32(Metric.ptToHwp(rawHeaderPt)).u32(Metric.ptToHwp(rawFooterPt)).u32(0).u32(dims.orient === "landscape" ? 1 : 0).build();
 }
 function mkParaHeader(nchars, ctrlMask, psId, csCount, lineAlignCount = 0, instanceId = 0, styleId = 0, divideSort = 0) {
-  return new BufWriter().u32(nchars >>> 0 | 2147483648).u32(ctrlMask).u16(psId).u8(Math.max(0, Math.min(255, Math.trunc(styleId)))).u8(Math.max(0, Math.min(255, Math.trunc(divideSort)))).u16(csCount).u16(0).u16(lineAlignCount).u32(instanceId).u16(0).build();
+  return new BufWriter().u32(nchars & 2147483647).u32(ctrlMask).u16(psId).u8(Math.max(0, Math.min(255, Math.trunc(styleId)))).u8(Math.max(0, Math.min(255, Math.trunc(divideSort)))).u16(csCount).u16(0).u16(lineAlignCount).u32(instanceId).u16(0).build();
+}
+function markParagraphListEnds(stream) {
+  const pending = /* @__PURE__ */ new Map();
+  const mark = (level, data) => {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    view.setUint32(0, view.getUint32(0, true) | 2147483648, true);
+    pending.delete(level);
+  };
+  for (const record of parseHwpRecords(stream)) {
+    for (const [level, data] of pending) {
+      if (level > record.level || level === record.level && record.tag !== TAG_PARA_HEADER3) mark(level, data);
+    }
+    if (record.tag === TAG_PARA_HEADER3) pending.set(record.level, record.data);
+  }
+  for (const [level, data] of pending) mark(level, data);
+  return stream;
 }
 function mkParaText(text) {
   const w = new BufWriter();
@@ -9441,8 +9731,9 @@ function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPo
         }
         for (const t of span.kids) {
           if (t.tag === "txt") {
-            text += t.content;
-            pos += t.content.length;
+            const encoded = TextKit.stripControl(t.content.replace(/\r\n|\r/g, "\n")).replace(/\t/g, "	\0\0\0\0\0\0	");
+            text += encoded;
+            pos += encoded.length;
           } else if (t.tag === "br") {
             text += "\n";
             pos += 1;
@@ -10576,7 +10867,9 @@ var HwpEncoder = class extends BaseEncoder {
         for (const node of sheet.kids) collectImages3(node);
       }
       const sections = doc.kids.length ? doc.kids : [{ tag: "sheet", dims: A4, kids: [] }];
-      const bodyRaw = sections.map((sheet) => buildBodyTextStream({ ...doc, kids: [sheet] }, bank, images));
+      const bodyRaw = sections.map((sheet) => markParagraphListEnds(
+        buildBodyTextStream({ ...doc, kids: [sheet] }, bank, images)
+      ));
       const docInfoRaw = buildDocInfoStream(bank, images, sections.length);
       for (const section of bodyRaw) {
         const verification = verifyHwpRecordStreams(docInfoRaw, section);
@@ -10629,7 +10922,9 @@ var Pipeline = class _Pipeline {
     }
     const buf = await input.arrayBuffer();
     const data = new Uint8Array(buf);
-    const detectedFmt = normalizeFormat(fmt) ?? (typeof File !== "undefined" && input instanceof File ? getExt(input.name) : void 0);
+    const extension = typeof File !== "undefined" && input instanceof File ? getExt(input.name) : void 0;
+    const hint = extension === "txt" ? "md" : extension === "htm" ? "html" : extension;
+    const detectedFmt = normalizeFormat(fmt) ?? (hint && ["hwp", "hwpx", "docx", "doc"].includes(hint) ? void 0 : hint);
     return new _Pipeline(data, detectedFmt);
   }
   /** 목표 포맷으로 변환 */
@@ -10674,6 +10969,8 @@ async function detectFormat(data) {
     return "zip";
   }
   const prefix = new TextDecoder().decode(data.subarray(0, 4096)).trimStart();
+  if (prefix.startsWith("%PDF-")) return "pdf";
+  if (prefix.startsWith("{\\rtf")) return "rtf";
   if (/^(?:<!doctype\s+html\b|<html\b)/i.test(prefix)) return "html";
   return "md";
 }
@@ -10765,6 +11062,7 @@ function validateRoot(root) {
   buildRow,
   buildSheet,
   buildSpan,
+  configureDocConverter,
   countNodes,
   fail,
   normalizeDims,

@@ -26,7 +26,7 @@ describe('Hancom margin and model body margin boundary', () => {
     const zip = new JSZip();
     zip.file('Contents/header.xml', `<hh:head xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head" xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">
       <hh:refList><hh:paraProperties><hh:paraPr id="0"><hh:margin>
-        <hc:left value="3660"/><hc:indent value="-4000"/>
+        <hc:left value="3660"/><hc:intent value="-4000"/>
       </hh:margin></hh:paraPr></hh:paraProperties></hh:refList></hh:head>`);
     zip.file('Contents/section0.xml', `<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section" xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph">
       <hp:p paraPrIDRef="0"><hp:run><hp:t>내어쓰기</hp:t></hp:run></hp:p></hs:sec>`);

@@ -1,4 +1,4 @@
-import type { DocRoot, ContentNode, ParaNode, SpanNode, ImgNode } from '../../model/doc-tree';
+import type { DocRoot, ContentNode, ParaNode, SpanNode, ImgNode, LinkNode } from '../../model/doc-tree';
 import type { Outcome } from '../../contract/result';
 import type { ParaProps, TextProps } from '../../model/doc-props';
 import { A4 } from '../../model/doc-props';
@@ -8,6 +8,7 @@ import { ShieldedParser } from '../../safety/ShieldedParser';
 import { TextKit } from '../../toolkit/TextKit';
 import { registry } from '../../pipeline/registry';
 import { BaseDecoder } from '../../core/BaseDecoder';
+import { HtmlDecoder } from '../html/HtmlDecoder';
 
 export class MdDecoder extends BaseDecoder {
   protected getFormat(): string { return 'md'; }
@@ -29,7 +30,8 @@ export class MdDecoder extends BaseDecoder {
         const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
         if (headingMatch) {
           const level = headingMatch[1].length as 1 | 2 | 3 | 4 | 5 | 6;
-          kids.push(buildPara([buildSpan(headingMatch[2], { b: level <= 2 })], { heading: level }));
+          kids.push(buildPara(parseInline(headingMatch[2]).map(node => node.tag === 'span'
+            ? { ...node, props: { b: level <= 2, ...node.props } } : node), { heading: level }));
           i++; continue;
         }
 
@@ -70,6 +72,23 @@ export class MdDecoder extends BaseDecoder {
         // Empty line
         if (line.trim() === '') { i++; continue; }
 
+        // MdEncoder uses HTML for merged/nested tables that pipe tables cannot
+        // represent. Read these blocks as HTML instead of printing their tags.
+        if (/^\s*<table\b/i.test(line)) {
+          const block: string[] = [];
+          let depth = 0;
+          do {
+            const part = lines[i++];
+            block.push(part);
+            for (const tag of part.matchAll(/<\/?table\b[^>]*>/gi)) depth += tag[0][1] === '/' ? -1 : 1;
+          } while (i < lines.length && depth > 0);
+          const html = await new HtmlDecoder().decode(this.stringToBytes(block.join('\n')));
+          if (!html.ok) return html;
+          kids.push(...html.data.kids.flatMap(sheet => sheet.kids));
+          warns.push(...html.warns);
+          continue;
+        }
+
         // Regular paragraph — check for alignment div
         const alignMatch = line.match(/^<div\s+align="(center|right|left)">(.*?)<\/div>$/i);
         if (alignMatch) {
@@ -93,8 +112,8 @@ export class MdDecoder extends BaseDecoder {
   }
 }
 
-function parseInline(text: string): (SpanNode | ImgNode)[] {
-  const result: (SpanNode | ImgNode)[] = [];
+function parseInline(text: string): (SpanNode | ImgNode | LinkNode)[] {
+  const result: (SpanNode | ImgNode | LinkNode)[] = [];
   let rem = text;
 
   while (rem.length > 0) {
@@ -114,6 +133,16 @@ function parseInline(text: string): (SpanNode | ImgNode)[] {
       if (m[1]) result.push(buildSpan(m[1]));
       // Can't convert URL to base64, just preserve alt text
       result.push(buildSpan(`[이미지: ${m[2] || m[3]}]`));
+      rem = m[4]; continue;
+    }
+
+    // Preserve the displayed label and destination of Markdown hyperlinks.
+    m = rem.match(/^(.*?)\[([^\]]+)\]\(([^)]*)\)(.*)/s);
+    if (m) {
+      if (m[1]) result.push(...parseInline(m[1]));
+      const label = parseInline(m[2]).flatMap(node => node.tag === 'span' ? [node]
+        : node.tag === 'link' ? node.kids : [buildSpan(node.alt ?? '')]);
+      result.push({ tag: 'link', href: m[3], kids: label });
       rem = m[4]; continue;
     }
 
@@ -190,7 +219,8 @@ function parseMdTable(lines: string[], startLine: number): { node: any; nextLine
 
   const allRows = [headers, ...rows];
   const gridRows = allRows.map((row, ri) =>
-    buildRow(row.map(cell => buildCell([buildPara([buildSpan(cell, ri === 0 ? { b: true } : {})])]))),
+    buildRow(row.map(cell => buildCell([buildPara(parseInline(cell).map(node => node.tag === 'span'
+      ? { ...node, props: { ...(ri === 0 ? { b: true } : {}), ...node.props } } : node))]))),
   );
 
   return { node: buildGrid(gridRows), nextLine: cur };

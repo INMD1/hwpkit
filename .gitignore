@@ -21,3 +21,9 @@ ANYTOHWP
 !tests/fixtures/
 !tests/fixtures/reference.hwp
 !tests/fixtures/demo.docx
+
+# The package tracks its generated public entry points.
+!/dist/
+/dist/*
+!/dist/index.*
+!/dist/node.*

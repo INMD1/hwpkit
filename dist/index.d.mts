@@ -250,6 +250,10 @@ interface Decoder {
     decode(data: Uint8Array): Promise<Outcome<DocRoot>>;
 }
 
+/** Optional local/server converter for preserving DOC formatting and objects. */
+type DocToDocx = (data: Uint8Array) => Promise<Uint8Array>;
+declare function configureDocConverter(converter?: DocToDocx): void;
+
 declare class Pipeline {
     private raw;
     private srcFmt?;
@@ -387,9 +391,11 @@ declare const TextKit: {
     escapeXml(s: string): string;
     unescapeXml(s: string): string;
     normalizeWhitespace(s: string): string;
+    /** Split a run of text on line breaks, dropping empty segments. */
+    splitLines(s: string): string[];
     stripControl(s: string): string;
     base64Encode(data: Uint8Array): string;
     base64Decode(b64: string): Uint8Array;
 };
 
-export { A4, A4_LANDSCAPE, type Align, type AnyNode, ArchiveKit, BinaryKit, type BlockTag, type BrNode, type CellNode, type CellProps, type ContentNode, DEFAULT_STROKE, type Decoder, type DocMeta, type DocRoot, type Encoder, type Fail, type GridNode, type GridProps, type Heading, type ImgNode, type LinkNode, Metric, type Ok, type Outcome, type PageDims, type PageNumNode, type ParaNode, type ParaProps, type PbNode, Pipeline, type RowNode, type SheetNode, ShieldedParser, type SpanNode, type Stroke, type StrokeKind, type TableLook, TextKit, type TextProps, TreeWalker, type TxtNode, type VAlign, XmlKit, buildBr, buildCell, buildGrid, buildImg, buildPageNum, buildPara, buildPb, buildRoot, buildRow, buildSheet, buildSpan, countNodes, fail, normalizeDims, registry, safeAlign, safeFont, safeFontToKr, safeHex, safeStrokeDocx, safeStrokeHwpx, succeed, validateRoot, walkNode };
+export { A4, A4_LANDSCAPE, type Align, type AnyNode, ArchiveKit, BinaryKit, type BlockTag, type BrNode, type CellNode, type CellProps, type ContentNode, DEFAULT_STROKE, type Decoder, type DocMeta, type DocRoot, type DocToDocx, type Encoder, type Fail, type GridNode, type GridProps, type Heading, type ImgNode, type LinkNode, Metric, type Ok, type Outcome, type PageDims, type PageNumNode, type ParaNode, type ParaProps, type PbNode, Pipeline, type RowNode, type SheetNode, ShieldedParser, type SpanNode, type Stroke, type StrokeKind, type TableLook, TextKit, type TextProps, TreeWalker, type TxtNode, type VAlign, XmlKit, buildBr, buildCell, buildGrid, buildImg, buildPageNum, buildPara, buildPb, buildRoot, buildRow, buildSheet, buildSpan, configureDocConverter, countNodes, fail, normalizeDims, registry, safeAlign, safeFont, safeFontToKr, safeHex, safeStrokeDocx, safeStrokeHwpx, succeed, validateRoot, walkNode };

@@ -240,6 +240,26 @@ export function verifyHwpRecordStreams(
   }
 
   const charShapeCount = countTag(docInfoRecords, TAG_CHAR_SHAPE);
+  const pendingParagraphs = new Map<number, HwpRecord>();
+  const checkListEnd = (record: HwpRecord, isLast: boolean) => {
+    if (record.data.length >= 4 && Boolean(readU32(record.data, 0) & 0x80000000) !== isLast) {
+      errors.push(`PARA_HEADER at offset ${record.offset} has an incorrect paragraph-list end bit`);
+    }
+  };
+  for (const record of bodyRecords) {
+    for (const [level, previous] of pendingParagraphs) {
+      if (level > record.level || (level === record.level && record.tag !== TAG_PARA_HEADER)) {
+        checkListEnd(previous, true);
+        pendingParagraphs.delete(level);
+      }
+    }
+    if (record.tag === TAG_PARA_HEADER) {
+      const previous = pendingParagraphs.get(record.level);
+      if (previous) checkListEnd(previous, false);
+      pendingParagraphs.set(record.level, record);
+    }
+  }
+  for (const record of pendingParagraphs.values()) checkListEnd(record, true);
   const binDataCount = countTag(docInfoRecords, TAG_BIN_DATA);
   const paraShapeCount = countTag(docInfoRecords, TAG_PARA_SHAPE);
   const styleCount = countTag(docInfoRecords, TAG_STYLE);
@@ -318,9 +338,7 @@ export function verifyHwpRecordStreams(
     const lineAlignCount = readU16(header.data, 16);
     const label = `PARA_HEADER at offset ${header.offset}`;
 
-    if ((rawCharCount & 0x80000000) === 0) {
-      errors.push(`${label} has no 0x80000000 character-count bit`);
-    }
+    // Bit 31 terminates a paragraph list; intermediate paragraphs leave it clear.
     if (paraShapeId >= paraShapeCount) {
       errors.push(
         `${label} references paraShapeId ${paraShapeId}, but only ${paraShapeCount} PARA_SHAPE record(s) exist`,

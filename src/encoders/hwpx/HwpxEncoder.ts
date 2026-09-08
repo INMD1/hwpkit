@@ -1064,7 +1064,7 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx, sectionCoun
       `<hp:switch>` +
       `<hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">` +
       `<hh:margin>` +
-      `<hc:indent value="${pp.intentHwp}" unit="HWPUNIT"/>` +
+      `<hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/>` +
       `<hc:left value="${pp.leftHwp}" unit="HWPUNIT"/>` +
       `<hc:right value="${pp.rightHwp}" unit="HWPUNIT"/>` +
       `<hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/>` +
@@ -1074,7 +1074,7 @@ function buildHeaderXml(dims: PageDims, meta: DocMeta, ctx: HwpxCtx, sectionCoun
       `</hp:case>` +
       `<hp:default>` +
       `<hh:margin>` +
-      `<hc:indent value="${pp.intentHwp}" unit="HWPUNIT"/>` +
+      `<hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/>` +
       `<hc:left value="${pp.leftHwp}" unit="HWPUNIT"/>` +
       `<hc:right value="${pp.rightHwp}" unit="HWPUNIT"/>` +
       `<hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/>` +
@@ -1782,10 +1782,16 @@ function encodeRunInner(span: SpanNode): string {
   let xml = "";
   for (const kid of span.kids) {
     if (kid.tag === "txt") {
-      const content = esc(kid.content);
-      if (content) xml += `<hp:t xml:space="preserve">${content}</hp:t>`;
+      const raw = kid.content.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "");
+      if (!raw) continue;
+      // Hancom RunType accepts text; lineBreak/tab belong INSIDE hp:t.
+      const lines = TextKit.splitLines(raw);
+      for (let li = 0; li < lines.length; li++) {
+        if (lines[li] !== "") xml += `<hp:t xml:space="preserve">${esc(lines[li]).replace(/\t/g, '<hp:tab width="4000" leader="0" type="1"/>')}</hp:t>`;
+        if (li < lines.length - 1) xml += `<hp:t><hp:lineBreak/></hp:t>`;
+      }
     } else if (kid.tag === "br") {
-      xml += `<hp:br/>`;
+      xml += `<hp:t><hp:lineBreak/></hp:t>`;
     } else if (kid.tag === "pagenum") {
       const fmt = (kid as any).format === "roman" ? "ROMAN_LOWER" 
                 : (kid as any).format === "romanCaps" ? "ROMAN_UPPER" : "DIGIT";

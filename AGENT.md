@@ -5,9 +5,9 @@
 상세 근거: docs/conversion-quality-audit-2026-09-05.md.
 
 - 공개 API/형식: src/pipeline/Pipeline.ts, registry.ts, src/index.ts.
-- HWP(5.x)/HWPX/DOCX/MD/HTML 입력·출력 지원. DOC/PDF/.hwpkit 형식 미지원.
+- HWP(5.x)/HWPX/DOCX/MD/HTML 입출력, DOC 입력 지원(아래 2026-09-08 참고). DOC 출력/PDF/.hwpkit 미지원.
 - 5×5 기본 내용 왕복: src/pipeline/ConversionMatrix.test.ts. 외관 보존 인증이 아님.
-- 자동 감지: ZIP 항목명, OLE FileHeader 서명 확인. WordDocument는 DOC로 거부.
+- 자동 감지: ZIP 항목명, OLE FileHeader/WordDocument 서명 확인. DOC는 독립 디코더로 처리.
   문자열 입력 기본 MD 유지. 명시 형식은 대소문자/선행 점 정규화. File 없는 Blob 환경 검사.
 - 들여쓰기: src/decoders/docx/DocxIndentation.test.ts, src/encoders/docx/HangingIndent.test.ts.
   indentPt는 본문 여백. w:left에 hanging을 다시 더하면 매 왕복마다 여백이 늘어난다.
@@ -92,3 +92,28 @@
   쪽수 오차 628→726 증가, 점수 하락 문서 20개. 여백 값 정확성과 외관 비회귀는 별개이며 외관 완료로 보지 않음.
   나머지 109개는 한컴 기준 PDF 미확보. 표·줄 간격·폰트·개체 배치 후속 필요, 자동 품질 승인/학습 승격 없음.
 - 원본/정답 및 기존 playground 사용자 변경 보존. 연구 runner는 일부 대응이 이미 있어 파일째 동기화하지 않음.
+
+## 2026-09-08 DOC 입력·HWP/HWPX 열기 및 변환 회귀 수정
+
+- 보고서: `docs/opening-and-doc-audit-2026-09-08.md`. 기존 작업 중이던 줄바꿈 변경 의도를 보존했다.
+- DOC CLX/piece table 디코더·registry/API/파일 선택 추가. 기본은 본문 읽기 + 손실 경고.
+  `configureDocConverter` + 별도 `hwpkit-dev/node`의 `createLibreOfficeDocConverter`로 서식·표·그림 처리.
+  로컬 playground는 LibreOffice POST 경로, 정적 빌드는 본문 모드. DOC 출력/암호화 DOC는 미지원.
+- HWP PARA_HEADER bit31은 유효성 표시가 아닌 문단 목록 끝. 구역·셀별 마지막에만 설정하고 verifier 수정.
+  탭은 8 WORD 인라인 제어로 기록해 뒤 7글자 누락 방지. 근거: HWP §4.1/표58 + 한컴 원본 문단 패턴.
+- HWPX 공식 `hc:intent`, `hp:t/hp:lineBreak`, `hp:t/hp:tab` 사용. 혼합 텍스트 순서 보존.
+  공식 한컴 margin.cpp/t.cpp 및 데이터셋 원본과 대조. 이전 indent/br 출력도 읽기 호환 유지.
+- DOCX 탭·링크 글자/관계 보존. 독립 demo.docx 왕복 7,218→6,922 글자 누락을 7,218로 복구.
+  MD 제목/표 인라인 서식 중복과 HTML 엔티티/공백 오류, CFB 순환 참조 및 v4 원점도 수정.
+  MD 링크 표시 글자와 HTML table fallback 재입력을 처리해 출력 본문의 태그 노출 방지.
+- File Office 입력은 명시 형식이 없으면 내용으로 감지. 확장자가 HWP인 실제 HWPX 샘플 확인.
+  PDF/RTF bytes를 MD로 오인하지 않는다. 직접 지정한 형식은 계속 존중한다.
+- 검증: 실제 LibreOffice DOC 통합 포함 Vitest 149개, 타입·ESM/CJS/d.ts·playground 빌드 통과.
+  패키지 양쪽 진입점과 npm pack dry-run 검사. 추적 dist와 새 node 진입점 모두 생성.
+- H2Orestart 0.7.14 + LibreOffice로 생성 HWP/HWPX/DOCX 각각 PDF 열기 및 한글·표·코드 줄·탭 뒤 내용 확인.
+  실제 playground DOC 업로드도 성공. 추가 fixture 55/55 변환, 정규화 텍스트 일치 42→50.
+- 실제 237문서 × 5형식 = 1,185건 생성·재읽기 실패 0, 공백 제외 텍스트 일치 849건.
+  최종 MD 변경 뒤 해당 237건 재검사. 상세 JSON은 보고서와 같은 경로/이름.
+  불일치 336건에는 목록 표시·확장 제어 자리표시자 차이 등이 포함되며 무손실 인증은 아니다.
+- 한계: 한컴 한글 실앱은 없어 같은 버전의 사용자 증상 재현/전체 외관 인증은 미실시.
+  단순 수정 전 샘플도 독립 엔진에서 열렸다. DOC 기본 모드와 복잡한 서식의 보존 제한은 보고서 참고.

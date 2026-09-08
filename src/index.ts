@@ -3,6 +3,8 @@
 // Pipeline
 export { Pipeline } from './pipeline/Pipeline';
 export { registry } from './pipeline/registry';
+export { configureDocConverter } from './decoders/doc/DocDecoder';
+export type { DocToDocx } from './decoders/doc/DocDecoder';
 
 // Side-effect imports: register all decoders/encoders
 import './decoders/md/MdDecoder';

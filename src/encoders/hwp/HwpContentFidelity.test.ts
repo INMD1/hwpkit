@@ -379,9 +379,9 @@ describe("HWP content fidelity", () => {
 
     const paraHeaders = section0.filter(record => record.tag === TAG_PARA_HEADER);
     expect(paraHeaders.length).toBeGreaterThan(0);
-    for (const record of paraHeaders) {
-      expect(readU32(record.data, 0) >>> 31).toBe(1);
-    }
+    const bodyParagraphs = paraHeaders.filter(record => record.level === 0);
+    expect(bodyParagraphs.slice(0, -1).every(record => (readU32(record.data, 0) >>> 31) === 0)).toBe(true);
+    expect(readU32(bodyParagraphs.at(-1)!.data, 0) >>> 31).toBe(1);
 
     const defaultBorder = docInfo.find(record => record.tag === TAG_BORDER_FILL);
     if (!defaultBorder) throw new Error("default BORDER_FILL is missing");

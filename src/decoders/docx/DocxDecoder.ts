@@ -39,6 +39,7 @@ import {
   buildRow,
   buildCell,
   buildPb,
+  buildBr,
 } from "../../model/builders";
 import { ShieldedParser } from "../../safety/ShieldedParser";
 import {
@@ -736,7 +737,8 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
         const hl = hlArr[hi++];
         if (hl) {
           const rId = hl?._attr?.["r:id"] ?? hl?._attr?.id;
-          const url = rId ? ctx.relsMap.get(rId) : "";
+          const anchor = hl?._attr?.['w:anchor'] ?? hl?._attr?.anchor;
+          const url = rId ? ctx.relsMap.get(rId) : (anchor ? `#${anchor}` : "");
           const hlRuns = toArr(hl?.["w:r"] ?? hl?.r);
           const hlKids = hlRuns.map((r: any) =>
             decodeRun(r, ctx, {
@@ -1077,31 +1079,50 @@ function decodeRun(
   const fldChar = run?.["w:fldChar"]?.[0]?._attr ?? run?.fldChar?.[0]?._attr;
   const instrText = run?.["w:instrText"]?.[0];
 
-  // Page break: <w:br w:type="page"/>
+  // Breaks: <w:br/> (line) and <w:br w:type="page"/> (page). Interleaved with
+  // <w:t> in document order so the span keeps [txt, br, txt, ...] structure.
   const brNodes = toArr(run?.["w:br"] ?? run?.br ?? []);
-  for (const br of brNodes) {
-    const brType = br?._attr?.["w:type"] ?? br?._attr?.type;
-    if (brType === "page") {
-      return { tag: "span", props, kids: [buildPb()] };
+  const textNodes = toArr(run?.["w:t"] ?? run?.t);
+  const childOrder = (run?._childOrder as string[] | undefined) ?? [];
+  const textVals = textNodes.map(
+    (t: any) => (typeof t === "string" ? t : (t?._ ?? t?._text ?? "")),
+  );
+  const kids: (any)[] = [];
+  if (childOrder.length) {
+    let ti = 0;
+    let bi = 0;
+    for (const tag of childOrder) {
+      if (tag === "w:t" || tag === "t") {
+        kids.push({ tag: "txt", content: textVals[ti++] ?? "" });
+      } else if (tag === "w:tab" || tag === "tab") {
+        kids.push({ tag: "txt", content: '\t' });
+      } else if (tag === "w:br" || tag === "br") {
+        const br = brNodes[bi++];
+        const brType = br?._attr?.["w:type"] ?? br?._attr?.type;
+        kids.push(brType === "page" ? buildPb() : buildBr());
+      }
+    }
+  } else {
+    for (const v of textVals) if (v) kids.push({ tag: "txt", content: v });
+    for (const br of brNodes) {
+      const brType = br?._attr?.["w:type"] ?? br?._attr?.type;
+      kids.push(brType === "page" ? buildPb() : buildBr());
     }
   }
-
-  const textNodes = toArr(run?.["w:t"] ?? run?.t);
-  const content = textNodes
-    .map((t: any) => (typeof t === "string" ? t : (t?._ ?? t?._text ?? "")))
-    .join("");
-
-  // Handle page number field in instrText
+  // Page number fields occupy the whole run (no sibling text).
   if (instrText) {
     const instrStr =
       typeof instrText === "string" ? instrText : (instrText?._text ?? "");
     if (instrStr.trim().toUpperCase() === "PAGE") {
-      const pageNum: PageNumNode = { tag: "pagenum", format: "decimal" };
-      return { tag: "span", props, kids: [pageNum] };
+      return {
+        tag: "span",
+        props,
+        kids: [{ tag: "pagenum" as const, format: "decimal" as const }, ...kids],
+      };
     }
   }
-
-  return buildSpan(content, props);
+  if (!kids.length) kids.push({ tag: "txt", content: "" });
+  return { tag: "span", props, kids };
 }
 
 /** Parse all 6 border sides from a w:tblBorders or w:tcBorders node */
