@@ -8,7 +8,7 @@ import type {
   SheetNode,
 } from "../../model/doc-tree";
 import type { Outcome } from "../../contract/result";
-import type { PageDims, GridProps, CellProps, ImgLayout } from "../../model/doc-props";
+import type { PageDims, GridProps, CellProps, ImgLayout, TextProps } from "../../model/doc-props";
 import { A4, normalizeDims } from "../../model/doc-props";
 import { succeed, fail } from "../../contract/result";
 import { Metric } from "../../safety/StyleBridge";
@@ -60,60 +60,63 @@ export class DocxEncoder extends BaseEncoder {
         nextImgNum: 1,
         warns: [],
         imgMap: new WeakMap(),
+        paragraphStyleIds: new Set(),
+        sectionParts: [],
+        hyperlinks: new Map(),
       };
 
       // Collect images from all content
       collectImages(allKids, ctx);
 
-      // Header / footer (첫 번째 섹션 기준)
-      const headerContents: ContentNode[] = [...(firstSheet?.headers?.default ?? [])];
-      const footerContents: ContentNode[] = [...(firstSheet?.footers?.default ?? [])];
-      const hasHeader = headerContents.length > 0;
-      const hasFooter = footerContents.length > 0;
-
-      // Collect images from header/footer
-      if (hasHeader) collectImages(headerContents, ctx);
-      if (hasFooter) collectImages(footerContents, ctx);
-
+      const parts: HeaderFooterPart[] = [];
       const fonts = collectFonts(allKids);
-      if (hasHeader) collectFonts(headerContents, fonts);
-      if (hasFooter) collectFonts(footerContents, fonts);
+      sheets.forEach((sheet, sectionIndex) => {
+        const sectionParts: HeaderFooterPart[] = [];
+        for (const kind of ["header", "footer"] as const) {
+          const source = kind === "header" ? sheet.headers : sheet.footers;
+          for (const type of ["default", "first", "even"] as const) {
+            const contents = source?.[type];
+            if (contents === undefined) continue; // omitted references inherit
+            const part: HeaderFooterPart = {
+              kind, type, contents, dims: normalizeDims(sheet.dims),
+              rId: `rId${ctx.nextId++}`,
+              name: `${kind}${parts.filter(p => p.kind === kind).length + 1}.xml`,
+            };
+            parts.push(part);
+            sectionParts.push(part);
+            collectImages(contents, ctx);
+            collectFonts(contents, fonts);
+          }
+        }
+        ctx.sectionParts[sectionIndex] = sectionParts;
+      });
       fonts.add("함초롬바탕");
       fonts.add("맑은 고딕");
       const hasFontTable = fonts.size > 0;
-
-      const headerRId = hasHeader ? `rId${ctx.nextId++}` : "";
-      const footerRId = hasFooter ? `rId${ctx.nextId++}` : "";
-
-      // Numbering: collect list info from all sections
       const numInfo = collectNumbering(allKids);
-
-      // kids 참조를 allKids로 통일 (후속 코드 호환)
-      const kids = allKids;
-      const mainDocumentXml = documentXml(kids, dims, ctx, headerRId, footerRId);
-      const headerXml = hasHeader
-        ? headerFooterXml("hdr", headerContents, ctx, dims)
-        : "";
-      const footerXml = hasFooter
-        ? headerFooterXml("ftr", footerContents, ctx, dims)
-        : "";
+      const mainDocumentXml = documentXml(sheets, ctx);
+      const partXmls = parts.map(part => {
+        ctx.dims = part.dims;
+        return headerFooterXml(part.kind === "header" ? "hdr" : "ftr", part.contents, ctx, part.dims);
+      });
+      ctx.dims = dims;
 
       const entries: { name: string; data: Uint8Array }[] = [
         {
           name: "[Content_Types].xml",
-          data: this.stringToBytes(contentTypes(images, hasHeader, hasFooter, hasFontTable)),
+          data: this.stringToBytes(contentTypes(images, parts, hasFontTable)),
         },
         { name: "_rels/.rels", data: this.stringToBytes(pkgRels()) },
         {
           name: "word/document.xml",
           data: this.stringToBytes(mainDocumentXml),
         },
-        { name: "word/styles.xml", data: this.stringToBytes(stylesXml()) },
-        { name: "word/settings.xml", data: this.stringToBytes(settingsXml()) },
+        { name: "word/styles.xml", data: this.stringToBytes(stylesXml(ctx.paragraphStyleIds)) },
+        { name: "word/settings.xml", data: this.stringToBytes(settingsXml(doc.meta.evenAndOddHeaders ?? parts.some(part => part.type === "even"))) },
         {
           name: "word/_rels/document.xml.rels",
           data: this.stringToBytes(
-            docRels(images, headerRId, footerRId, numInfo.hasLists, hasFontTable),
+            docRels(images, parts, numInfo.hasLists, hasFontTable, ctx.hyperlinks),
           ),
         },
         { name: "docProps/app.xml", data: this.stringToBytes(appXml()) },
@@ -138,27 +141,10 @@ export class DocxEncoder extends BaseEncoder {
         });
       }
 
-      // Add header/footer files
-      if (hasHeader) {
-        entries.push({
-          name: "word/header1.xml",
-          data: this.stringToBytes(headerXml),
-        });
-        entries.push({
-          name: "word/_rels/header1.xml.rels",
-          data: this.stringToBytes(imagePartRels(images)),
-        });
-      }
-      if (hasFooter) {
-        entries.push({
-          name: "word/footer1.xml",
-          data: this.stringToBytes(footerXml),
-        });
-        entries.push({
-          name: "word/_rels/footer1.xml.rels",
-          data: this.stringToBytes(imagePartRels(images)),
-        });
-      }
+      parts.forEach((part, index) => {
+        entries.push({ name: `word/${part.name}`, data: this.stringToBytes(partXmls[index]) });
+        entries.push({ name: `word/_rels/${part.name}.rels`, data: this.stringToBytes(imagePartRels(images, ctx.hyperlinks)) });
+      });
 
       // Add image media files
       for (const img of images) {
@@ -174,7 +160,19 @@ export class DocxEncoder extends BaseEncoder {
 
 // ─── Context ────────────────────────────────────────────────
 
+interface HeaderFooterPart {
+  kind: "header" | "footer";
+  type: "default" | "first" | "even";
+  rId: string;
+  name: string;
+  contents: ContentNode[];
+  dims: PageDims;
+}
+
 interface EncCtx {
+  hyperlinks: Map<string, string>;
+  sectionParts: HeaderFooterPart[][];
+  paragraphStyleIds: Set<string>;
   images: ImageEntry[];
   dims: PageDims;
   nextId: number;
@@ -339,8 +337,7 @@ function collectNumbering(kids: ContentNode[]): NumInfo {
 
 function contentTypes(
   images: ImageEntry[],
-  hasHeader?: boolean,
-  hasFooter?: boolean,
+  parts: HeaderFooterPart[],
   hasFontTable?: boolean,
 ): string {
   const imgDefaults = new Set<string>();
@@ -373,10 +370,9 @@ function contentTypes(
   <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
   <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>`;
 
-  if (hasHeader)
-    overrides += `\n  <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>`;
-  if (hasFooter)
-    overrides += `\n  <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>`;
+  for (const part of parts) {
+    overrides += `\n  <Override PartName="/word/${part.name}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${part.kind}+xml"/>`;
+  }
   if (hasFontTable)
     overrides += `\n  <Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/>`;
 
@@ -398,10 +394,10 @@ function pkgRels(): string {
 
 function docRels(
   images: ImageEntry[],
-  headerRId?: string,
-  footerRId?: string,
+  parts: HeaderFooterPart[],
   hasLists?: boolean,
   hasFontTable?: boolean,
+  hyperlinks: Map<string, string> = new Map(),
 ): string {
   let rels = `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
   <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>`;
@@ -419,12 +415,10 @@ function docRels(
     rels += `\n  <Relationship Id="${img.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${img.name}"/>`;
   }
 
-  if (headerRId) {
-    rels += `\n  <Relationship Id="${headerRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>`;
+  for (const part of parts) {
+    rels += `\n  <Relationship Id="${part.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${part.kind}" Target="${part.name}"/>`;
   }
-  if (footerRId) {
-    rels += `\n  <Relationship Id="${footerRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>`;
-  }
+  rels += hyperlinkRelationships(hyperlinks);
 
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -434,7 +428,11 @@ function docRels(
 
 /** Relationships are scoped to each OOXML part, so header/footer drawings
  * cannot reuse image relationships declared only by document.xml. */
-function imagePartRels(images: ImageEntry[]): string {
+function hyperlinkRelationships(links: Map<string, string>): string {
+  return [...links].map(([target, id]) => `<Relationship Id="${id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${esc(target)}" TargetMode="External"/>`).join('');
+}
+
+function imagePartRels(images: ImageEntry[], links: Map<string, string>): string {
   const rels = images
     .map(
       (img) =>
@@ -443,7 +441,7 @@ function imagePartRels(images: ImageEntry[]): string {
     .join("\n  ");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  ${rels}
+  ${rels}${hyperlinkRelationships(links)}
 </Relationships>`;
 }
 
@@ -465,7 +463,13 @@ function coreXml(meta: any): string {
 </cp:coreProperties>`;
 }
 
-function stylesXml(): string {
+function stylesXml(usedIds: Set<string>): string {
+  // Native HWP style IDs are document-specific and may exceed the built-ins.
+  // Undefined pStyle references can make readers discard entire table layouts.
+  const known = new Set([...Array.from({ length: 34 }, (_, i) => String(i)),
+    "Normal", "Heading1", "Heading2", "Heading3", "Header", "Footer", "ListParagraph"]);
+  const extraStyles = [...usedIds].filter(id => !known.has(id)).sort().map(id =>
+    `<w:style w:type="paragraph" w:customStyle="1" w:styleId="${id}"><w:name w:val="HWP paragraph ${id}"/><w:basedOn w:val="Normal"/></w:style>`).join("\n");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:docDefaults>
@@ -479,6 +483,7 @@ function stylesXml(): string {
       <w:jc w:val="both"/>
     </w:pPr></w:pPrDefault>
   </w:docDefaults>
+  ${extraStyles}
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
   <w:style w:type="paragraph" w:styleId="0"><w:name w:val="바탕글"/><w:basedOn w:val="Normal"/></w:style>
   <w:style w:type="paragraph" w:styleId="1"><w:name w:val="본문"/><w:basedOn w:val="Normal"/></w:style>
@@ -524,9 +529,10 @@ function stylesXml(): string {
 </w:styles>`;
 }
 
-function settingsXml(): string {
+function settingsXml(evenAndOdd = false): string {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  ${evenAndOdd ? "<w:evenAndOddHeaders/>" : ""}
   <w:zoom w:percent="100"/>
   <w:bordersDoNotSurroundHeader/>
   <w:bordersDoNotSurroundFooter/>
@@ -608,30 +614,86 @@ ${body}
 // ─── document.xml ───────────────────────────────────────────
 
 function documentXml(
-  kids: ContentNode[],
-  dims: PageDims,
+  sheets: SheetNode[],
   ctx: EncCtx,
-  headerRId?: string,
-  footerRId?: string,
 ): string {
-  const body = kids.map((k) => encodeContent(k, ctx, dims)).join("\n");
+  const bodyParts: string[] = [];
+  for (let sectionIndex = 0; sectionIndex < sheets.length; sectionIndex++) {
+    const sheet = sheets[sectionIndex];
+    const dims = normalizeDims(sheet?.dims ?? A4);
+    ctx.dims = dims;
+    const kids = sheet?.kids ?? [];
+    const isFinalSection = sectionIndex === sheets.length - 1;
 
-  let sectRefs = "";
-  if (headerRId)
-    sectRefs += `\n      <w:headerReference w:type="default" r:id="${headerRId}"/>`;
-  if (footerRId)
-    sectRefs += `\n      <w:footerReference w:type="default" r:id="${footerRId}"/>`;
+    if (isFinalSection) {
+      bodyParts.push(...kids.map((kid) => encodeContent(kid, ctx, dims)));
+      continue;
+    }
+
+    // ECMA-376 §17.6.17/18: all non-final section properties live in
+    // the pPr of that section's final paragraph. Reuse the existing final
+    // paragraph when possible so the break does not add a layout line.
+    const boundarySectPr = sectionPropertiesXml(
+      dims,
+      ctx.sectionParts[sectionIndex] ?? [],
+      sheet.sectionType ?? "nextPage",
+      sheet.differentFirstPage,
+    );
+    const lastKid = kids[kids.length - 1];
+    if (lastKid?.tag === "para") {
+      for (let kidIndex = 0; kidIndex < kids.length - 1; kidIndex++) {
+        bodyParts.push(encodeContent(kids[kidIndex], ctx, dims));
+      }
+      bodyParts.push(encodeParaInner(lastKid, ctx, undefined, boundarySectPr));
+    } else {
+      bodyParts.push(...kids.map((kid) => encodeContent(kid, ctx, dims)));
+      // A section ending in a table still needs a paragraph mark to own
+      // sectPr. This is the OOXML section-break paragraph, not a page-break
+      // run, so it creates exactly one next-page transition.
+      bodyParts.push(
+        `    <w:p><w:pPr>${boundarySectPr}</w:pPr></w:p>`,
+      );
+    }
+  }
+
+  const finalSheet = sheets[sheets.length - 1];
+  const finalDims = normalizeDims(finalSheet?.dims ?? A4);
+  const finalSectPr = sectionPropertiesXml(
+    finalDims,
+    ctx.sectionParts[sheets.length - 1] ?? [],
+    finalSheet?.sectionType,
+    finalSheet?.differentFirstPage,
+  );
+  const body = bodyParts.join("\n");
 
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
   <w:body>
 ${body}
-    <w:sectPr>${sectRefs}
-      <w:pgSz w:w="${Metric.ptToDxa(dims.wPt)}" w:h="${Metric.ptToDxa(dims.hPt)}"${dims.orient === "landscape" ? ' w:orient="landscape"' : ""}/>
-      <w:pgMar w:top="${Metric.ptToDxa(dims.mt)}" w:right="${Metric.ptToDxa(dims.mr)}" w:bottom="${Metric.ptToDxa(dims.mb)}" w:left="${Metric.ptToDxa(dims.ml)}" w:header="${Metric.ptToDxa(dims.headerPt ?? 42.52)}" w:footer="${Metric.ptToDxa(dims.footerPt ?? 42.52)}" w:gutter="0"/>
-    </w:sectPr>
+    ${finalSectPr}
   </w:body>
 </w:document>`;
+}
+
+function sectionPropertiesXml(
+  dims: PageDims,
+  references: HeaderFooterPart[],
+  breakType?: SheetNode["sectionType"],
+  differentFirstPage?: boolean,
+): string {
+  const parts: string[] = [];
+  for (const ref of references) {
+    parts.push(`<w:${ref.kind}Reference w:type="${ref.type}" r:id="${ref.rId}"/>`);
+  }
+  if (breakType) parts.push(`<w:type w:val="${breakType}"/>`);
+  parts.push(
+    `<w:pgSz w:w="${Metric.ptToDxa(dims.wPt)}" w:h="${Metric.ptToDxa(dims.hPt)}"${dims.orient === "landscape" ? ' w:orient="landscape"' : ""}/>`,
+  );
+  parts.push(
+    `<w:pgMar w:top="${Metric.ptToDxa(dims.mt)}" w:right="${Metric.ptToDxa(dims.mr)}" w:bottom="${Metric.ptToDxa(dims.mb)}" w:left="${Metric.ptToDxa(dims.ml)}" w:header="${Metric.ptToDxa(dims.headerPt ?? 42.52)}" w:footer="${Metric.ptToDxa(dims.footerPt ?? 42.52)}" w:gutter="0"/>`,
+  );
+  if (differentFirstPage ?? references.some(ref => ref.type === "first")) parts.push("<w:titlePg/>");
+  return `<w:sectPr>${parts.join("")}</w:sectPr>`;
 }
 
 function encodeContent(
@@ -648,13 +710,16 @@ function encodeParaInner(
   para: ParaNode,
   ctx: EncCtx,
   maxWidthPt?: number,
+  sectionPrXml = "",
 ): string {
   const align = para.props.align;
   // P3: hwpStyleId(숫자 ID) 우선, 없으면 heading 스타일, 둘 다 없으면 빈 문자열
   let headStyle = "";
   if (para.props.hwpStyleId !== undefined) {
+    ctx.paragraphStyleIds.add(String(para.props.hwpStyleId));
     headStyle = `<w:pStyle w:val="${para.props.hwpStyleId}"/>`;
   } else if (para.props.heading) {
+    ctx.paragraphStyleIds.add(`Heading${para.props.heading}`);
     headStyle = `<w:pStyle w:val="Heading${para.props.heading}"/>`;
   }
 
@@ -663,7 +728,8 @@ function encodeParaInner(
   if (para.props.listOrd !== undefined) {
     const numId = para.props.listOrd ? 2 : 1;
     const ilvl = para.props.listLv ?? 0;
-    numPr = `<w:pStyle w:val="ListParagraph"/><w:numPr><w:ilvl w:val="${ilvl}"/><w:numId w:val="${numId}"/></w:numPr>`;
+    if (!headStyle) headStyle = `<w:pStyle w:val="ListParagraph"/>`;
+    numPr = `<w:numPr><w:ilvl w:val="${ilvl}"/><w:numId w:val="${numId}"/></w:numPr>`;
   }
 
   // Spacing (before / after / line height) - ensure all values are non-negative
@@ -698,38 +764,45 @@ function encodeParaInner(
   // w:left = 전체 왼쪽 여백(dxa), w:right = 전체 오른쪽 여백(dxa)
   // w:firstLine = 첫 줄 추가 들여쓰기(dxa, 양수), w:hanging = 내어쓰기(dxa, 양수값으로 표현)
   let indentXml = "";
-  let leftDxa = Math.round(Metric.ptToDxa(para.props.indentPt ?? 0));
-  const rightDxa = Math.round(Metric.ptToDxa(para.props.indentRightPt ?? 0));
-  const firstPt = para.props.firstLineIndentPt ?? 0;
-
   const indParts: string[] = [];
-  if (rightDxa > 0) indParts.push(`w:right="${rightDxa}"`);
-  if (firstPt > 0)
-    indParts.push(`w:firstLine="${Math.round(Metric.ptToDxa(firstPt))}"`);
-  if (firstPt < 0) {
-    const hangingDxa = Math.round(Metric.ptToDxa(-firstPt));
-    if (hangingDxa > 0) {
-      const baseLeftDxa = Math.max(0, leftDxa);
-      leftDxa = baseLeftDxa + hangingDxa;
-      if (baseLeftDxa <= 0 || hangingDxa > baseLeftDxa) {
-        ctx.warns.push(
-          `[DocxEncoder] w:hanging=${hangingDxa} exceeds w:left=${baseLeftDxa}`,
-        );
-      }
-      indParts.push(`w:hanging="${hangingDxa}"`);
-    }
+  // indentPt is the body margin. hanging locates the first line relative to
+  // that margin; adding it to w:left again causes cumulative round-trip drift.
+  if (para.props.indentPt !== undefined || (para.props.firstLineIndentPt ?? 0) < 0)
+    indParts.push(`w:left="${Math.round(Metric.ptToDxa(para.props.indentPt ?? 0))}"`);
+  if (para.props.indentRightPt !== undefined)
+    indParts.push(`w:right="${Math.round(Metric.ptToDxa(para.props.indentRightPt))}"`);
+  if (para.props.firstLineIndentPt !== undefined) {
+    const first = Math.round(Metric.ptToDxa(para.props.firstLineIndentPt));
+    indParts.push(first < 0 ? `w:hanging="${-first}"` : `w:firstLine="${first}"`);
   }
-  if (leftDxa > 0) indParts.unshift(`w:left="${leftDxa}"`);
   if (indParts.length > 0) indentXml = `<w:ind ${indParts.join(" ")}/>`;
 
   const cjkLineBreakXml = "<w:kinsoku/><w:wordWrap/><w:overflowPunct/>";
+  const paginationXml = ([['pageBreakBefore', 'pageBreakBefore'], ['keepWithNext', 'keepNext'],
+    ['keepLines', 'keepLines'], ['widowControl', 'widowControl']] as const)
+    .filter(([key]) => para.props[key] !== undefined)
+    .map(([key, tag]) => para.props[key] ? `<w:${tag}/>` : `<w:${tag} w:val="0"/>`).join('');
   const omitEmptyLeftAlign = align === "left" && paraTextContent(para) === "";
   const jcXml = align && !omitEmptyLeftAlign ? `<w:jc w:val="${docxJcValue(align)}"/>` : "";
+  // Empty runs alone do not format the paragraph mark in Word/LibreOffice.
+  // Retain its character size so blank lines do not silently become 10 pt.
+  const blankSpan = paraTextContent(para) === "" && !paraHasNonTextContent(para)
+    ? para.kids.find((kid): kid is SpanNode => kid.tag === "span") : undefined;
+  const markProps = blankSpan ? encodeTextProperties(blankSpan.props) : [];
+  const markXml = markProps.length ? `<w:rPr>${markProps.join("")}</w:rPr>` : "";
 
   const runs = para.kids
     .map((k) => {
       if (k.tag === "span") return encodeRun(k, ctx);
       if (k.tag === "img") return encodeImage(k, ctx, maxWidthPt);
+      if (k.tag === "link") {
+        const content = k.kids.map(span => encodeRun(span, ctx)).join('');
+        if (!k.href) return content;
+        if (k.href.startsWith('#')) return `<w:hyperlink w:anchor="${esc(k.href.slice(1))}">${content}</w:hyperlink>`;
+        let id = ctx.hyperlinks.get(k.href);
+        if (!id) { id = `rId${ctx.nextId++}`; ctx.hyperlinks.set(k.href, id); }
+        return `<w:hyperlink r:id="${id}">${content}</w:hyperlink>`;
+      }
       // P9: PageNumNode가 para.kids에 직접 있는 경우 (머리말/꼬리말 등)
       if (k.tag === "pagenum") {
         const instr = k.format === "total" ? " NUMPAGES " : " PAGE ";
@@ -740,7 +813,7 @@ function encodeParaInner(
     .join("");
 
   return `    <w:p>
-      <w:pPr>${headStyle}${numPr}${spacingXml}${indentXml}${cjkLineBreakXml}${jcXml}</w:pPr>
+      <w:pPr>${headStyle}${paginationXml}${numPr}${spacingXml}${indentXml}${cjkLineBreakXml}${jcXml}${markXml}${sectionPrXml}</w:pPr>
       ${runs}
     </w:p>`;
 }
@@ -877,8 +950,7 @@ function cellHasVisibleContent(cell: any): boolean {
   return false;
 }
 
-function encodeRun(span: SpanNode, _ctx: EncCtx): string {
-  const p = span.props;
+function encodeTextProperties(p: TextProps): string[] {
   const rPr: string[] = [];
   if (p.b) rPr.push("<w:b/>");
   if (p.i) rPr.push("<w:i/>");
@@ -896,6 +968,11 @@ function encodeRun(span: SpanNode, _ctx: EncCtx): string {
       `<w:rFonts w:ascii="${esc(p.font)}" w:hAnsi="${esc(p.font)}" w:eastAsia="${esc(p.font)}" w:hint="eastAsia"/>`,
     );
   if (p.bg) rPr.push(`<w:shd w:val="clear" w:color="auto" w:fill="${p.bg}"/>`);
+  return rPr;
+}
+
+function encodeRun(span: SpanNode, _ctx: EncCtx): string {
+  const rPr = encodeTextProperties(span.props);
 
   // Process kids — text and pagenum
   const parts: string[] = [];
@@ -903,10 +980,17 @@ function encodeRun(span: SpanNode, _ctx: EncCtx): string {
     if (kid.tag === "txt") {
       // __EXT_N__ or __EXT_N_W<w>_H<h>__ 자리표시자 제거
       const content = kid.content.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "");
-      if (content || rPr.length > 0) {
-        parts.push(
-          `<w:r><w:rPr>${rPr.join("")}</w:rPr><w:t xml:space="preserve">${esc(content)}</w:t></w:r>`,
-        );
+      // w:t renders no line breaks: emit each line and a <w:br/> between them.
+      const lines = TextKit.splitLines(content);
+      const textRun = (t: string) =>
+        `<w:r><w:rPr>${rPr.join("")}</w:rPr><w:t xml:space="preserve">${esc(t).replace(/\t/g, '</w:t><w:tab/><w:t xml:space="preserve">')}</w:t></w:r>`;
+      if (content) {
+        for (let li = 0; li < lines.length; li++) {
+          if (lines[li] !== "") parts.push(textRun(lines[li]));
+          if (li < lines.length - 1) parts.push(`<w:r><w:br/></w:r>`);
+        }
+      } else if (rPr.length > 0) {
+        parts.push(textRun(""));
       }
     } else if (kid.tag === "pagenum") {
       // P9: format === 'total' → NUMPAGES 필드, 나머지 → PAGE 필드

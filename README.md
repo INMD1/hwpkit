@@ -1,11 +1,11 @@
 # HWPKit
 
-[![npm version](https://img.shields.io/npm/v/hwpkit.svg)](https://www.npmjs.com/package/hwpkit)
-[![license](https://img.shields.io/npm/l/hwpkit.svg)](https://github.com/INMD1/hwpkit/blob/main/license.md)
+[![npm version](https://img.shields.io/npm/v/hwpkit-dev.svg)](https://www.npmjs.com/package/hwpkit-dev)
+[![license](https://img.shields.io/npm/l/hwpkit-dev.svg)](https://github.com/INMD1/hwpkit/blob/main/license.md)
 
-**HWP / HWPX / DOCX / Markdown 양방향 문서 변환 라이브러리**
+**HWP / HWPX / DOCX / Markdown / HTML 문서 변환 및 DOC 입력 라이브러리**
 
-한국 문서 포맷(HWP, HWPX)과 국제 표준(DOCX, Markdown)을 상호 변환하는 TypeScript 라이브러리입니다.
+한국 문서 포맷(HWP, HWPX)과 국제 표준(DOCX, Markdown)을 상호 변환하는 TypeScript 라이브러리입니다.<br/>
 브라우저와 Node.js 환경 모두에서 동작하며, 데이터 무결성과 무중단 변환을 최우선으로 설계했습니다.
 
 ---
@@ -13,7 +13,7 @@
 ## 주요 특징
 
 - **Pipeline 체이닝 API** - `Pipeline.open(file).to('hwpx')` 한 줄로 변환
-- **데이터 무결성 100%** - 텍스트, 표, 이미지 누락 없이 변환
+- **공통 문서 모델** - 텍스트·표·이미지 등을 변환하며, 지원하지 않는 서식은 손실될 수 있음
 - **무중단 변환** - 어떤 입력이 들어와도 크래시 없이 `Outcome<T>` 반환
 - **4단계 표 폴백** - Full > Grid > Flat > Text 순서로 안전 변환
 - **Result 모나드** - null/throw 대신 `Ok | Fail` 명시적 결과 처리
@@ -23,14 +23,25 @@
 
 ## 변환 지원 현황
 
-| 입력 \ 출력 | HWPX | HWP | DOCX |
-|------------|:----:|:----:|:------:|
-| **HWPX**   |  O   |   X   |   O   |
-| **HWP**    |  O   |   X   |   O   |
-| **DOCX**   |  O   |   X   |   O   |
-| **Markdown** |O   |   X   |   △  |
+| 입력 \ 출력 | HWP | HWPX | DOCX | Markdown | HTML | DOC | PDF |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| HWP | O | O | O | O | O | X | X |
+| HWPX | O | O | O | O | O | X | X |
+| DOCX | O | O | O | O | O | X | X |
+| Markdown | O | O | O | O | O | X | X |
+| HTML | O | O | O | O | O | X | X |
+| DOC | △ | △ | △ | △ | △ | X | X |
+| PDF | X | X | X | X | X | X | X |
 
-> 한글 2022기준 hwpx는 정상적으로 열림
+`O`는 디코더·인코더 구현과 제목·한글 본문·표 셀 내용의 기본 왕복 검증을 뜻합니다.<br/>
+복잡한 표·수식·이미지 배치·페이지 레이아웃의 완전 보존을 보증하지 않습니다.<br/>
+Markdown/HTML은 페이지 서식을 모두 표현하지 못합니다. `.doc`은 `.docx`의 별칭이 아닙니다.<br/>
+`△`: Word 97–2003 바이너리 DOC 본문·문단·줄바꿈 읽기를 지원합니다. 기본 브라우저 모드는
+표 셀 내용을 문단으로 읽으며, 서식·그림·머리말/꼬리말 손실을 `warns`로 알립니다.<br/>
+아래 로컬 LibreOffice 연결을 사용하면 DOCX를 거쳐 서식·표·그림을 공통 문서 모델로 가져옵니다.<br/>
+암호화된 DOC는 암호를 해제한 뒤 입력하세요. DOC 출력은 지원하지 않습니다.<br/>
+PDF는 연구용 명세/렌더링 비교 대상이고 라이브러리 입력·출력 형식은 아닙니다.<br/>
+
 ---
 
 ## 설치
@@ -42,6 +53,23 @@ npm install hwpkit
 ---
 
 ## 사용법
+
+### 로컬 playground
+
+```bash
+npm run playground
+```
+
+playground는 `src/index.ts`를 직접 불러오므로 라이브러리 수정이 즉시 반영됩니다.<br/>
+입출력 형식 목록도 같은 라이브러리 레지스트리에서 가져옵니다.<br/>
+HWP/HWPX/DOCX/DOC 파일은 내용으로 자동 감지하며, Markdown/HTML은 직접 입력하거나 파일로 열 수 있습니다.<br/>
+개발 서버의 DOC 변환은 로컬 LibreOffice가 필요하며 파일 크기는 25 MiB까지입니다.<br/>
+정적 playground 빌드는 DOC 본문 읽기 모드로 동작하며 손실 범위를 경고로 표시합니다.<br/>
+HTML 조각을 직접 붙여 넣을 때는 입력 포맷을 HTML로 선택하세요.<br/>
+DocRoot 검사에서 들여쓰기·페이지 분리 속성, 구역별 용지·머리말·꼬리말을 확인할 수 있습니다.<br/>
+HTML 미리보기는 한컴의 실제 페이지 배치를 재현하는 렌더러가 아닙니다.<br/>
+
+`npm run playground:build`는 playground 타입 검사 후 `playground/dist`에 빌드합니다.
 
 ### Pipeline API (권장)
 
@@ -73,14 +101,39 @@ const converted = await pipeline.to('docx');
 const mdResult = await Pipeline.open('# Hello\n\nWorld').to('docx');
 ```
 
+### DOC → HWP / HWPX / DOCX
+
+```typescript
+import { Pipeline, configureDocConverter } from 'hwpkit-dev';
+import { createLibreOfficeDocConverter } from 'hwpkit-dev/node';
+
+// Node.js: LibreOffice가 설치된 로컬 환경에서 한 번 설정합니다.
+configureDocConverter(createLibreOfficeDocConverter({ timeoutMs: 60_000 }));
+const result = await Pipeline.open(docBytes, 'doc').to('hwpx');
+// .to('hwp'), .to('docx')도 같은 방법으로 사용합니다.
+```
+
+위 패키지 이름은 현재 `package.json`의 `hwpkit-dev` 기준입니다.<br/>
+브라우저/서버 앱은 `configureDocConverter(async docBytes => docxBytes)`로 자체 변환기를
+연결할 수 있습니다. 연결하지 않으면 외부 프로그램 없이 본문 읽기 모드로 동작합니다.<br/>
+설정한 변환기가 실패하면 실패 결과를 반환하며, 서식을 버리는 모드로 자동 전환하지 않습니다.<br/>
+LibreOffice 연결은 파일을 외부 서비스에 업로드하지 않고, 임시 문서와 프로필을 정리합니다.<br/>
+
+검증 명령:
+
+```bash
+npm test
+HWPKIT_TEST_LIBREOFFICE=1 npm test -- src/node/LibreOfficeDoc.test.ts
+node tools/audit-conversions.mjs /path/to/documents /tmp/conversion-audit.json
+```
+
 ### Decoder / Encoder 직접 사용
 
 ```typescript
-import { DocxDecoder } from 'hwpkit';
-import { MdEncoder } from 'hwpkit';
+import { registry } from 'hwpkit';
 
-const decoder = new DocxDecoder();
-const encoder = new MdEncoder();
+const decoder = registry.getDecoder('docx')!;
+const encoder = registry.getEncoder('md')!;
 
 const docResult = await decoder.decode(docxBytes);
 if (!docResult.ok) throw new Error(docResult.error);
@@ -258,3 +311,12 @@ npm run dev
 ## 라이선스
 
 이 프로젝트는 **LGPL-2.1** 라이선스를 따릅니다. 자세한 내용은 [`license.md`](./license.md)를 참고하세요.
+
+
+### PDF 외관 검증 상태
+
+한컴 원본 외관과 94% 이상 일치하는 상태는 아직 아닙니다.<br/>
+본문·머리말 여백과 빈 문단 높이를 보정했으며, 실제 PDF의 표 높이·줄 간격·글꼴·쪽 흐름에는 차이가 남아 있습니다.<br/>
+`PageDims.mt/mb`는 종이 가장자리에서 본문까지, `headerPt/footerPt`는 머리말/꼬리말까지의 거리(pt)입니다.<br/>
+HWP/HWPX 저장값은 코덱에서 합산·분리하므로 직접 모델을 만들 때 HWP의 바깥 여백만 넣지 않습니다.<br/>
+

@@ -1,0 +1,76 @@
+# HWP dump: /tmp/hwpkit-baseline-before.hwp
+file-size: 3584 bytes
+
+## CFB streams (4)
+- BodyText/Section0: 293 bytes
+- DocInfo: 158 bytes
+- FileHeader: 256 bytes
+- PrvText: 32 bytes
+
+## FileHeader
+size: 256 bytes
+signature: "HWP Document File"
+version: 0x05010001
+flags: 0x00000001 (compressed=true, encrypted=false)
+
+## Records: BodyText/Section0
+raw-deflate(windowBits=-15): 293 -> 685 bytes
+record-count: 13; consumed: 685; trailing: 0
+@0x00000000 HWPTAG_PARA_HEADER (tag=0x042, level=0, size=24, header=4, sha256=3c65708bb6de)
+  @0x0000001c HWPTAG_PARA_TEXT (tag=0x043, level=1, size=76, header=4, sha256=f0fefdef8bb9)
+  @0x0000006c HWPTAG_PARA_CHAR_SHAPE (tag=0x044, level=1, size=16, header=4, sha256=529d0349192d)
+  @0x00000080 HWPTAG_PARA_LINE_SEG (tag=0x045, level=1, size=36, header=4, sha256=5325b97875fc)
+  @0x000000a8 HWPTAG_CTRL_HEADER (tag=0x047, level=1, size=47, header=4, sha256=030ee017d7e2)
+    @0x000000db HWPTAG_CTRL_DATA (tag=0x057, level=2, size=280, header=4, sha256=7b7d797f78e5)
+    @0x000001f7 HWPTAG_PAGE_DEF (tag=0x049, level=2, size=40, header=4, sha256=357038af32c3)
+    @0x00000223 HWPTAG_FOOTNOTE_SHAPE (tag=0x04a, level=2, size=28, header=4, sha256=3addfb141cd7)
+    @0x00000243 HWPTAG_FOOTNOTE_SHAPE (tag=0x04a, level=2, size=28, header=4, sha256=3addfb141cd7)
+    @0x00000263 HWPTAG_PAGE_BORDER_FILL (tag=0x04b, level=2, size=14, header=4, sha256=eb3db291defd)
+    @0x00000275 HWPTAG_PAGE_BORDER_FILL (tag=0x04b, level=2, size=14, header=4, sha256=eb3db291defd)
+    @0x00000287 HWPTAG_PAGE_BORDER_FILL (tag=0x04b, level=2, size=14, header=4, sha256=eb3db291defd)
+  @0x00000299 HWPTAG_CTRL_HEADER (tag=0x047, level=1, size=16, header=4, sha256=a1f722f78ebd)
+
+## Records: DocInfo
+raw-deflate(windowBits=-15): 158 -> 821 bytes
+record-count: 16; consumed: 821; trailing: 0
+@0x00000000 HWPTAG_DOCUMENT_PROPERTIES (tag=0x010, level=0, size=26, header=4, sha256=d9cf3a57cf9e)
+@0x0000001e HWPTAG_ID_MAPPINGS (tag=0x011, level=0, size=72, header=4, sha256=24c893d5c40a)
+  @0x0000006a HWPTAG_FACE_NAME (tag=0x013, level=1, size=45, header=4, sha256=0c50e407e334)
+  @0x0000009b HWPTAG_FACE_NAME (tag=0x013, level=1, size=45, header=4, sha256=0c50e407e334)
+  @0x000000cc HWPTAG_FACE_NAME (tag=0x013, level=1, size=45, header=4, sha256=0c50e407e334)
+  @0x000000fd HWPTAG_FACE_NAME (tag=0x013, level=1, size=45, header=4, sha256=0c50e407e334)
+  @0x0000012e HWPTAG_FACE_NAME (tag=0x013, level=1, size=45, header=4, sha256=0c50e407e334)
+  @0x0000015f HWPTAG_FACE_NAME (tag=0x013, level=1, size=45, header=4, sha256=0c50e407e334)
+  @0x00000190 HWPTAG_FACE_NAME (tag=0x013, level=1, size=45, header=4, sha256=0c50e407e334)
+  @0x000001c1 HWPTAG_BORDER_FILL (tag=0x014, level=1, size=40, header=4, sha256=5f25d6da2028)
+  @0x000001ed HWPTAG_CHAR_SHAPE (tag=0x015, level=1, size=74, header=4, sha256=3e2ccd0d2e7e)
+  @0x0000023b HWPTAG_CHAR_SHAPE (tag=0x015, level=1, size=74, header=4, sha256=3e2ccd0d2e7e)
+  @0x00000289 HWPTAG_TAB_DEF (tag=0x016, level=1, size=8, header=4, sha256=af5570f5a181)
+  @0x00000295 HWPTAG_PARA_SHAPE (tag=0x019, level=1, size=58, header=4, sha256=39b2e3a952ce)
+  @0x000002d3 HWPTAG_PARA_SHAPE (tag=0x019, level=1, size=58, header=4, sha256=39b2e3a952ce)
+  @0x00000311 HWPTAG_STYLE (tag=0x01a, level=1, size=32, header=4, sha256=a3d3a06859a5)
+
+### ID_MAPPINGS (18 entries)
+[00] BIN_DATA                 expected=0 actual=0 OK
+[01] FACE_NAME_HANGUL         expected=1 actual=1 OK
+[02] FACE_NAME_LATIN          expected=1 actual=1 OK
+[03] FACE_NAME_HANJA          expected=1 actual=1 OK
+[04] FACE_NAME_JAPANESE       expected=1 actual=1 OK
+[05] FACE_NAME_OTHER          expected=1 actual=1 OK
+[06] FACE_NAME_SYMBOL         expected=1 actual=1 OK
+[07] FACE_NAME_USER           expected=1 actual=1 OK
+[08] BORDER_FILL              expected=1 actual=1 OK
+[09] CHAR_SHAPE               expected=2 actual=2 OK
+[10] TAB_DEF                  expected=1 actual=1 OK
+[11] NUMBERING                expected=0 actual=0 OK
+[12] BULLET                   expected=0 actual=0 OK
+[13] PARA_SHAPE               expected=2 actual=2 OK
+[14] STYLE                    expected=1 actual=1 OK
+[15] MEMO_SHAPE               expected=0 actual=0 OK
+[16] TRACK_CHANGE             expected=0 actual=0 OK
+[17] TRACK_CHANGE_AUTHOR      expected=0 actual=0 OK
+FACE_NAME aggregate          expected=7 actual=7 OK
+note: per-language FACE_NAME actuals are order-inferred; only the aggregate is independently countable.
+
+## Validation
+OK

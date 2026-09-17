@@ -37,6 +37,14 @@ function encodePara(para: ParaNode, warns: string[], includeImages: boolean): st
   const text = para.kids.map(k => {
     if (k.tag === 'span') return encodeSpan(k, warns);
     if (k.tag === 'img') return encodeImage(k, includeImages);
+    if (k.tag === 'link') {
+      const label = k.kids.map(span => encodeSpan(span, warns)).join('');
+      return `[${label}](${k.href})`;
+    }
+    if (k.tag === 'pagenum') {
+      warnOnce(warns, '[SHIELD] MD: 페이지 번호 표현 불가 — 자리표시자로 대체됨');
+      return '[페이지 번호]';
+    }
     return '';
   }).join('');
 
@@ -44,15 +52,37 @@ function encodePara(para: ParaNode, warns: string[], includeImages: boolean): st
 
   if (para.props.listOrd !== undefined) {
     const indent = '  '.repeat(para.props.listLv ?? 0);
-    return `${indent}${para.props.listOrd ? '1.' : '-'} ${text}`;
+    const sourceMark = para.props.listMark;
+    const marker = para.props.listOrd
+      ? (sourceMark && /^\d+\.$/.test(sourceMark) ? sourceMark : '1.')
+      : (sourceMark && /^[-*+]$/.test(sourceMark) ? sourceMark : '-');
+    return `${indent}${marker} ${text}`;
   }
 
-  // Alignment: use HTML fallback for non-left
+  // Markdown has no paragraph-alignment syntax. Keep the content, not HTML.
   if (para.props.align && para.props.align !== 'left' && para.props.align !== 'justify') {
-    return `<div align="${para.props.align}">${text}</div>`;
+    warnOnce(warns, '[SHIELD] MD: 문단 정렬 표현 불가 — 정렬 정보가 손실됨');
   }
 
   return text;
+}
+
+function warnOnce(warns: string[], warning: string): void {
+  if (!warns.includes(warning)) warns.push(warning);
+}
+
+function isCodeFont(font?: string): boolean {
+  return !!font && /courier|consolas|monaco|menlo|monospace/i.test(font);
+}
+
+function wrapInlineCode(text: string): string {
+  const longestRun = Math.max(
+    0,
+    ...(text.match(/`+/g) ?? []).map(run => run.length),
+  );
+  const fence = '`'.repeat(longestRun + 1);
+  const pad = text.startsWith('`') || text.endsWith('`') ? ' ' : '';
+  return `${fence}${pad}${text}${pad}${fence}`;
 }
 
 function encodeSpan(span: SpanNode, warns: string[]): string {
@@ -60,56 +90,38 @@ function encodeSpan(span: SpanNode, warns: string[]): string {
   const textParts: string[] = [];
   for (const kid of span.kids) {
     if (kid.tag === 'txt') textParts.push(kid.content);
+    else if (kid.tag === 'br') textParts.push('  \n');
+    else if (kid.tag === 'pb') {
+      warnOnce(warns, '[SHIELD] MD: 쪽 나누기 표현 불가 — 손실됨');
+    }
     else if (kid.tag === 'pagenum') {
       hasPageNum = true;
-      warns.push('[SHIELD] MD: 페이지 번호 표현 불가 — 손실됨');
+      warnOnce(warns, '[SHIELD] MD: 페이지 번호 표현 불가 — 자리표시자로 대체됨');
     }
   }
 
   let r = textParts.join('');
   if (hasPageNum && r === '') r = '[페이지 번호]';
 
-  // Collect CSS styles for font/color/size/bg — use HTML span so fonts can be
-  // loaded externally via the page's stylesheet or @font-face rules.
-  const cssStyles: string[] = [];
-  if (span.props.font) cssStyles.push(`font-family: ${span.props.font}`);
-  if (span.props.pt) cssStyles.push(`font-size: ${span.props.pt}pt`);
-  if (span.props.color) cssStyles.push(`color: #${span.props.color}`);
-  if (span.props.bg) cssStyles.push(`background-color: #${span.props.bg}`);
-
-  const hasHtmlStyle = cssStyles.length > 0;
-
-  if (hasHtmlStyle) {
-    // When style properties are present, use HTML for all formatting so that
-    // markdown markers inside an HTML element don't break parsers.
-    if (span.props.b) cssStyles.push('font-weight: bold');
-    if (span.props.i) cssStyles.push('font-style: italic');
-    if (span.props.s) cssStyles.push('text-decoration: line-through');
-    if (span.props.u) {
-      // combine underline with possible line-through
-      const existing = cssStyles.find(s => s.startsWith('text-decoration:'));
-      if (existing) {
-        const idx = cssStyles.indexOf(existing);
-        cssStyles[idx] = existing.replace('line-through', 'underline line-through');
-        if (!existing.includes('line-through')) cssStyles[idx] = existing + ' underline';
-      } else {
-        cssStyles.push('text-decoration: underline');
-      }
-    }
-    const styleAttr = cssStyles.join('; ');
-    if (span.props.sup) return `<sup style="${styleAttr}">${r}</sup>`;
-    if (span.props.sub) return `<sub style="${styleAttr}">${r}</sub>`;
-    return `<span style="${styleAttr}">${r}</span>`;
+  const code = isCodeFont(span.props.font);
+  if (span.props.font && !code) {
+    warnOnce(warns, '[SHIELD] MD: 글꼴명 표현 불가 — 글꼴 정보가 손실됨');
+  }
+  if (span.props.pt !== undefined) {
+    warnOnce(warns, '[SHIELD] MD: 글자 크기 표현 불가 — 크기 정보가 손실됨');
+  }
+  if (span.props.color || span.props.bg) {
+    warnOnce(warns, '[SHIELD] MD: 글자색/배경색 표현 불가 — 색상 정보가 손실됨');
+  }
+  if (span.props.u || span.props.sup || span.props.sub) {
+    warnOnce(warns, '[SHIELD] MD: 밑줄/위첨자/아래첨자 표현 불가 — 해당 서식이 손실됨');
   }
 
-  // No CSS styles needed — use plain Markdown formatting
+  if (code) r = wrapInlineCode(r);
   if (span.props.b && span.props.i) r = `***${r}***`;
   else if (span.props.b) r = `**${r}**`;
   else if (span.props.i) r = `*${r}*`;
   if (span.props.s) r = `~~${r}~~`;
-  if (span.props.u) r = `<u>${r}</u>`;
-  if (span.props.sup) r = `<sup>${r}</sup>`;
-  if (span.props.sub) r = `<sub>${r}</sub>`;
 
   return r;
 }
@@ -133,6 +145,83 @@ function strokeToCss(s?: Stroke): string | undefined {
 
 function encodeGrid(grid: GridNode, warns: string[], includeImages: boolean): string {
   if (grid.kids.length === 0) return '';
+
+  if (canEncodePipeTable(grid)) {
+    const losesLayout =
+      Object.keys(grid.props).length > 0 ||
+      grid.kids.some(row =>
+        row.heightPt !== undefined ||
+        row.kids.some(cell => Object.keys(cell.props).length > 0),
+      );
+    if (losesLayout) {
+      warnOnce(
+        warns,
+        '[SHIELD] MD: 파이프 표가 지원하지 않는 너비/테두리/배경/정렬 정보가 손실됨',
+      );
+    }
+    return encodePipeTable(grid, warns, includeImages);
+  }
+
+  warnOnce(
+    warns,
+    '[SHIELD] MD: 병합 셀 또는 셀 내부 개행/블록 요소 때문에 HTML 표로 폴백함',
+  );
+  return encodeHtmlTable(grid, warns, includeImages);
+}
+
+function paraHasLineBreak(para: ParaNode): boolean {
+  return para.kids.some(kid => {
+    if (kid.tag === 'grid') return true;
+    if (kid.tag === 'span') {
+      return kid.kids.some(child =>
+        child.tag === 'br' ||
+        child.tag === 'pb' ||
+        (child.tag === 'txt' && /[\r\n]/.test(child.content)),
+      );
+    }
+    if (kid.tag === 'link') {
+      return kid.kids.some(span => span.kids.some(child =>
+        child.tag === 'br' ||
+        child.tag === 'pb' ||
+        (child.tag === 'txt' && /[\r\n]/.test(child.content)),
+      ));
+    }
+    return false;
+  });
+}
+
+function canEncodePipeTable(grid: GridNode): boolean {
+  const columns = grid.kids[0]?.kids.length ?? 0;
+  if (columns === 0) return false;
+  return grid.kids.every(row =>
+    row.kids.length === columns &&
+    row.kids.every(cell =>
+      cell.cs === 1 &&
+      cell.rs === 1 &&
+      cell.kids.length === 1 &&
+      cell.kids[0].tag === 'para' &&
+      cell.kids[0].props.heading === undefined &&
+      cell.kids[0].props.listOrd === undefined &&
+      !paraHasLineBreak(cell.kids[0]),
+    ),
+  );
+}
+
+function encodePipeTable(
+  grid: GridNode,
+  warns: string[],
+  includeImages: boolean,
+): string {
+  const rows = grid.kids.map(row => row.kids.map(cell => {
+    const para = cell.kids[0] as ParaNode;
+    return encodePara(para, warns, includeImages).replace(/\|/g, '\\|');
+  }));
+  const renderRow = (cells: string[]) => `| ${cells.join(' | ')} |`;
+  const separator = renderRow(rows[0].map(() => '---'));
+  return [renderRow(rows[0]), separator, ...rows.slice(1).map(renderRow)].join('\n');
+}
+
+function encodeHtmlTable(grid: GridNode, warns: string[], includeImages: boolean): string {
 
   // HTML 테이블로 출력 — 테두리/배경색을 인라인 스타일로 유지
   const rowCount = grid.kids.length;

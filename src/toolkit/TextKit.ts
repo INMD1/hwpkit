@@ -13,6 +13,8 @@ export const TextKit = {
 
   escapeXml(s: string): string {
     return s
+      // XML 1.0 forbids these code points. /u preserves valid surrogate pairs.
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF\uD800-\uDFFF]/gu, '')
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
@@ -31,6 +33,11 @@ export const TextKit = {
 
   normalizeWhitespace(s: string): string {
     return s.replace(/\s+/g, ' ').trim();
+  },
+
+  /** Split a run of text on line breaks, dropping empty segments. */
+  splitLines(s: string): string[] {
+    return s.split(/\r\n|\r|\n/);
   },
 
   stripControl(s: string): string {

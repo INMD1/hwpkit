@@ -35,6 +35,10 @@ interface TextProps {
     bg?: string;
 }
 interface ParaProps {
+    keepWithNext?: boolean;
+    keepLines?: boolean;
+    widowControl?: boolean;
+    pageBreakBefore?: boolean;
     align?: Align;
     heading?: Heading;
     styleId?: string;
@@ -94,6 +98,14 @@ interface GridProps {
     align?: Align;
     layout?: ImgLayout;
 }
+/**
+ * 모든 값은 종이 가장자리로부터의 거리(pt), DOCX w:pgMar 기준이다.
+ * mt / mb        : 본문 시작/끝까지의 거리 (머리말·꼬리말 영역 포함)
+ * headerPt       : 종이 위쪽에서 머리말까지의 거리
+ * footerPt       : 종이 아래쪽에서 꼬리말까지의 거리
+ * HWP/HWPX의 top + header = mt, top = headerPt이며 bottom도 같은 방식이다.
+ * HWP/HWPX 코덱 경계에서만 합산/분리한다. DOCX에 다시 더하지 않는다.
+ */
 interface PageDims {
     wPt: number;
     hPt: number;
@@ -106,6 +118,7 @@ interface PageDims {
     footerPt?: number;
 }
 interface DocMeta {
+    evenAndOddHeaders?: boolean;
     title?: string;
     author?: string;
     subject?: string;
@@ -184,6 +197,9 @@ interface GridNode {
 }
 type ContentNode = ParaNode | GridNode;
 interface SheetNode {
+    differentFirstPage?: boolean;
+    /** How this section starts relative to the preceding section (OOXML sectPr/type). */
+    sectionType?: 'nextPage' | 'continuous' | 'evenPage' | 'oddPage' | 'nextColumn';
     tag: 'sheet';
     dims: PageDims;
     kids: ContentNode[];
@@ -234,9 +250,13 @@ interface Decoder {
     decode(data: Uint8Array): Promise<Outcome<DocRoot>>;
 }
 
+/** Optional local/server converter for preserving DOC formatting and objects. */
+type DocToDocx = (data: Uint8Array) => Promise<Uint8Array>;
+declare function configureDocConverter(converter?: DocToDocx): void;
+
 declare class Pipeline {
     private raw;
-    private srcFmt;
+    private srcFmt?;
     private constructor();
     /** 파일을 열고 포맷을 자동 감지하거나 명시 */
     static open(input: Uint8Array | string, fmt?: string): Pipeline;
@@ -371,9 +391,11 @@ declare const TextKit: {
     escapeXml(s: string): string;
     unescapeXml(s: string): string;
     normalizeWhitespace(s: string): string;
+    /** Split a run of text on line breaks, dropping empty segments. */
+    splitLines(s: string): string[];
     stripControl(s: string): string;
     base64Encode(data: Uint8Array): string;
     base64Decode(b64: string): Uint8Array;
 };
 
-export { A4, A4_LANDSCAPE, type Align, type AnyNode, ArchiveKit, BinaryKit, type BlockTag, type BrNode, type CellNode, type CellProps, type ContentNode, DEFAULT_STROKE, type Decoder, type DocMeta, type DocRoot, type Encoder, type Fail, type GridNode, type GridProps, type Heading, type ImgNode, type LinkNode, Metric, type Ok, type Outcome, type PageDims, type PageNumNode, type ParaNode, type ParaProps, type PbNode, Pipeline, type RowNode, type SheetNode, ShieldedParser, type SpanNode, type Stroke, type StrokeKind, type TableLook, TextKit, type TextProps, TreeWalker, type TxtNode, type VAlign, XmlKit, buildBr, buildCell, buildGrid, buildImg, buildPageNum, buildPara, buildPb, buildRoot, buildRow, buildSheet, buildSpan, countNodes, fail, normalizeDims, registry, safeAlign, safeFont, safeFontToKr, safeHex, safeStrokeDocx, safeStrokeHwpx, succeed, validateRoot, walkNode };
+export { A4, A4_LANDSCAPE, type Align, type AnyNode, ArchiveKit, BinaryKit, type BlockTag, type BrNode, type CellNode, type CellProps, type ContentNode, DEFAULT_STROKE, type Decoder, type DocMeta, type DocRoot, type DocToDocx, type Encoder, type Fail, type GridNode, type GridProps, type Heading, type ImgNode, type LinkNode, Metric, type Ok, type Outcome, type PageDims, type PageNumNode, type ParaNode, type ParaProps, type PbNode, Pipeline, type RowNode, type SheetNode, ShieldedParser, type SpanNode, type Stroke, type StrokeKind, type TableLook, TextKit, type TextProps, TreeWalker, type TxtNode, type VAlign, XmlKit, buildBr, buildCell, buildGrid, buildImg, buildPageNum, buildPara, buildPb, buildRoot, buildRow, buildSheet, buildSpan, configureDocConverter, countNodes, fail, normalizeDims, registry, safeAlign, safeFont, safeFontToKr, safeHex, safeStrokeDocx, safeStrokeHwpx, succeed, validateRoot, walkNode };

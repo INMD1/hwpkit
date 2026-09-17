@@ -28,8 +28,8 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // src/index.ts
-var index_exports = {};
-__export(index_exports, {
+var src_exports = {};
+__export(src_exports, {
   A4: () => A4,
   A4_LANDSCAPE: () => A4_LANDSCAPE,
   ArchiveKit: () => ArchiveKit,
@@ -52,6 +52,7 @@ __export(index_exports, {
   buildRow: () => buildRow,
   buildSheet: () => buildSheet,
   buildSpan: () => buildSpan,
+  configureDocConverter: () => configureDocConverter,
   countNodes: () => countNodes,
   fail: () => fail,
   normalizeDims: () => normalizeDims,
@@ -66,7 +67,173 @@ __export(index_exports, {
   validateRoot: () => validateRoot,
   walkNode: () => walkNode
 });
-module.exports = __toCommonJS(index_exports);
+module.exports = __toCommonJS(src_exports);
+
+// src/pipeline/Pipeline.ts
+var import_jszip = __toESM(require("jszip"));
+
+// src/toolkit/BinaryKit.ts
+var BinaryKit = {
+  readU16LE(buf, offset) {
+    return buf[offset] | buf[offset + 1] << 8;
+  },
+  readU32LE(buf, offset) {
+    return ((buf[offset] | buf[offset + 1] << 8 | buf[offset + 2] << 16) >>> 0) + buf[offset + 3] * 16777216;
+  },
+  isOle2(data) {
+    return data.length >= 8 && data[0] === 208 && data[1] === 207 && data[2] === 17 && data[3] === 224 && data[4] === 161 && data[5] === 177 && data[6] === 26 && data[7] === 225;
+  },
+  parseCfb(data) {
+    const streams = /* @__PURE__ */ new Map();
+    if (!this.isOle2(data) || data.length < 512) {
+      throw new Error("Not a valid OLE2 file");
+    }
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const sectorSize = 1 << view.getUint16(30, true);
+    const miniSectorSz = 1 << view.getUint16(32, true);
+    const majorVersion = view.getUint16(26, true);
+    if (!(majorVersion === 3 && sectorSize === 512 || majorVersion === 4 && sectorSize === 4096) || miniSectorSz !== 64) {
+      throw new Error("Unsupported CFB sector size/version");
+    }
+    const dirFirstSec = view.getUint32(48, true);
+    const miniStreamCutoff = view.getUint32(56, true);
+    const miniFatFirst = view.getUint32(60, true);
+    const miniFatCnt = view.getUint32(64, true);
+    const difatFirst = view.getUint32(68, true);
+    const ENDOFCHAIN = 4294967294;
+    const FREESECT = 4294967295;
+    const sectorAt = (sec) => {
+      const offset = (sec + 1) * sectorSize;
+      if (!Number.isInteger(sec) || sec < 0 || offset + sectorSize > data.length) throw new Error("CFB sector outside file");
+      return data.subarray(offset, offset + sectorSize);
+    };
+    const fatSecNums = [];
+    for (let i = 0; i < 109; i++) {
+      const s = view.getUint32(76 + i * 4, true);
+      if (s === FREESECT || s === ENDOFCHAIN) break;
+      fatSecNums.push(s);
+    }
+    if (difatFirst !== ENDOFCHAIN && difatFirst !== FREESECT) {
+      let difSec = difatFirst;
+      const seen = /* @__PURE__ */ new Set();
+      while (difSec !== ENDOFCHAIN && difSec !== FREESECT) {
+        if (seen.has(difSec)) throw new Error("Cyclic CFB DIFAT chain");
+        seen.add(difSec);
+        const sec = sectorAt(difSec);
+        const sv = new DataView(sec.buffer, sec.byteOffset, sec.byteLength);
+        for (let i = 0; i < sectorSize / 4 - 1; i++) {
+          const s = sv.getUint32(i * 4, true);
+          if (s === FREESECT || s === ENDOFCHAIN) break;
+          fatSecNums.push(s);
+        }
+        difSec = sv.getUint32(sectorSize - 4, true);
+      }
+    }
+    const fat = [];
+    for (const sec of fatSecNums) {
+      const s = sectorAt(sec);
+      const sv = new DataView(s.buffer, s.byteOffset, s.byteLength);
+      for (let i = 0; i < sectorSize / 4; i++) {
+        fat.push(sv.getUint32(i * 4, true));
+      }
+    }
+    const readChain = (startSec) => {
+      const chunks = [];
+      let sec = startSec;
+      const seen = /* @__PURE__ */ new Set();
+      while (sec !== ENDOFCHAIN && sec !== FREESECT && sec < fat.length) {
+        if (seen.has(sec)) throw new Error("Cyclic CFB FAT chain");
+        seen.add(sec);
+        chunks.push(sectorAt(sec));
+        sec = fat[sec];
+      }
+      return concatUint8(chunks);
+    };
+    const dirData = readChain(dirFirstSec);
+    const dirView = new DataView(dirData.buffer, dirData.byteOffset, dirData.byteLength);
+    const dirCount = dirData.length / 128;
+    const dirEntries = [];
+    for (let i = 0; i < dirCount; i++) {
+      const base = i * 128;
+      const nameLen = dirView.getUint16(base + 64, true);
+      const nameBytes = dirData.subarray(base, base + Math.max(0, nameLen - 2));
+      const name = new TextDecoder("utf-16le").decode(nameBytes);
+      const type = dirData[base + 66];
+      const childId = dirView.getInt32(base + 76, true);
+      const sibLeft = dirView.getInt32(base + 68, true);
+      const sibRight = dirView.getInt32(base + 72, true);
+      const startSec = dirView.getUint32(base + 116, true);
+      const size = dirView.getUint32(base + 120, true);
+      dirEntries.push({ name, type, startSec, size, childId, siblingLeftId: sibLeft, siblingRightId: sibRight });
+    }
+    const rootEntry = dirEntries[0];
+    let miniStreamData = null;
+    let miniFat = [];
+    if (rootEntry && rootEntry.startSec !== ENDOFCHAIN && rootEntry.startSec !== FREESECT) {
+      miniStreamData = readChain(rootEntry.startSec);
+    }
+    if (miniFatCnt > 0 && miniFatFirst !== ENDOFCHAIN && miniFatFirst !== FREESECT) {
+      const mfData = readChain(miniFatFirst);
+      const mfv = new DataView(mfData.buffer, mfData.byteOffset, mfData.byteLength);
+      for (let i = 0; i < mfData.length / 4; i++) {
+        miniFat.push(mfv.getUint32(i * 4, true));
+      }
+    }
+    const readMiniChain = (startSec, size) => {
+      if (!miniStreamData) return new Uint8Array(0);
+      const chunks = [];
+      let sec = startSec;
+      let remaining = size;
+      const seen = /* @__PURE__ */ new Set();
+      while (sec !== ENDOFCHAIN && sec !== FREESECT && sec < miniFat.length && remaining > 0) {
+        if (seen.has(sec)) throw new Error("Cyclic CFB mini FAT chain");
+        seen.add(sec);
+        const off = sec * miniSectorSz;
+        const chunk = miniStreamData.subarray(off, off + Math.min(miniSectorSz, remaining));
+        if (chunk.length === 0) throw new Error("CFB mini sector outside stream");
+        chunks.push(chunk);
+        remaining -= chunk.length;
+        sec = miniFat[sec];
+      }
+      return concatUint8(chunks).subarray(0, size);
+    };
+    const visited = /* @__PURE__ */ new Set();
+    const visit = (id, path) => {
+      if (id < 0 || id >= dirEntries.length) return;
+      if (visited.has(id)) throw new Error("Cyclic CFB directory");
+      visited.add(id);
+      const entry = dirEntries[id];
+      const fullPath = path ? `${path}/${entry.name}` : entry.name;
+      if (entry.type === 2) {
+        let streamData;
+        if (entry.size < miniStreamCutoff && miniStreamData) {
+          streamData = readMiniChain(entry.startSec, entry.size);
+        } else {
+          streamData = readChain(entry.startSec).subarray(0, entry.size);
+        }
+        streams.set(fullPath, streamData);
+        streams.set(entry.name, streamData);
+      }
+      if (entry.childId >= 0) visit(entry.childId, fullPath);
+      if (entry.siblingLeftId >= 0) visit(entry.siblingLeftId, path);
+      if (entry.siblingRightId >= 0) visit(entry.siblingRightId, path);
+    };
+    if (dirEntries.length > 0 && dirEntries[0].childId >= 0) {
+      visit(dirEntries[0].childId, "");
+    }
+    return streams;
+  }
+};
+function concatUint8(arrays) {
+  const total = arrays.reduce((s, a) => s + a.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const a of arrays) {
+    out.set(a, off);
+    off += a.length;
+  }
+  return out;
+}
 
 // src/contract/result.ts
 function succeed(data, warns = []) {
@@ -553,10 +720,17 @@ function parseXmlStrict(xml) {
       stack.push({ tag: node.name, obj });
     });
     const appendText = (text) => {
+      var _a;
       if (stack.length > 0 && text) {
         const frame = stack[stack.length - 1];
         const cur = frame.obj["_text"];
         frame.obj["_text"] = typeof cur === "string" ? cur + text : text;
+        if (/^(?:hp:)?(?:t|T|CHAR)$/.test(frame.tag)) {
+          const content = (_a = frame.obj)["_content"] ?? (_a["_content"] = []);
+          if (typeof content[content.length - 1] === "string") {
+            content[content.length - 1] = content[content.length - 1] + text;
+          } else content.push(text);
+        }
       }
     };
     parser.on("text", (text) => appendText(text));
@@ -577,6 +751,9 @@ function parseXmlStrict(xml) {
         }
         if (!parent["_childOrder"]) parent["_childOrder"] = [];
         parent["_childOrder"].push(tag);
+        if (/^(?:hp:)?(?:t|T|CHAR)$/.test(stack[stack.length - 1].tag)) {
+          (parent["_content"] ?? (parent["_content"] = [])).push({ tag, node: obj });
+        }
       }
     });
     try {
@@ -620,13 +797,17 @@ var TextKit = {
     return new TextEncoder().encode(text);
   },
   escapeXml(s) {
-    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+    return s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF\uD800-\uDFFF]/gu, "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
   },
   unescapeXml(s) {
     return s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'");
   },
   normalizeWhitespace(s) {
     return s.replace(/\s+/g, " ").trim();
+  },
+  /** Split a run of text on line breaks, dropping empty segments. */
+  splitLines(s) {
+    return s.split(/\r\n|\r|\n/);
   },
   stripControl(s) {
     return s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
@@ -1224,7 +1405,8 @@ function extractParaPrs(headObj) {
         const indentVal = Number(indentEl?._attr?.value ?? 0);
         const prevVal = Number(prevEl?._attr?.value ?? 0);
         const nextVal = Number(nextEl?._attr?.value ?? 0);
-        if (leftVal !== 0) indentPt = Metric.hwpToPt(leftVal / 2);
+        const bodyLeft = leftVal - Math.min(0, indentVal);
+        if (bodyLeft !== 0) indentPt = Metric.hwpToPt(bodyLeft / 2);
         if (rightVal !== 0) indentRightPt = Metric.hwpToPt(rightVal / 2);
         if (indentVal !== 0) firstLineIndentPt = Metric.hwpToPt(indentVal / 2);
         if (prevVal > 0) spaceBefore = Metric.hwpToPt(prevVal / 2);
@@ -1240,7 +1422,12 @@ function extractParaPrs(headObj) {
           lineHeightFixed = Metric.hwpToPt(lsVal / 2);
         }
       }
+      const breakSetting = pp?.["hh:breakSetting"]?.[0]?._attr ?? {};
       map.set(id, {
+        pageBreakBefore: ["1", "true"].includes(String(breakSetting.pageBreakBefore)),
+        keepWithNext: ["1", "true"].includes(String(breakSetting.keepWithNext)),
+        keepLines: ["1", "true"].includes(String(breakSetting.keepLines)),
+        widowControl: ["1", "true"].includes(String(breakSetting.widowOrphan)),
         align,
         indentPt,
         indentRightPt,
@@ -1256,7 +1443,8 @@ function extractParaPrs(headObj) {
   }
   return map;
 }
-function addParaItems(p, items) {
+function addParaItems(p, items, ctx) {
+  const start = items.length;
   const runs = getTag(p, "hp:run", "hp:RUN");
   for (const run of runs) {
     const tbls = getTag(run, "hp:tbl", "hp:TABLE");
@@ -1266,7 +1454,13 @@ function addParaItems(p, items) {
       }
     }
   }
-  items.push({ type: "para", node: p });
+  const hasTables = items.length > start;
+  if (hasTables && decodePara(p, ctx).props.pageBreakBefore) {
+    items.splice(start, 0, { type: "tableBreak", node: p });
+    items.push({ type: "tableAnchor", node: p });
+  } else {
+    items.push({ type: "para", node: p });
+  }
 }
 function decodeSection(sec, dims, ctx) {
   const firstParas = getTag(sec, "hp:p", "hp:P");
@@ -1280,15 +1474,15 @@ function decodeSection(sec, dims, ctx) {
     let ti = 0;
     for (const tag of childOrder) {
       if ((tag === "hp:p" || tag === "hp:P") && pi < paras.length) {
-        addParaItems(paras[pi++], items);
+        addParaItems(paras[pi++], items, ctx);
       } else if ((tag === "hp:tbl" || tag === "hp:TABLE") && ti < tbls.length) {
         items.push({ type: "table", node: tbls[ti++] });
       }
     }
-    while (pi < paras.length) addParaItems(paras[pi++], items);
+    while (pi < paras.length) addParaItems(paras[pi++], items, ctx);
     while (ti < tbls.length) items.push({ type: "table", node: tbls[ti++] });
   } else {
-    for (const p of paras) addParaItems(p, items);
+    for (const p of paras) addParaItems(p, items, ctx);
     for (const t of tbls) items.push({ type: "table", node: t });
   }
   const kids = ctx.shield.guardAll(
@@ -1309,7 +1503,17 @@ function decodeSection(sec, dims, ctx) {
           return buildPara([buildSpan("[\uD45C \uD30C\uC2F1 \uC2E4\uD328]")]);
         }
       }
-      return decodePara(item.node, ctx);
+      if (item.type === "tableBreak") return buildPara([], {
+        pageBreakBefore: true,
+        keepWithNext: true,
+        lineHeightFixed: 0.05,
+        lineHeightRule: "exact",
+        spaceBefore: 0,
+        spaceAfter: 0
+      });
+      const para = decodePara(item.node, ctx);
+      if (item.type === "tableAnchor") para.props.pageBreakBefore = false;
+      return para;
     },
     () => buildPara([buildSpan("[\uD30C\uC2F1 \uC2E4\uD328]")]),
     "hwpx:content"
@@ -1389,6 +1593,25 @@ function decodeHeaderFooter(sec, kind, ctx) {
     return void 0;
   }
 }
+function decodeHwpxText(t) {
+  const kids = [];
+  const pushText = (value) => {
+    kids.push({ tag: "txt", content: value.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "") });
+  };
+  if (Array.isArray(t?._content)) {
+    for (const part of t._content) {
+      if (typeof part === "string") pushText(part);
+      else {
+        const name = part.tag.split(":").pop();
+        if (name === "lineBreak" || name === "br") kids.push({ tag: "br" });
+        else if (name === "tab") pushText("	");
+        else if (name === "fwSpace") pushText("\u3000");
+        else if (name === "nbSpace") pushText("\xA0");
+      }
+    }
+  } else pushText(typeof t === "string" ? t : t?._text ?? t?._ ?? t?.["#text"] ?? "");
+  return kids;
+}
 function decodePara(p, ctx) {
   const pAttr = p?._attr ?? {};
   const paraPrIdRef = Number(pAttr.paraPrIDRef ?? -1);
@@ -1411,6 +1634,10 @@ function decodePara(p, ctx) {
   };
   if (Number.isFinite(styleIdRef) && styleIdRef >= 0) props.hwpStyleId = styleIdRef;
   if (paraPrDef) {
+    props.pageBreakBefore = paraPrDef.pageBreakBefore;
+    props.keepWithNext = paraPrDef.keepWithNext;
+    props.keepLines = paraPrDef.keepLines;
+    props.widowControl = paraPrDef.widowControl;
     if (paraPrDef.indentPt !== void 0) props.indentPt = paraPrDef.indentPt;
     if (paraPrDef.indentRightPt !== void 0)
       props.indentRightPt = paraPrDef.indentRightPt;
@@ -1461,19 +1688,32 @@ function decodePara(p, ctx) {
     }
     const runPics = collectPics(run);
     const textNodes = getTag(run, "hp:t", "hp:T", "hp:CHAR");
-    const content = textNodes.map((t) => {
-      const val = typeof t === "string" ? t : t?._text ?? t?._ ?? t?.["#text"] ?? "";
-      return val.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "");
-    }).join("");
+    const textVals = textNodes.map(decodeHwpxText);
+    const runKids = [];
+    const runOrder = run?._childOrder ?? [];
+    if (runOrder.length) {
+      let ti = 0;
+      for (const tag of runOrder) {
+        if (tag === "hp:t" || tag === "hp:T" || tag === "hp:CHAR" || tag === "CHAR") {
+          runKids.push(...textVals[ti++] ?? []);
+        } else if (tag === "hp:br" || tag === "hp:BR" || tag === "BR") {
+          runKids.push({ tag: "br" });
+        }
+      }
+    } else {
+      for (const v of textVals) runKids.push(...v);
+    }
+    const content = runKids.filter((k) => k.tag === "txt").map((k) => k.content).join("");
     if (content === "" && (run?.["hp:secPr"]?.[0] || run?.["hp:SECPR"]?.[0]) && runPics.length === 0 && pageNums.length === 0)
       continue;
     if (content !== "" || runPics.length === 0 && pageNums.length === 0) {
       const spanProps = content === "" ? {} : resolveCharPr(run, ctx);
-      kids.push(buildSpan(content, spanProps));
+      if (runKids.length) kids.push({ tag: "span", props: spanProps, kids: runKids });
+      else kids.push(buildSpan("", spanProps));
     }
   }
   if (pAttr.pageBreak === "1") {
-    kids.unshift({ tag: "span", props: {}, kids: [buildPb()] });
+    props.pageBreakBefore = true;
   }
   return buildPara(kids.filter(Boolean), props);
 }
@@ -1818,155 +2058,16 @@ function toArr(v) {
 }
 registry.registerDecoder(new HwpxDecoder());
 
-// src/toolkit/BinaryKit.ts
-var BinaryKit = {
-  readU16LE(buf, offset) {
-    return buf[offset] | buf[offset + 1] << 8;
-  },
-  readU32LE(buf, offset) {
-    return ((buf[offset] | buf[offset + 1] << 8 | buf[offset + 2] << 16) >>> 0) + buf[offset + 3] * 16777216;
-  },
-  isOle2(data) {
-    return data.length >= 8 && data[0] === 208 && data[1] === 207 && data[2] === 17 && data[3] === 224 && data[4] === 161 && data[5] === 177 && data[6] === 26 && data[7] === 225;
-  },
-  parseCfb(data) {
-    const streams = /* @__PURE__ */ new Map();
-    if (!this.isOle2(data)) {
-      throw new Error("Not a valid OLE2 file");
-    }
-    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-    const sectorSize = 1 << view.getUint16(30, true);
-    const miniSectorSz = 1 << view.getUint16(32, true);
-    const dirFirstSec = view.getUint32(48, true);
-    const miniStreamCutoff = view.getUint32(56, true);
-    const miniFatFirst = view.getUint32(60, true);
-    const miniFatCnt = view.getUint32(64, true);
-    const difatFirst = view.getUint32(68, true);
-    const ENDOFCHAIN = 4294967294;
-    const FREESECT = 4294967295;
-    const sectorAt = (sec) => data.subarray(512 + sec * sectorSize, 512 + (sec + 1) * sectorSize);
-    const fatSecNums = [];
-    for (let i = 0; i < 109; i++) {
-      const s = view.getUint32(76 + i * 4, true);
-      if (s === FREESECT || s === ENDOFCHAIN) break;
-      fatSecNums.push(s);
-    }
-    if (difatFirst !== ENDOFCHAIN && difatFirst !== FREESECT) {
-      let difSec = difatFirst;
-      while (difSec !== ENDOFCHAIN && difSec !== FREESECT) {
-        const sec = sectorAt(difSec);
-        const sv = new DataView(sec.buffer, sec.byteOffset, sec.byteLength);
-        for (let i = 0; i < sectorSize / 4 - 1; i++) {
-          const s = sv.getUint32(i * 4, true);
-          if (s === FREESECT || s === ENDOFCHAIN) break;
-          fatSecNums.push(s);
-        }
-        difSec = sv.getUint32(sectorSize - 4, true);
-      }
-    }
-    const fat = [];
-    for (const sec of fatSecNums) {
-      const s = sectorAt(sec);
-      const sv = new DataView(s.buffer, s.byteOffset, s.byteLength);
-      for (let i = 0; i < sectorSize / 4; i++) {
-        fat.push(sv.getUint32(i * 4, true));
-      }
-    }
-    const readChain = (startSec) => {
-      const chunks = [];
-      let sec = startSec;
-      while (sec !== ENDOFCHAIN && sec !== FREESECT && sec < fat.length) {
-        chunks.push(sectorAt(sec));
-        sec = fat[sec];
-      }
-      return concatUint8(chunks);
-    };
-    const dirData = readChain(dirFirstSec);
-    const dirView = new DataView(dirData.buffer, dirData.byteOffset, dirData.byteLength);
-    const dirCount = dirData.length / 128;
-    const dirEntries = [];
-    for (let i = 0; i < dirCount; i++) {
-      const base = i * 128;
-      const nameLen = dirView.getUint16(base + 64, true);
-      const nameBytes = dirData.subarray(base, base + Math.max(0, nameLen - 2));
-      const name = new TextDecoder("utf-16le").decode(nameBytes);
-      const type = dirData[base + 66];
-      const childId = dirView.getInt32(base + 76, true);
-      const sibLeft = dirView.getInt32(base + 68, true);
-      const sibRight = dirView.getInt32(base + 72, true);
-      const startSec = dirView.getUint32(base + 116, true);
-      const size = dirView.getUint32(base + 120, true);
-      dirEntries.push({ name, type, startSec, size, childId, siblingLeftId: sibLeft, siblingRightId: sibRight });
-    }
-    const rootEntry = dirEntries[0];
-    let miniStreamData = null;
-    let miniFat = [];
-    if (rootEntry && rootEntry.startSec !== ENDOFCHAIN && rootEntry.startSec !== FREESECT) {
-      miniStreamData = readChain(rootEntry.startSec);
-    }
-    if (miniFatCnt > 0 && miniFatFirst !== ENDOFCHAIN && miniFatFirst !== FREESECT) {
-      const mfData = readChain(miniFatFirst);
-      const mfv = new DataView(mfData.buffer, mfData.byteOffset, mfData.byteLength);
-      for (let i = 0; i < mfData.length / 4; i++) {
-        miniFat.push(mfv.getUint32(i * 4, true));
-      }
-    }
-    const readMiniChain = (startSec, size) => {
-      if (!miniStreamData) return new Uint8Array(0);
-      const chunks = [];
-      let sec = startSec;
-      let remaining = size;
-      while (sec !== ENDOFCHAIN && sec !== FREESECT && sec < miniFat.length && remaining > 0) {
-        const off = sec * miniSectorSz;
-        const chunk = miniStreamData.subarray(off, off + Math.min(miniSectorSz, remaining));
-        chunks.push(chunk);
-        remaining -= chunk.length;
-        sec = miniFat[sec];
-      }
-      return concatUint8(chunks).subarray(0, size);
-    };
-    const visit = (id, path) => {
-      if (id < 0 || id >= dirEntries.length) return;
-      const entry = dirEntries[id];
-      const fullPath = path ? `${path}/${entry.name}` : entry.name;
-      if (entry.type === 2) {
-        let streamData;
-        if (entry.size < miniStreamCutoff && miniStreamData) {
-          streamData = readMiniChain(entry.startSec, entry.size);
-        } else {
-          streamData = readChain(entry.startSec).subarray(0, entry.size);
-        }
-        streams.set(fullPath, streamData);
-        streams.set(entry.name, streamData);
-      }
-      if (entry.childId >= 0) visit(entry.childId, fullPath);
-      if (entry.siblingLeftId >= 0) visit(entry.siblingLeftId, path);
-      if (entry.siblingRightId >= 0) visit(entry.siblingRightId, path);
-    };
-    if (dirEntries.length > 0 && dirEntries[0].childId >= 0) {
-      visit(dirEntries[0].childId, "");
-    }
-    return streams;
-  }
-};
-function concatUint8(arrays) {
-  const total = arrays.reduce((s, a) => s + a.length, 0);
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const a of arrays) {
-    out.set(a, off);
-    off += a.length;
-  }
-  return out;
-}
-
 // src/decoders/hwp/HwpScanner.ts
 var import_pako2 = __toESM(require("pako"));
 var HWPTAG_BEGIN = 16;
 var TAG_FACE_NAME = HWPTAG_BEGIN + 3;
 var TAG_BORDER_FILL = HWPTAG_BEGIN + 4;
 var TAG_CHAR_SHAPE = HWPTAG_BEGIN + 5;
+var TAG_NUMBERING = HWPTAG_BEGIN + 7;
+var TAG_BULLET = HWPTAG_BEGIN + 8;
 var TAG_PARA_SHAPE = HWPTAG_BEGIN + 9;
+var TAG_STYLE = HWPTAG_BEGIN + 10;
 var TAG_PARA_HEADER = HWPTAG_BEGIN + 50;
 var TAG_PARA_TEXT = HWPTAG_BEGIN + 51;
 var TAG_PARA_CHAR_SHAPE = HWPTAG_BEGIN + 52;
@@ -2015,15 +2116,14 @@ function parseRecords(data) {
   return out;
 }
 function tryInflate(data) {
-  try {
-    return import_pako2.default.inflate(data);
-  } catch {
+  for (const inflate of [import_pako2.default.inflate, import_pako2.default.inflateRaw]) {
     try {
-      return import_pako2.default.inflateRaw(data);
+      const result = inflate(data);
+      if (result instanceof Uint8Array) return result;
     } catch {
-      return data;
     }
   }
+  return data;
 }
 function parseFileHeader(buf) {
   if (buf.length < 40) return { compressed: true, encrypted: false };
@@ -2033,13 +2133,24 @@ function parseFileHeader(buf) {
 function parseDocInfo(data, compressed) {
   const raw = compressed ? tryInflate(data) : data;
   const recs = parseRecords(raw);
-  const info = { faceNames: [], charShapes: [], paraShapes: [], borderFills: [] };
+  const info = {
+    faceNames: [],
+    charShapes: [],
+    paraShapes: [],
+    borderFills: [],
+    styles: [],
+    numberings: [],
+    bullets: []
+  };
   for (const r of recs) {
     try {
       if (r.tag === TAG_FACE_NAME) info.faceNames.push(parseFaceName(r.data));
       if (r.tag === TAG_CHAR_SHAPE) info.charShapes.push(parseCharShape(r.data));
       if (r.tag === TAG_PARA_SHAPE) info.paraShapes.push(parseParaShape(r.data));
       if (r.tag === TAG_BORDER_FILL) info.borderFills.push(parseBorderFill(r.data));
+      if (r.tag === TAG_STYLE) info.styles.push(parseStyle(r.data));
+      if (r.tag === TAG_NUMBERING) info.numberings.push(parseNumbering(r.data));
+      if (r.tag === TAG_BULLET) info.bullets.push(parseBullet(r.data));
     } catch {
     }
   }
@@ -2050,6 +2161,48 @@ function parseFaceName(d) {
   const len = BinaryKit.readU16LE(d, 1);
   if (d.length < 3 + len * 2) return "";
   return new TextDecoder("utf-16le").decode(d.subarray(3, 3 + len * 2));
+}
+function parseStyle(d) {
+  let offset = 0;
+  const readName = () => {
+    if (offset + 2 > d.length) throw new Error("truncated STYLE name length");
+    const length = BinaryKit.readU16LE(d, offset);
+    offset += 2;
+    const end = offset + length * 2;
+    if (end > d.length) throw new Error("truncated STYLE name");
+    const value = new TextDecoder("utf-16le").decode(d.subarray(offset, end));
+    offset = end;
+    return value;
+  };
+  const name = readName();
+  const engName = readName();
+  if (offset + 8 > d.length) throw new Error("truncated STYLE fields");
+  offset += 4;
+  const paraShapeId = BinaryKit.readU16LE(d, offset);
+  const charShapeId = BinaryKit.readU16LE(d, offset + 2);
+  return { name, engName, paraShapeId, charShapeId };
+}
+function parseNumbering(d) {
+  const formats = [];
+  let offset = 0;
+  for (let level = 0; level < 7; level++) {
+    if (offset + 14 > d.length) throw new Error("truncated NUMBERING level");
+    offset += 12;
+    const length = BinaryKit.readU16LE(d, offset);
+    offset += 2;
+    const end = offset + length * 2;
+    if (end > d.length) throw new Error("truncated NUMBERING format");
+    formats.push(
+      new TextDecoder("utf-16le").decode(d.subarray(offset, end))
+    );
+    offset = end;
+  }
+  return { formats };
+}
+function parseBullet(d) {
+  if (d.length < 10) throw new Error("truncated BULLET record");
+  const characterOffset = d.length >= 23 ? 12 : 8;
+  return { character: String.fromCharCode(BinaryKit.readU16LE(d, characterOffset)) };
 }
 function parseCharShape(d) {
   const faceIds = [];
@@ -2082,8 +2235,17 @@ function parseParaShape(d) {
   const vVal = attr >> 20 & 3;
   const verAlign = vVal === 1 ? "top" : vVal === 2 ? "center" : vVal === 3 ? "bottom" : "baseline";
   const lineWrap = "break";
+  const headingType = attr >>> 23 & 3;
+  const headingLevel = attr >>> 25 & 7;
+  const heading = headingType === 1 && headingLevel < 6 ? headingLevel + 1 : void 0;
+  const listOrd = headingType === 2 ? true : headingType === 3 ? false : void 0;
+  const listId = d.length >= 32 ? BinaryKit.readU16LE(d, 30) : 0;
   return {
     align,
+    pageBreakBefore: (attr & 1 << 19) !== 0,
+    keepWithNext: (attr & 1 << 17) !== 0,
+    keepLines: (attr & 1 << 18) !== 0,
+    widowControl: (attr & 1 << 16) !== 0,
     lineSpacingType,
     leftMargin: d.length >= 8 ? i32(d, 4) : 0,
     // offset 4: 문단 몸체 왼쪽 여백 (HWPUNIT * 2)
@@ -2095,7 +2257,11 @@ function parseParaShape(d) {
     spaceAfter: d.length >= 24 ? i32(d, 20) : 0,
     lineSpacing,
     verAlign,
-    lineWrap
+    lineWrap,
+    heading,
+    listOrd,
+    listLevel: listOrd === void 0 ? void 0 : headingLevel,
+    listId: listOrd === void 0 ? void 0 : listId
   };
 }
 var BORDER_W_PT = [0.28, 0.34, 0.43, 0.57, 0.71, 0.85, 1.13, 1.42, 1.7, 1.98, 2.84, 4.25, 5.67, 8.5, 11.34, 14.17];
@@ -2168,7 +2334,7 @@ function parseBody(raw, compressed, di, shield, gsoCtx) {
       i++;
     } else if (recs[i].tag === TAG_PARA_HEADER) {
       const r = shield.guard(
-        () => parseParagraphGroup(recs, i, di, shield, gsoCtx),
+        () => parseParagraphGroup(recs, i, di, shield, gsoCtx, content.length === 0),
         { nodes: [], next: i + 1 },
         `hwp:para@${i}`
       );
@@ -2180,9 +2346,10 @@ function parseBody(raw, compressed, di, shield, gsoCtx) {
   }
   return { content, pageDims };
 }
-function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
+function parseParagraphGroup(recs, start, di, shield, gsoCtx, firstBodyParagraph = false) {
   const hdr = recs[start];
   const lv = hdr.level;
+  const _nchars = hdr.data.length >= 4 ? BinaryKit.readU32LE(hdr.data, 0) & 2147483647 : 0;
   const psId = hdr.data.length >= 10 ? BinaryKit.readU16LE(hdr.data, 8) : 0;
   const hwpStyleId = hdr.data.length >= 11 ? hdr.data[10] : void 0;
   const divideSort = hdr.data.length >= 12 ? hdr.data[11] : 0;
@@ -2298,7 +2465,12 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
         paraContent.push(buildSpan(`__EXT_${ch.imgId}__`));
       }
     }
-    if (divideSort & 4) {
+    const leadingExplicitBreak = firstBodyParagraph && (divideSort & 4) !== 0 && !ps?.pageBreakBefore && grids.length === 0 && paraContent.length > 0;
+    if (leadingExplicitBreak) {
+      paraContent.unshift({ tag: "span", props: {}, kids: [buildPb()] });
+    }
+    const hasPageBreakBefore = (divideSort & 4) !== 0 && !leadingExplicitBreak;
+    if (hasPageBreakBefore && (grids.length > 0 || paraContent.length === 0)) {
       nodes.push(buildPara([{ tag: "span", props: {}, kids: [buildPb()] }]));
     }
     nodes.push(...grids);
@@ -2310,9 +2482,12 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx) {
     const isSectionOnlyPara = hasSectionCtrl && grids.length === 0 && (paraContent.length === 0 || isWhitespaceSectionPara);
     const isPageBreakOnlyPara = divideSort & 4 && paraContent.length === 0 && grids.length === 0;
     if (!isSectionOnlyPara && !isPageBreakOnlyPara) {
+      const paraProps = buildParaProps(ps, hwpStyleId, di);
+      if (hasPageBreakBefore && grids.length === 0)
+        paraProps.pageBreakBefore = true;
       nodes.push(buildPara(
-        paraContent.length > 0 ? paraContent : [buildSpan("")],
-        buildParaProps(ps, hwpStyleId)
+        paraContent.length > 0 ? paraContent : resolveCharShapes([], csPairs, di),
+        paraProps
       ));
     }
   }
@@ -2396,8 +2571,8 @@ function parseCharShapePairs(d) {
   return out;
 }
 function resolveCharShapes(chars, pairs, di) {
-  if (chars.length === 0) return [buildSpan("")];
   const defaultId = pairs.length > 0 ? pairs[0][1] : 0;
+  if (chars.length === 0) return styledSpans("", defaultId, di);
   function idFor(pos) {
     let id = defaultId;
     for (const [p, sid] of pairs) {
@@ -2716,10 +2891,17 @@ function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gs
             }
           }
           const kids = paraContent.length > 0 ? paraContent : [buildSpan("")];
-          const isPageBreakOnlyPara = cellDivide & 4 && paraContent.length === 0 && innerGrids.length === 0;
+          const hasPageBreakBefore = (cellDivide & 4) !== 0;
+          const isPageBreakOnlyPara = hasPageBreakBefore && paraContent.length === 0 && innerGrids.length === 0;
           const items = [...innerGrids];
-          if (!isPageBreakOnlyPara) items.push(buildPara(kids, buildParaProps(ps, cellStyleId)));
-          if (cellDivide & 4) items.unshift(buildPara([{ tag: "span", props: {}, kids: [buildPb()] }]));
+          if (!isPageBreakOnlyPara) {
+            const paraProps = buildParaProps(ps, cellStyleId, di);
+            if (hasPageBreakBefore && innerGrids.length === 0)
+              paraProps.pageBreakBefore = true;
+            items.push(buildPara(kids, paraProps));
+          }
+          if (hasPageBreakBefore && (innerGrids.length > 0 || paraContent.length === 0))
+            items.unshift(buildPara([{ tag: "span", props: {}, kids: [buildPb()] }]));
           return { items, next: j };
         },
         { items: [buildPara([buildSpan("")])], next: k + 1 },
@@ -2822,10 +3004,34 @@ function strokeFromBF(bfId, di) {
   const b = bf.borders[0];
   return { kind: BORDER_KIND[b.type] ?? "solid", pt: b.widthPt, color: b.color };
 }
-function buildParaProps(ps, hwpStyleId) {
+function headingFromStyle(style) {
+  if (!style) return void 0;
+  for (const name of [style.name, style.engName]) {
+    const match = name.match(/^(?:개요|outline|heading)\s*([1-6])$/i);
+    if (match) return Number(match[1]);
+  }
+  return void 0;
+}
+function buildParaProps(ps, hwpStyleId, di) {
   const p = hwpStyleId !== void 0 ? { hwpStyleId } : {};
+  const heading = ps?.heading ?? headingFromStyle(di?.styles[hwpStyleId ?? -1]);
+  if (heading !== void 0) p.heading = heading;
   if (!ps) return { ...p, spaceBefore: 0, spaceAfter: 0, lineHeight: 1.6 };
+  if (ps.listOrd !== void 0) {
+    p.listOrd = ps.listOrd;
+    p.listLv = Math.max(0, Math.min(6, ps.listLevel ?? 0));
+    if (ps.listOrd) {
+      p.listMark = "1.";
+    } else {
+      const character = ps.listId && di ? di.bullets[ps.listId - 1]?.character : void 0;
+      p.listMark = character || "-";
+    }
+  }
   if (ps.align && ps.align !== "justify") p.align = ps.align;
+  p.pageBreakBefore = ps.pageBreakBefore;
+  p.keepWithNext = ps.keepWithNext;
+  p.keepLines = ps.keepLines;
+  p.widowControl = ps.widowControl;
   if (hwpStyleId === 18 && !p.align) p.align = "justify";
   p.spaceBefore = Math.max(0, Metric.hwpToPt(ps.spaceBefore / 2));
   p.spaceAfter = Math.max(0, Metric.hwpToPt(ps.spaceAfter / 2));
@@ -2837,10 +3043,10 @@ function buildParaProps(ps, hwpStyleId) {
   } else {
     p.lineHeight = ps.lineSpacing > 0 ? ps.lineSpacing / 100 : 1.6;
   }
-  const leftMarginPt = Math.max(0, Metric.hwpToPt(ps.leftMargin / 2));
-  if (leftMarginPt > 0) p.indentPt = leftMarginPt;
-  const rightMarginPt = Math.max(0, Metric.hwpToPt(ps.rightMargin / 2));
-  if (rightMarginPt > 0) p.indentRightPt = rightMarginPt;
+  const leftMarginPt = Metric.hwpToPt((ps.leftMargin - Math.min(0, ps.indent)) / 2);
+  if (leftMarginPt !== 0) p.indentPt = leftMarginPt;
+  const rightMarginPt = Metric.hwpToPt(ps.rightMargin / 2);
+  if (rightMarginPt !== 0) p.indentRightPt = rightMarginPt;
   if (ps.indent !== 0) p.firstLineIndentPt = Metric.hwpToPt(ps.indent / 2);
   if (ps.verAlign && ps.verAlign !== "baseline") p.verAlign = ps.verAlign;
   if (ps.lineWrap && ps.lineWrap !== "break") p.lineWrap = ps.lineWrap;
@@ -2861,7 +3067,15 @@ var HwpScanner = class {
       const { compressed, encrypted } = fh ? parseFileHeader(fh) : { compressed: true, encrypted: false };
       if (encrypted) return fail("HWP: \uC554\uD638\uD654\uB41C \uD30C\uC77C\uC740 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
       const diRaw = streams.get("DocInfo");
-      let di = { faceNames: [], charShapes: [], paraShapes: [], borderFills: [] };
+      let di = {
+        faceNames: [],
+        charShapes: [],
+        paraShapes: [],
+        borderFills: [],
+        styles: [],
+        numberings: [],
+        bullets: []
+      };
       if (diRaw) {
         di = shield.guard(() => parseDocInfo(diRaw, compressed), di, "hwp:docInfo");
       }
@@ -2890,8 +3104,8 @@ var HwpScanner = class {
         objectMap.set(binNum - 1, buildImg(base64, mimeType, wPt, hPt));
       }
       const gsoCtx = { count: 0, objects: /* @__PURE__ */ new Map() };
-      const allContent = [];
-      let pageDims = A4;
+      const parsedSections = [];
+      let inheritedDims = { ...A4 };
       for (let s = 0; s < 100; s++) {
         const sec = streams.get(`BodyText/Section${s}`) ?? streams.get(`Section${s}`);
         if (!sec) {
@@ -2899,8 +3113,11 @@ var HwpScanner = class {
             const fb = findBodySection(streams);
             if (fb) {
               const r2 = parseBody(fb, compressed, di, shield, gsoCtx);
-              allContent.push(...r2.content);
-              if (r2.pageDims) pageDims = r2.pageDims;
+              inheritedDims = r2.pageDims ?? inheritedDims;
+              parsedSections.push({
+                content: r2.content,
+                dims: inheritedDims
+              });
             }
           }
           break;
@@ -2910,19 +3127,39 @@ var HwpScanner = class {
           { content: [], pageDims: void 0 },
           `hwp:sec${s}`
         );
-        allContent.push(...r.content);
-        if (r.pageDims) pageDims = r.pageDims;
+        inheritedDims = r.pageDims ?? inheritedDims;
+        parsedSections.push({
+          content: r.content,
+          dims: inheritedDims
+        });
       }
+      const allContent = parsedSections.flatMap((section) => section.content);
       if (objectMap.size > 0) {
         injectImagesIntoContent(allContent, objectMap, gsoCtx.objects);
       }
-      normalizeHancomParagraphAnchors(allContent, di);
+      for (const section of parsedSections) {
+        normalizeHancomParagraphAnchors(section.content, di);
+      }
       warns.push(...shield.flush());
-      const content = allContent.length > 0 ? allContent : [buildPara([buildSpan("")])];
-      return succeed(buildRoot({}, [buildSheet(content, pageDims, {
-        headers: gsoCtx.headers ? { default: gsoCtx.headers } : void 0,
-        footers: gsoCtx.footers ? { default: gsoCtx.footers } : void 0
-      })]), warns);
+      if (parsedSections.length === 0) {
+        parsedSections.push({
+          content: [buildPara([buildSpan("")])],
+          dims: inheritedDims
+        });
+      }
+      const sheets = parsedSections.map(
+        (section, index) => buildSheet(
+          section.content.length > 0 ? section.content : [buildPara([buildSpan("")])],
+          section.dims,
+          // Header/footer controls are currently collected once and inherited
+          // by later sections. Attach them to the first section explicitly.
+          index === 0 ? {
+            headers: gsoCtx.headers ? { default: gsoCtx.headers } : void 0,
+            footers: gsoCtx.footers ? { default: gsoCtx.footers } : void 0
+          } : void 0
+        )
+      );
+      return succeed(buildRoot({}, sheets), warns);
     } catch (e) {
       warns.push(...shield.flush());
       return fail(`HWP decode error: ${e?.message ?? String(e)}`, warns);
@@ -3110,11 +3347,23 @@ var DocxDecoder = class extends BaseDecoder {
         } catch {
         }
       }
+      meta.evenAndOddHeaders = false;
+      const settings = getFile("word/settings.xml");
+      if (settings) {
+        try {
+          const parsed = await XmlKit.parseStrict(TextKit.decode(settings));
+          const node = parsed?.["w:settings"]?.[0]?.["w:evenAndOddHeaders"]?.[0];
+          if (node != null) meta.evenAndOddHeaders = !["0", "false", "off"].includes(
+            String(node?._attr?.["w:val"] ?? "1").toLowerCase()
+          );
+        } catch {
+        }
+      }
       const numXml = getFile("word/numbering.xml");
       let numMap = /* @__PURE__ */ new Map();
       if (numXml) {
         try {
-          numMap = await parseNumbering(TextKit.decode(numXml));
+          numMap = await parseNumbering2(TextKit.decode(numXml));
         } catch {
         }
       }
@@ -3149,52 +3398,45 @@ var DocxDecoder = class extends BaseDecoder {
         stylesMap,
         paraStyleMap
       };
-      const kids = [];
+      const sections = [];
+      let kids = [];
       for (const el of elements) {
         const nodes = shield.guard(
           () => decodeElement(el, decCtx),
           [buildPara([buildSpan("[\uC694\uC18C \uD30C\uC2F1 \uC2E4\uD328]")])],
           "docx:bodyElement"
         );
-        if (Array.isArray(nodes)) {
-          kids.push(...nodes);
-        } else {
-          kids.push(nodes);
-        }
-        if (el.type === "para") {
-          const pPr = el.node?.["w:pPr"]?.[0] ?? el.node?.pPr?.[0] ?? {};
-          const inlineSectPr = pPr?.["w:sectPr"]?.[0] ?? pPr?.sectPr?.[0];
-          if (inlineSectPr) {
-            const typeAttr = inlineSectPr?.["w:type"]?.[0]?._attr;
-            const sectType = typeAttr?.["w:val"] ?? typeAttr?.val ?? "nextPage";
-            if (sectType !== "continuous") {
-              kids.push(
-                buildPara([{ tag: "span", props: {}, kids: [buildPb()] }])
-              );
-            }
-          }
+        kids.push(...Array.isArray(nodes) ? nodes : [nodes]);
+        const pPr = el.type === "para" ? el.node?.["w:pPr"]?.[0] ?? el.node?.pPr?.[0] : void 0;
+        const sp = pPr?.["w:sectPr"]?.[0] ?? pPr?.sectPr?.[0];
+        if (sp) {
+          sections.push({ kids, sp });
+          kids = [];
         }
       }
-      const headersMap = await decodeHeaderFooter2(
-        "header",
-        body,
-        relsMap,
-        files,
-        decCtx
-      );
-      const footersMap = await decodeHeaderFooter2(
-        "footer",
-        body,
-        relsMap,
-        files,
-        decCtx
-      );
+      sections.push({ kids, sp: body?.["w:sectPr"]?.[0] ?? body?.sectPr?.[0] });
+      const sheets = [];
+      let headers;
+      let footers;
+      for (const section of sections) {
+        const sectionBody = { "w:sectPr": [section.sp] };
+        const sectionDims = extractDims2(sectionBody) ?? dims;
+        const ownHeaders = await decodeHeaderFooter2("header", sectionBody, relsMap, files, decCtx);
+        const ownFooters = await decodeHeaderFooter2("footer", sectionBody, relsMap, files, decCtx);
+        if (ownHeaders) headers = { ...headers, ...ownHeaders };
+        if (ownFooters) footers = { ...footers, ...ownFooters };
+        const sheet = buildSheet(section.kids.filter(Boolean), sectionDims, { headers, footers });
+        const titlePage = section.sp?.["w:titlePg"]?.[0] ?? section.sp?.titlePg?.[0];
+        sheet.differentFirstPage = titlePage != null && !["0", "false", "off"].includes(
+          String(titlePage?._attr?.["w:val"] ?? titlePage?._attr?.val ?? "1").toLowerCase()
+        );
+        const attr = section.sp?.["w:type"]?.[0]?._attr ?? section.sp?.type?.[0]?._attr;
+        const type = attr?.["w:val"] ?? attr?.val;
+        if (["nextPage", "continuous", "evenPage", "oddPage", "nextColumn"].includes(type)) sheet.sectionType = type;
+        sheets.push(sheet);
+      }
       warns.push(...shield.flush());
-      const sheet = buildSheet(kids.filter(Boolean), dims, {
-        headers: headersMap,
-        footers: footersMap
-      });
-      return succeed(buildRoot(meta, [sheet]), warns);
+      return succeed(buildRoot(meta, sheets), warns);
     } catch (e) {
       warns.push(...shield.flush());
       return fail(`DOCX decode error: ${e?.message ?? String(e)}`, warns);
@@ -3252,7 +3494,7 @@ async function parseCoreProps(xml) {
     return {};
   }
 }
-async function parseNumbering(xml) {
+async function parseNumbering2(xml) {
   const map = /* @__PURE__ */ new Map();
   const trimmed = xml.trim();
   if (!trimmed) return map;
@@ -3296,8 +3538,8 @@ function extractDims2(body) {
     const sz = sp?.["w:pgSz"]?.[0]?._attr ?? sp?.pgSz?.[0]?._attr;
     const mar = sp?.["w:pgMar"]?.[0]?._attr ?? sp?.pgMar?.[0]?._attr;
     if (!sz) return null;
-    const headerDxa = Number(mar?.["w:header"] ?? mar?.header ?? 0);
-    const footerDxa = Number(mar?.["w:footer"] ?? mar?.footer ?? 0);
+    const headerDxa = Number(mar?.["w:header"] ?? mar?.header ?? NaN);
+    const footerDxa = Number(mar?.["w:footer"] ?? mar?.footer ?? NaN);
     return {
       wPt: Metric.dxaToPt(Number(sz["w:w"] ?? sz.w ?? 11906)),
       hPt: Metric.dxaToPt(Number(sz["w:h"] ?? sz.h ?? 16838)),
@@ -3306,8 +3548,8 @@ function extractDims2(body) {
       ml: Metric.dxaToPt(Number(mar?.["w:left"] ?? mar?.left ?? 1800)),
       mr: Metric.dxaToPt(Number(mar?.["w:right"] ?? mar?.right ?? 1800)),
       orient: (sz["w:orient"] ?? sz.orient) === "landscape" ? "landscape" : "portrait",
-      headerPt: headerDxa > 0 ? Metric.dxaToPt(headerDxa) : void 0,
-      footerPt: footerDxa > 0 ? Metric.dxaToPt(footerDxa) : void 0
+      headerPt: Number.isFinite(headerDxa) && headerDxa >= 0 ? Metric.dxaToPt(headerDxa) : void 0,
+      footerPt: Number.isFinite(footerDxa) && footerDxa >= 0 ? Metric.dxaToPt(footerDxa) : void 0
     };
   } catch {
     return null;
@@ -3505,23 +3747,11 @@ function decodePara2(p, ctx) {
     props.lineHeight = styleInherited.pPr?.lineHeight ?? WORD_DEFAULT_LINE_HEIGHT;
   }
   const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
-  const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
-  const rightVal = Number(indAttr?.["w:right"] ?? indAttr?.right ?? 0);
-  const firstLineVal = Number(
-    indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0
-  );
-  const hangingVal = Number(indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0);
-  if (leftVal > 0) props.indentPt = Metric.dxaToPt(leftVal);
-  else if (styleInherited.pPr?.indentPt)
-    props.indentPt = styleInherited.pPr.indentPt;
-  if (rightVal > 0) props.indentRightPt = Metric.dxaToPt(rightVal);
-  else if (styleInherited.pPr?.indentRightPt)
-    props.indentRightPt = styleInherited.pPr.indentRightPt;
-  if (firstLineVal > 0) props.firstLineIndentPt = Metric.dxaToPt(firstLineVal);
-  else if (hangingVal > 0)
-    props.firstLineIndentPt = -Metric.dxaToPt(hangingVal);
-  else if (styleInherited.pPr?.firstLineIndentPt)
-    props.firstLineIndentPt = styleInherited.pPr.firstLineIndentPt;
+  const indentation = parseDocxIndentation(indAttr);
+  for (const key of ["indentPt", "indentRightPt", "firstLineIndentPt"]) {
+    const value = indentation[key] ?? styleInherited.pPr?.[key];
+    if (value !== void 0) props[key] = value;
+  }
   if (!alignVal && styleInherited.pPr?.align)
     props.align = safeAlign(styleInherited.pPr.align);
   const numPr = pPr?.["w:numPr"]?.[0] ?? pPr?.numPr?.[0];
@@ -3539,8 +3769,11 @@ function decodePara2(p, ctx) {
       props.listOrd = numId >= 2;
     }
   }
-  const pbBeforeNode = pPr?.["w:pageBreakBefore"]?.[0] ?? pPr?.pageBreakBefore?.[0];
-  const hasPageBreakBefore = pbBeforeNode != null && (pbBeforeNode?._attr?.["w:val"] ?? pbBeforeNode?._attr?.val ?? "1") !== "0";
+  const pagination = parsePaginationProps(pPr);
+  for (const key of ["pageBreakBefore", "keepWithNext", "keepLines", "widowControl"]) {
+    const value = pagination[key] ?? styleInherited.pPr?.[key];
+    if (value !== void 0) props[key] = value;
+  }
   const children = p?.["_childOrder"];
   const kids = [];
   if (Array.isArray(children)) {
@@ -3566,7 +3799,8 @@ function decodePara2(p, ctx) {
         const hl = hlArr[hi++];
         if (hl) {
           const rId = hl?._attr?.["r:id"] ?? hl?._attr?.id;
-          const url = rId ? ctx.relsMap.get(rId) : "";
+          const anchor = hl?._attr?.["w:anchor"] ?? hl?._attr?.anchor;
+          const url = rId ? ctx.relsMap.get(rId) : anchor ? `#${anchor}` : "";
           const hlRuns = toArr2(hl?.["w:r"] ?? hl?.r);
           const hlKids = hlRuns.map(
             (r) => decodeRun(r, ctx, {
@@ -3611,9 +3845,6 @@ function decodePara2(p, ctx) {
     kids.push(...legacyKids);
   }
   const filteredKids = kids.filter(Boolean);
-  if (hasPageBreakBefore) {
-    filteredKids.unshift({ tag: "span", props: {}, kids: [buildPb()] });
-  }
   return buildPara(filteredKids, props);
 }
 function decodeRunOrImage(run, ctx) {
@@ -3811,22 +4042,45 @@ function decodeRun(run, ctx, styleRpr) {
   const fldChar = run?.["w:fldChar"]?.[0]?._attr ?? run?.fldChar?.[0]?._attr;
   const instrText = run?.["w:instrText"]?.[0];
   const brNodes = toArr2(run?.["w:br"] ?? run?.br ?? []);
-  for (const br of brNodes) {
-    const brType = br?._attr?.["w:type"] ?? br?._attr?.type;
-    if (brType === "page") {
-      return { tag: "span", props, kids: [buildPb()] };
+  const textNodes = toArr2(run?.["w:t"] ?? run?.t);
+  const childOrder = run?._childOrder ?? [];
+  const textVals = textNodes.map(
+    (t) => typeof t === "string" ? t : t?._ ?? t?._text ?? ""
+  );
+  const kids = [];
+  if (childOrder.length) {
+    let ti = 0;
+    let bi = 0;
+    for (const tag of childOrder) {
+      if (tag === "w:t" || tag === "t") {
+        kids.push({ tag: "txt", content: textVals[ti++] ?? "" });
+      } else if (tag === "w:tab" || tag === "tab") {
+        kids.push({ tag: "txt", content: "	" });
+      } else if (tag === "w:br" || tag === "br") {
+        const br = brNodes[bi++];
+        const brType = br?._attr?.["w:type"] ?? br?._attr?.type;
+        kids.push(brType === "page" ? buildPb() : buildBr());
+      }
+    }
+  } else {
+    for (const v of textVals) if (v) kids.push({ tag: "txt", content: v });
+    for (const br of brNodes) {
+      const brType = br?._attr?.["w:type"] ?? br?._attr?.type;
+      kids.push(brType === "page" ? buildPb() : buildBr());
     }
   }
-  const textNodes = toArr2(run?.["w:t"] ?? run?.t);
-  const content = textNodes.map((t) => typeof t === "string" ? t : t?._ ?? t?._text ?? "").join("");
   if (instrText) {
     const instrStr = typeof instrText === "string" ? instrText : instrText?._text ?? "";
     if (instrStr.trim().toUpperCase() === "PAGE") {
-      const pageNum = { tag: "pagenum", format: "decimal" };
-      return { tag: "span", props, kids: [pageNum] };
+      return {
+        tag: "span",
+        props,
+        kids: [{ tag: "pagenum", format: "decimal" }, ...kids]
+      };
     }
   }
-  return buildSpan(content, props);
+  if (!kids.length) kids.push({ tag: "txt", content: "" });
+  return { tag: "span", props, kids };
 }
 function parseBorderDef(bdrNode) {
   const sides = [
@@ -3932,7 +4186,7 @@ async function parseParaStyleMap(xml) {
     const stylesRoot = obj?.["w:styles"]?.[0] ?? obj?.styles?.[0] ?? obj;
     const defaultsPPr = stylesRoot?.["w:docDefaults"]?.[0]?.["w:pPrDefault"]?.[0]?.["w:pPr"]?.[0] ?? stylesRoot?.docDefaults?.[0]?.pPrDefault?.[0]?.pPr?.[0];
     map.set(DOCX_DEFAULT_STYLE_KEY, {
-      pPr: parseDocxSpacingProps(defaultsPPr, true)
+      pPr: { ...parseDocxSpacingProps(defaultsPPr, true), ...parsePaginationProps(defaultsPPr) }
     });
     const styleArr = toArr2(stylesRoot?.["w:style"] ?? stylesRoot?.style);
     for (const style of styleArr) {
@@ -3974,21 +4228,12 @@ async function parseParaStyleMap(xml) {
       if (pPr) {
         const spacingProps = parseDocxSpacingProps(pPr);
         const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
-        const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
-        const rightVal = Number(indAttr?.["w:right"] ?? indAttr?.right ?? 0);
-        const firstLineVal = Number(
-          indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0
-        );
-        const hangingVal = Number(
-          indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0
-        );
         const alignVal = pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ?? pPr?.["w:jc"]?.[0]?._attr?.val;
         def.pPr = {
           ...spacingProps,
+          ...parsePaginationProps(pPr),
           align: alignVal,
-          indentPt: leftVal > 0 ? Metric.dxaToPt(leftVal) : void 0,
-          indentRightPt: rightVal > 0 ? Metric.dxaToPt(rightVal) : void 0,
-          firstLineIndentPt: firstLineVal > 0 ? Metric.dxaToPt(firstLineVal) : hangingVal > 0 ? -Metric.dxaToPt(hangingVal) : void 0
+          ...parseDocxIndentation(indAttr)
         };
       }
       map.set(id, def);
@@ -3996,6 +4241,42 @@ async function parseParaStyleMap(xml) {
   } catch {
   }
   return map;
+}
+function parsePaginationProps(pPr) {
+  const props = {};
+  for (const [key, tag] of [
+    ["pageBreakBefore", "pageBreakBefore"],
+    ["keepWithNext", "keepNext"],
+    ["keepLines", "keepLines"],
+    ["widowControl", "widowControl"]
+  ]) {
+    const node = pPr?.[`w:${tag}`]?.[0] ?? pPr?.[tag]?.[0];
+    if (node != null) {
+      const val = String(node?._attr?.["w:val"] ?? node?._attr?.val ?? "1").toLowerCase();
+      props[key] = !["0", "false", "off"].includes(val);
+    }
+  }
+  return props;
+}
+function parseDocxIndentation(attrs) {
+  const result = {};
+  const read = (name) => {
+    const raw = docxAttr(attrs, name);
+    if (raw === void 0) return void 0;
+    const value = Number(raw);
+    return Number.isFinite(value) ? Metric.dxaToPt(value) : void 0;
+  };
+  const left = read("left");
+  const right = read("right");
+  const hanging = read("hanging");
+  const first = hanging !== void 0 ? -hanging : read("firstLine");
+  if (left !== void 0) result.indentPt = left;
+  if (right !== void 0) result.indentRightPt = right;
+  if (first !== void 0) result.firstLineIndentPt = first === 0 ? 0 : first;
+  return result;
+}
+function definedProps(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== void 0));
 }
 function resolveParaStyle(styleId, map) {
   let merged = {};
@@ -4009,7 +4290,7 @@ function resolveParaStyle(styleId, map) {
       merged.rPr = { ...def.rPr, ...merged.rPr };
     }
     if (def.pPr) {
-      merged.pPr = { ...def.pPr, ...merged.pPr };
+      merged.pPr = { ...definedProps(def.pPr), ...definedProps(merged.pPr ?? {}) };
     }
     cur = def.basedOn;
   }
@@ -4393,190 +4674,113 @@ function parseVertAlign(v) {
   return VERT_ALIGN_MAP[v ?? ""];
 }
 
-// src/decoders/md/MdDecoder.ts
-var MdDecoder = class extends BaseDecoder {
+// src/decoders/doc/DocDecoder.ts
+var docConverter;
+function configureDocConverter(converter) {
+  docConverter = converter;
+}
+var DocDecoder = class extends BaseDecoder {
   getFormat() {
-    return "md";
+    return "doc";
+  }
+  getAliases() {
+    return ["application/msword"];
   }
   async decode(data) {
-    const shield = new ShieldedParser();
-    const warns = [];
     try {
-      const text = this.bytesToString(data);
-      const lines = text.split(/\r?\n/);
-      const kids = [];
-      let i = 0;
-      while (i < lines.length) {
-        const line = lines[i];
-        const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
-        if (headingMatch) {
-          const level = headingMatch[1].length;
-          kids.push(buildPara([buildSpan(headingMatch[2], { b: level <= 2 })], { heading: level }));
-          i++;
-          continue;
-        }
-        if (line.includes("|") && i + 1 < lines.length && lines[i + 1].match(/^\s*\|?\s*[-:]+\s*\|/)) {
-          const tableResult = shield.guard(() => parseMdTable(lines, i), null, `md:table@${i}`);
-          if (tableResult) {
-            kids.push(tableResult.node);
-            i = tableResult.nextLine;
-            continue;
-          }
-        }
-        if (line.match(/^[-*_]{3,}$/)) {
-          kids.push(buildPara([buildSpan("")], {}));
-          i++;
-          continue;
-        }
-        const listMatch = line.match(/^(\s*)([-*+]|\d+\.)\s+(.+)$/);
-        if (listMatch) {
-          kids.push(buildPara(parseInline(listMatch[3]), {
-            listLv: Math.floor(listMatch[1].length / 2),
-            listOrd: /\d+\./.test(listMatch[2])
-          }));
-          i++;
-          continue;
-        }
-        const bqMatch = line.match(/^>\s*(.*)$/);
-        if (bqMatch) {
-          kids.push(buildPara([buildSpan(bqMatch[1])], { indentPt: 28 }));
-          i++;
-          continue;
-        }
-        if (line.startsWith("```")) {
-          const codeLines = [];
-          i++;
-          while (i < lines.length && !lines[i].startsWith("```")) {
-            codeLines.push(lines[i]);
-            i++;
-          }
-          i++;
-          kids.push(buildPara([buildSpan(codeLines.join("\n"), { font: "Courier New" })], {}));
-          continue;
-        }
-        if (line.trim() === "") {
-          i++;
-          continue;
-        }
-        const alignMatch = line.match(/^<div\s+align="(center|right|left)">(.*?)<\/div>$/i);
-        if (alignMatch) {
-          const align = alignMatch[1].toLowerCase();
-          kids.push(buildPara(parseInline(alignMatch[2]), { align }));
-          i++;
-          continue;
-        }
-        kids.push(buildPara(parseInline(line), {}));
-        i++;
+      const streams = BinaryKit.parseCfb(data);
+      const word = streams.get("WordDocument");
+      if (!word || word.length < 32) throw new Error("WordDocument \uC2A4\uD2B8\uB9BC\uC774 \uC5C6\uAC70\uB098 \uC190\uC0C1\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+      const view = new DataView(word.buffer, word.byteOffset, word.byteLength);
+      if (view.getUint16(0, true) !== 42476) throw new Error("Word DOC \uC11C\uBA85\uC774 \uC544\uB2D9\uB2C8\uB2E4.");
+      const flags = view.getUint16(10, true);
+      if (flags & 33024) throw new Error("\uC554\uD638\uD654\uB41C DOC\uB294 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uC554\uD638\uB97C \uD574\uC81C\uD55C \uB4A4 \uB2E4\uC2DC \uBCC0\uD658\uD558\uC138\uC694.");
+      if (docConverter) {
+        const docx = await docConverter(data);
+        return new DocxDecoder().decode(docx);
       }
-      warns.push(...shield.flush());
-      const sheet = buildSheet(kids.length > 0 ? kids : [buildPara([buildSpan("")])], A4);
-      return succeed(buildRoot({}, [sheet]), warns);
+      const version = view.getUint16(2, true);
+      if (version < 193) throw new Error("Word 97 \uC774\uC804 DOC\uB294 DOCX \uBCC0\uD658\uAE30\uB97C \uC124\uC815\uD574\uC57C \uD569\uB2C8\uB2E4.");
+      const table = streams.get(flags & 512 ? "1Table" : "0Table");
+      if (!table) throw new Error("DOC Table \uC2A4\uD2B8\uB9BC\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.");
+      let offset = 32;
+      const csw = view.getUint16(offset, true);
+      offset += 2 + csw * 2;
+      const cslw = view.getUint16(offset, true);
+      offset += 2;
+      if (cslw < 4) throw new Error("\uC798\uBABB\uB41C DOC FibRgLw\uC785\uB2C8\uB2E4.");
+      const bodyLength = view.getUint32(offset + 3 * 4, true);
+      offset += cslw * 4;
+      const pairCount = view.getUint16(offset, true);
+      offset += 2;
+      if (pairCount <= 33) throw new Error("DOC CLX \uCC38\uC870\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.");
+      const clxOffset = view.getUint32(offset + 33 * 8, true);
+      const clxLength = view.getUint32(offset + 33 * 8 + 4, true);
+      if (clxLength === 0 || clxOffset + clxLength > table.length) throw new Error("DOC CLX \uBC94\uC704\uAC00 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+      const clx = table.subarray(clxOffset, clxOffset + clxLength);
+      const cv = new DataView(clx.buffer, clx.byteOffset, clx.byteLength);
+      let pos = 0;
+      while (pos < clx.length && clx[pos] === 1) pos += 3 + cv.getUint16(pos + 1, true);
+      if (clx[pos] !== 2) throw new Error("DOC piece table\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.");
+      const size = cv.getUint32(pos + 1, true);
+      pos += 5;
+      if (size < 4 || (size - 4) % 12 !== 0 || pos + size > clx.length) throw new Error("\uC190\uC0C1\uB41C DOC piece table\uC785\uB2C8\uB2E4.");
+      const count = (size - 4) / 12;
+      const pcdOffset = pos + (count + 1) * 4;
+      const chunks = [];
+      let covered = 0;
+      for (let i = 0; i < count; i++) {
+        const start = cv.getUint32(pos + i * 4, true);
+        const end = cv.getUint32(pos + (i + 1) * 4, true);
+        if (i === 0 && start !== 0 || end < start) throw new Error("DOC \uBB38\uC790 \uC704\uCE58\uAC00 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+        if (start >= bodyLength) break;
+        const length = Math.min(end, bodyLength) - start;
+        const fc = cv.getUint32(pcdOffset + i * 8 + 2, true);
+        const compressed = (fc & 1073741824) !== 0;
+        const byteOffset = (fc & 1073741823) / (compressed ? 2 : 1);
+        const byteLength = length * (compressed ? 1 : 2);
+        if (!Number.isInteger(byteOffset) || byteOffset + byteLength > word.length) throw new Error("DOC \uD14D\uC2A4\uD2B8 \uBC94\uC704\uAC00 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+        const bytes = word.subarray(byteOffset, byteOffset + byteLength);
+        chunks.push(new TextDecoder(compressed ? "windows-1252" : "utf-16le").decode(bytes));
+        covered += length;
+      }
+      if (covered !== bodyLength) throw new Error("DOC \uBCF8\uBB38\uC774 \uC798\uB838\uC2B5\uB2C8\uB2E4.");
+      const text = fieldResults(chunks.join(""));
+      const paragraphs = [];
+      for (const line of text.replace(/\x07/g, "\r").split("\r")) {
+        const pages = line.split("\f");
+        const para = buildPara([]);
+        pages.forEach((page, i) => {
+          if (i) {
+            const span = buildSpan("");
+            span.kids = [buildPb()];
+            para.kids.push(span);
+          }
+          para.kids.push(buildSpan(page.replace(/\x0b/g, "\n").replace(/[\x00-\x08\x0e-\x1f]/g, "")));
+        });
+        paragraphs.push(para);
+      }
+      if (text.endsWith("\r") && paragraphs.length > 1) paragraphs.pop();
+      return succeed(buildRoot({}, [buildSheet(paragraphs)]), [
+        "DOC \uAE30\uBCF8 \uC77D\uAE30 \uBAA8\uB4DC: \uBCF8\uBB38 \uD14D\uC2A4\uD2B8\xB7\uBB38\uB2E8\xB7\uC904\uBC14\uAFC8\uC744 \uBCC0\uD658\uD569\uB2C8\uB2E4. \uC11C\uC2DD, \uD45C \uAD6C\uC870, \uADF8\uB9BC, \uBA38\uB9AC\uB9D0/\uAF2C\uB9AC\uB9D0\uC740 \uBCF4\uC874\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uC804\uCCB4 \uBCC0\uD658\uC740 configureDocConverter \uB610\uB294 hwpkit-dev/node\uC758 createLibreOfficeDocConverter\uB97C \uC0AC\uC6A9\uD558\uC138\uC694."
+      ]);
     } catch (e) {
-      warns.push(...shield.flush());
-      return fail(`MD decode error: ${e?.message ?? String(e)}`, warns);
+      return fail(`DOC \uB514\uCF54\uB529 \uC624\uB958: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 };
-function parseInline(text) {
-  const result = [];
-  let rem = text;
-  while (rem.length > 0) {
-    let m = rem.match(/^(.*?)!\[([^\]]*)\]\((data:([^;]+);base64,([^)]+))\)(.*)/s);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      const mime = m[4];
-      const validMimes = ["image/png", "image/jpeg", "image/gif", "image/bmp"];
-      result.push(buildImg(m[5], validMimes.includes(mime) ? mime : "image/png", 100, 100, m[2] || void 0));
-      rem = m[6];
-      continue;
-    }
-    m = rem.match(/^(.*?)!\[([^\]]*)\]\(([^)]+)\)(.*)/s);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(`[\uC774\uBBF8\uC9C0: ${m[2] || m[3]}]`));
-      rem = m[4];
-      continue;
-    }
-    m = rem.match(/^(.*?)\*\*\*(.+?)\*\*\*(.*)/s);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(m[2], { b: true, i: true }));
-      rem = m[3];
-      continue;
-    }
-    m = rem.match(/^(.*?)\*\*(.+?)\*\*(.*)/s);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(m[2], { b: true }));
-      rem = m[3];
-      continue;
-    }
-    m = rem.match(/^(.*?)\*(.+?)\*(.*)/s);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(m[2], { i: true }));
-      rem = m[3];
-      continue;
-    }
-    m = rem.match(/^(.*?)~~(.+?)~~(.*)/s);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(m[2], { s: true }));
-      rem = m[3];
-      continue;
-    }
-    m = rem.match(/^(.*?)<u>(.+?)<\/u>(.*)/si);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(m[2], { u: true }));
-      rem = m[3];
-      continue;
-    }
-    m = rem.match(/^(.*?)<sup>(.+?)<\/sup>(.*)/si);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(m[2], { sup: true }));
-      rem = m[3];
-      continue;
-    }
-    m = rem.match(/^(.*?)<sub>(.+?)<\/sub>(.*)/si);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(m[2], { sub: true }));
-      rem = m[3];
-      continue;
-    }
-    m = rem.match(/^(.*?)`(.+?)`(.*)/s);
-    if (m) {
-      if (m[1]) result.push(buildSpan(m[1]));
-      result.push(buildSpan(m[2], { font: "Courier New" }));
-      rem = m[3];
-      continue;
-    }
-    result.push(buildSpan(rem));
-    break;
+function fieldResults(text) {
+  const fields = [];
+  let result = "";
+  for (const ch of text) {
+    if (ch === "") fields.push(false);
+    else if (ch === "" && fields.length) fields[fields.length - 1] = true;
+    else if (ch === "" && fields.length) fields.pop();
+    else if (fields.every(Boolean)) result += ch;
   }
-  return result.length > 0 ? result : [buildSpan(text)];
+  return result;
 }
-function parseMdTable(lines, startLine) {
-  const parse = (line) => line.split("|").map((c) => c.trim()).filter((c, i, arr) => i > 0 || c !== "");
-  const headers = parse(lines[startLine]);
-  let cur = startLine + 2;
-  const rows = [];
-  while (cur < lines.length) {
-    if (!lines[cur].includes("|")) break;
-    const cells = parse(lines[cur]);
-    if (cells.length === 0) break;
-    rows.push(cells);
-    cur++;
-  }
-  const allRows = [headers, ...rows];
-  const gridRows = allRows.map(
-    (row, ri) => buildRow(row.map((cell) => buildCell([buildPara([buildSpan(cell, ri === 0 ? { b: true } : {})])])))
-  );
-  return { node: buildGrid(gridRows), nextLine: cur };
-}
-registry.registerDecoder(new MdDecoder());
+registry.registerDecoder(new DocDecoder());
 
 // src/decoders/html/HtmlDecoder.ts
 var HtmlDecoder = class extends BaseDecoder {
@@ -4606,6 +4810,7 @@ function tokenize(html) {
     if (html[i] === "<") {
       if (html[i + 1] === "!") {
         const end2 = html.indexOf(">", i);
+        if (end2 === -1) break;
         i = end2 + 1;
         continue;
       }
@@ -4622,7 +4827,7 @@ function tokenize(html) {
         const attrRegex = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
         let m;
         while ((m = attrRegex.exec(attrsStr)) !== null) {
-          attrs[m[1].toLowerCase()] = m[2] ?? m[3] ?? m[4] ?? "";
+          attrs[m[1].toLowerCase()] = decodeHtmlEntities(m[2] ?? m[3] ?? m[4] ?? "");
         }
       }
       tokens.push({
@@ -4636,13 +4841,21 @@ function tokenize(html) {
     } else {
       const end = html.indexOf("<", i);
       const text = end === -1 ? html.slice(i) : html.slice(i, end);
-      if (text.trim()) {
-        tokens.push({ type: "text", content: text });
+      if (text) {
+        tokens.push({ type: "text", content: decodeHtmlEntities(text) });
       }
       i = end === -1 ? html.length : end;
     }
   }
   return tokens;
+}
+function decodeHtmlEntities(text) {
+  const named = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: "\xA0" };
+  return text.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (entity, name) => {
+    if (name[0] !== "#") return named[name.toLowerCase()] ?? entity;
+    const code = name[1].toLowerCase() === "x" ? parseInt(name.slice(2), 16) : Number(name.slice(1));
+    return code > 0 && code <= 1114111 && !(code >= 55296 && code <= 57343) ? String.fromCodePoint(code) : "\uFFFD";
+  });
 }
 function parseTokens(tokens) {
   const kids = [];
@@ -4854,8 +5067,8 @@ function collectInline(tokens, start, stopTags) {
           i++;
       }
     } else if (t.type === "text") {
-      if (t.content?.trim()) {
-        nodes.push(buildSpan(t.content.trim()));
+      if (t.content) {
+        nodes.push(buildSpan(t.content.replace(/[\t\r\n ]+/g, " ")));
       }
       i++;
     } else {
@@ -4877,6 +5090,232 @@ function skipBlock(tokens, start, name) {
   return i;
 }
 registry.registerDecoder(new HtmlDecoder());
+
+// src/decoders/md/MdDecoder.ts
+var MdDecoder = class extends BaseDecoder {
+  getFormat() {
+    return "md";
+  }
+  async decode(data) {
+    const shield = new ShieldedParser();
+    const warns = [];
+    try {
+      const text = this.bytesToString(data);
+      const lines = text.split(/\r?\n/);
+      const kids = [];
+      let i = 0;
+      while (i < lines.length) {
+        const line = lines[i];
+        const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+        if (headingMatch) {
+          const level = headingMatch[1].length;
+          kids.push(buildPara(parseInline(headingMatch[2]).map((node) => node.tag === "span" ? { ...node, props: { b: level <= 2, ...node.props } } : node), { heading: level }));
+          i++;
+          continue;
+        }
+        if (line.includes("|") && i + 1 < lines.length && lines[i + 1].match(/^\s*\|?\s*[-:]+\s*\|/)) {
+          const tableResult = shield.guard(() => parseMdTable(lines, i), null, `md:table@${i}`);
+          if (tableResult) {
+            kids.push(tableResult.node);
+            i = tableResult.nextLine;
+            continue;
+          }
+        }
+        if (line.match(/^[-*_]{3,}$/)) {
+          kids.push(buildPara([buildSpan("")], {}));
+          i++;
+          continue;
+        }
+        const listMatch = line.match(/^(\s*)([-*+]|\d+\.)\s+(.+)$/);
+        if (listMatch) {
+          kids.push(buildPara(parseInline(listMatch[3]), {
+            listLv: Math.floor(listMatch[1].length / 2),
+            listOrd: /\d+\./.test(listMatch[2]),
+            listMark: listMatch[2]
+          }));
+          i++;
+          continue;
+        }
+        const bqMatch = line.match(/^>\s*(.*)$/);
+        if (bqMatch) {
+          kids.push(buildPara([buildSpan(bqMatch[1])], { indentPt: 28 }));
+          i++;
+          continue;
+        }
+        if (line.startsWith("```")) {
+          const codeLines = [];
+          i++;
+          while (i < lines.length && !lines[i].startsWith("```")) {
+            codeLines.push(lines[i]);
+            i++;
+          }
+          i++;
+          kids.push(buildPara([buildSpan(codeLines.join("\n"), { font: "Courier New" })], {}));
+          continue;
+        }
+        if (line.trim() === "") {
+          i++;
+          continue;
+        }
+        if (/^\s*<table\b/i.test(line)) {
+          const block = [];
+          let depth = 0;
+          do {
+            const part = lines[i++];
+            block.push(part);
+            for (const tag of part.matchAll(/<\/?table\b[^>]*>/gi)) depth += tag[0][1] === "/" ? -1 : 1;
+          } while (i < lines.length && depth > 0);
+          const html = await new HtmlDecoder().decode(this.stringToBytes(block.join("\n")));
+          if (!html.ok) return html;
+          kids.push(...html.data.kids.flatMap((sheet2) => sheet2.kids));
+          warns.push(...html.warns);
+          continue;
+        }
+        const alignMatch = line.match(/^<div\s+align="(center|right|left)">(.*?)<\/div>$/i);
+        if (alignMatch) {
+          const align = alignMatch[1].toLowerCase();
+          kids.push(buildPara(parseInline(alignMatch[2]), { align }));
+          i++;
+          continue;
+        }
+        kids.push(buildPara(parseInline(line), {}));
+        i++;
+      }
+      warns.push(...shield.flush());
+      const sheet = buildSheet(kids.length > 0 ? kids : [buildPara([buildSpan("")])], A4);
+      return succeed(buildRoot({}, [sheet]), warns);
+    } catch (e) {
+      warns.push(...shield.flush());
+      return fail(`MD decode error: ${e?.message ?? String(e)}`, warns);
+    }
+  }
+};
+function parseInline(text) {
+  const result = [];
+  let rem = text;
+  while (rem.length > 0) {
+    let m = rem.match(/^(.*?)!\[([^\]]*)\]\((data:([^;]+);base64,([^)]+))\)(.*)/s);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      const mime = m[4];
+      const validMimes = ["image/png", "image/jpeg", "image/gif", "image/bmp"];
+      result.push(buildImg(m[5], validMimes.includes(mime) ? mime : "image/png", 100, 100, m[2] || void 0));
+      rem = m[6];
+      continue;
+    }
+    m = rem.match(/^(.*?)!\[([^\]]*)\]\(([^)]+)\)(.*)/s);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(`[\uC774\uBBF8\uC9C0: ${m[2] || m[3]}]`));
+      rem = m[4];
+      continue;
+    }
+    m = rem.match(/^(.*?)\[([^\]]+)\]\(([^)]*)\)(.*)/s);
+    if (m) {
+      if (m[1]) result.push(...parseInline(m[1]));
+      const label = parseInline(m[2]).flatMap((node) => node.tag === "span" ? [node] : node.tag === "link" ? node.kids : [buildSpan(node.alt ?? "")]);
+      result.push({ tag: "link", href: m[3], kids: label });
+      rem = m[4];
+      continue;
+    }
+    m = rem.match(/^(.*?)\*\*\*(.+?)\*\*\*(.*)/s);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(m[2], { b: true, i: true }));
+      rem = m[3];
+      continue;
+    }
+    m = rem.match(/^(.*?)\*\*(.+?)\*\*(.*)/s);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(m[2], { b: true }));
+      rem = m[3];
+      continue;
+    }
+    m = rem.match(/^(.*?)\*(.+?)\*(.*)/s);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(m[2], { i: true }));
+      rem = m[3];
+      continue;
+    }
+    m = rem.match(/^(.*?)~~(.+?)~~(.*)/s);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(m[2], { s: true }));
+      rem = m[3];
+      continue;
+    }
+    m = rem.match(/^(.*?)<u>(.+?)<\/u>(.*)/si);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(m[2], { u: true }));
+      rem = m[3];
+      continue;
+    }
+    m = rem.match(/^(.*?)<sup>(.+?)<\/sup>(.*)/si);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(m[2], { sup: true }));
+      rem = m[3];
+      continue;
+    }
+    m = rem.match(/^(.*?)<sub>(.+?)<\/sub>(.*)/si);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(m[2], { sub: true }));
+      rem = m[3];
+      continue;
+    }
+    m = rem.match(/^(.*?)`(.+?)`(.*)/s);
+    if (m) {
+      if (m[1]) result.push(buildSpan(m[1]));
+      result.push(buildSpan(m[2], { font: "Courier New" }));
+      rem = m[3];
+      continue;
+    }
+    result.push(buildSpan(rem));
+    break;
+  }
+  return result.length > 0 ? result : [buildSpan(text)];
+}
+function parseMdTable(lines, startLine) {
+  const parse = (line) => {
+    const cells = [];
+    let cell = "";
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === "\\" && line[i + 1] === "|") {
+        cell += "|";
+        i++;
+      } else if (line[i] === "|") {
+        cells.push(cell.trim());
+        cell = "";
+      } else {
+        cell += line[i];
+      }
+    }
+    cells.push(cell.trim());
+    if (cells[0] === "") cells.shift();
+    if (cells[cells.length - 1] === "") cells.pop();
+    return cells;
+  };
+  const headers = parse(lines[startLine]);
+  let cur = startLine + 2;
+  const rows = [];
+  while (cur < lines.length) {
+    if (!lines[cur].includes("|")) break;
+    const cells = parse(lines[cur]);
+    if (cells.length === 0) break;
+    rows.push(cells);
+    cur++;
+  }
+  const allRows = [headers, ...rows];
+  const gridRows = allRows.map(
+    (row, ri) => buildRow(row.map((cell) => buildCell([buildPara(parseInline(cell).map((node) => node.tag === "span" ? { ...node, props: { ...ri === 0 ? { b: true } : {}, ...node.props } } : node))])))
+  );
+  return { node: buildGrid(gridRows), nextLine: cur };
+}
+registry.registerDecoder(new MdDecoder());
 
 // src/core/BaseEncoder.ts
 var BaseEncoder = class {
@@ -5193,7 +5632,7 @@ function paraShapeHwpToLayoutHwp(value) {
   return Math.round(value / 2);
 }
 function paraPrKey(p) {
-  return `${p.align ?? "left"}|${p.verAlign ?? "baseline"}|${p.lineWrap ?? "break"}|${p.listOrd ?? ""}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.indentRightPt ?? 0}|${p.firstLineIndentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}|${p.lineHeightFixed ?? 0}|${p.styleId ?? ""}`;
+  return `${p.pageBreakBefore ?? false}|${p.keepWithNext ?? false}|${p.keepLines ?? false}|${p.widowControl ?? false}|${p.align ?? "left"}|${p.verAlign ?? "baseline"}|${p.lineWrap ?? "break"}|${p.listOrd ?? ""}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.indentRightPt ?? 0}|${p.firstLineIndentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}|${p.lineHeightFixed ?? 0}|${p.styleId ?? ""}`;
 }
 function registerCharPr(props, ctx) {
   const key = charPrKey(props);
@@ -5250,11 +5689,16 @@ function registerParaPr(props, ctx) {
   const verAlignStr = props.verAlign ? V_ALIGN_MAP[props.verAlign] ?? "BASELINE" : "BASELINE";
   const lineWrapStr = props.lineWrap ? LINE_WRAP_MAP[props.lineWrap] ?? "BREAK" : "BREAK";
   const def = {
+    pageBreakBefore: props.pageBreakBefore,
+    keepWithNext: props.keepWithNext,
+    keepLines: props.keepLines,
+    widowControl: props.widowControl,
     id,
     align: alignStr,
     verAlign: verAlignStr,
     lineWrap: lineWrapStr,
-    leftHwp: Metric.ptToHwp(props.indentPt ?? 0) * 2,
+    // HWPX stores the margin before applying a negative first-line indent.
+    leftHwp: Metric.ptToHwp((props.indentPt ?? 0) + Math.min(0, props.firstLineIndentPt ?? 0)) * 2,
     rightHwp: Metric.ptToHwp(props.indentRightPt ?? 0) * 2,
     intentHwp: Metric.ptToHwp(props.firstLineIndentPt ?? 0) * 2,
     prevHwp: Metric.ptToHwp(props.spaceBefore ?? 0) * 2,
@@ -5397,7 +5841,8 @@ var HwpxEncoder = class extends BaseEncoder {
   }
   async encode(doc) {
     try {
-      const sheet = doc.kids[0];
+      const sheets = doc.kids.length ? doc.kids : [{ tag: "sheet", dims: A4, kids: [] }];
+      const sheet = sheets[0];
       const dims = normalizeDims(sheet?.dims ?? A4);
       const safeML = dims.ml !== void 0 && dims.ml >= 0 ? dims.ml : 70.87;
       const safeMR = dims.mr !== void 0 && dims.mr >= 0 ? dims.mr : 70.87;
@@ -5432,12 +5877,16 @@ var HwpxEncoder = class extends BaseEncoder {
         charPrIDRef: 0
       });
       ctx.styleIdToHwpxId.set("Normal", 0);
-      scanContent(sheet?.kids ?? [], ctx);
-      if (sheet?.headers?.default) for (const p of sheet.headers.default) scanPara(p, ctx);
-      if (sheet?.footers?.default) for (const p of sheet.footers.default) scanPara(p, ctx);
-      const sectionData = this.stringToBytes(buildSectionXml(sheet, dims, ctx));
-      const headerData = this.stringToBytes(buildHeaderXml(dims, doc.meta, ctx));
-      const previewText = extractPreviewText(sheet);
+      for (const section of sheets) {
+        scanContent(section.kids, ctx);
+        for (const paras of Object.values(section.headers ?? {})) for (const p of paras ?? []) scanPara(p, ctx);
+        for (const paras of Object.values(section.footers ?? {})) for (const p of paras ?? []) scanPara(p, ctx);
+      }
+      const sectionData = sheets.map((section) => this.stringToBytes(
+        buildSectionXml(section, normalizeDims(section.dims), ctx)
+      ));
+      const headerData = this.stringToBytes(buildHeaderXml(dims, doc.meta, ctx, sheets.length));
+      const previewText = sheets.map(extractPreviewText).join("\n");
       const entries = [
         {
           name: "mimetype",
@@ -5462,12 +5911,12 @@ var HwpxEncoder = class extends BaseEncoder {
         },
         {
           name: "META-INF/container.rdf",
-          data: this.stringToBytes(CONTAINER_RDF),
+          data: this.stringToBytes(buildContainerRdf(sheets.length)),
           mime: "application/rdf+xml"
         },
         {
           name: "Contents/content.hpf",
-          data: this.stringToBytes(buildContentHpf(ctx, doc.meta)),
+          data: this.stringToBytes(buildContentHpf(ctx, doc.meta, sheets.length)),
           mime: "application/hwpml-package+xml"
         },
         {
@@ -5475,11 +5924,11 @@ var HwpxEncoder = class extends BaseEncoder {
           data: headerData,
           mime: "application/xml"
         },
-        {
-          name: "Contents/section0.xml",
-          data: sectionData,
+        ...sectionData.map((data, index) => ({
+          name: `Contents/section${index}.xml`,
+          data,
           mime: "application/xml"
-        },
+        })),
         {
           name: "Preview/PrvText.txt",
           data: this.stringToBytes(previewText),
@@ -5505,8 +5954,10 @@ var HwpxEncoder = class extends BaseEncoder {
 var VERSION_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" tagetApplication="WORDPROCESSOR" major="5" minor="1" micro="0" buildNumber="1" os="1" xmlVersion="1.4" application="Hancom Office Hangul" appVersion="11, 0, 0, 8227 WIN32LEWindows_10"/>`;
 var CONTAINER_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><ocf:container xmlns:ocf="urn:oasis:names:tc:opendocument:xmlns:container" xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf"><ocf:rootfiles><ocf:rootfile full-path="Contents/content.hpf" media-type="application/hwpml-package+xml"/><ocf:rootfile full-path="Preview/PrvText.txt" media-type="text/plain"/><ocf:rootfile full-path="META-INF/container.rdf" media-type="application/rdf+xml"/></ocf:rootfiles></ocf:container>`;
 var MANIFEST_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><odf:manifest xmlns:odf="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"/>`;
-var CONTAINER_RDF = `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about=""><pkg:hasPart xmlns:pkg="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/header.xml"/></rdf:Description><rdf:Description rdf:about="Contents/header.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#HeaderFile"/></rdf:Description><rdf:Description rdf:about=""><pkg:hasPart xmlns:pkg="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/section0.xml"/></rdf:Description><rdf:Description rdf:about="Contents/section0.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#SectionFile"/></rdf:Description><rdf:Description rdf:about=""><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#Document"/></rdf:Description></rdf:RDF>`;
-function buildContentHpf(ctx, meta) {
+function buildContainerRdf(sectionCount) {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about=""><pkg:hasPart xmlns:pkg="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/header.xml"/></rdf:Description><rdf:Description rdf:about="Contents/header.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#HeaderFile"/></rdf:Description>` + Array.from({ length: sectionCount }, (_, i) => `<rdf:Description rdf:about=""><pkg:hasPart xmlns:pkg="http://www.hancom.co.kr/hwpml/2016/meta/pkg#" rdf:resource="Contents/section${i}.xml"/></rdf:Description><rdf:Description rdf:about="Contents/section${i}.xml"><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#SectionFile"/></rdf:Description>`).join("") + `<rdf:Description rdf:about=""><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#Document"/></rdf:Description></rdf:RDF>`;
+}
+function buildContentHpf(ctx, meta, sectionCount = 1) {
   const title = esc(meta?.title ?? "");
   const creator = esc(meta?.author ?? "text");
   const subject = esc(meta?.subject ?? "text");
@@ -5514,13 +5965,13 @@ function buildContentHpf(ctx, meta) {
   const keyword = esc(meta?.keywords ?? "text");
   const created = meta?.created ?? (/* @__PURE__ */ new Date()).toISOString().replace(/\.\d{3}Z$/, "Z");
   const modified = meta?.modified ?? created;
-  let items = `<opf:item id="header"   href="Contents/header.xml"   media-type="application/xml"/><opf:item id="section0" href="Contents/section0.xml" media-type="application/xml"/><opf:item id="settings" href="settings.xml"          media-type="application/xml"/>`;
+  let items = `<opf:item id="header"   href="Contents/header.xml"   media-type="application/xml"/>` + Array.from({ length: sectionCount }, (_, i) => `<opf:item id="section${i}" href="Contents/section${i}.xml" media-type="application/xml"/>`).join("") + `<opf:item id="settings" href="settings.xml"          media-type="application/xml"/>`;
   for (const bin of ctx.bins) {
     const ext = bin.name.split(".").pop()?.toLowerCase() ?? "png";
     const ct = ext === "png" ? "image/png" : ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "gif" ? "image/gif" : ext === "wmf" ? "image/x-wmf" : ext === "emf" ? "image/x-emf" : "image/bmp";
     items += `<opf:item id="${bin.id}" href="BinData/${bin.name}" media-type="${ct}" isEmbeded="1"/>`;
   }
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><opf:package ${NS} version="" unique-identifier="" id=""><opf:metadata><opf:title>${title}</opf:title><opf:language>ko</opf:language><opf:meta name="creator"      content="text">${creator}</opf:meta><opf:meta name="subject"      content="text">${subject}</opf:meta><opf:meta name="description"  content="text">${desc}</opf:meta><opf:meta name="CreatedDate"  content="text">${created}</opf:meta><opf:meta name="ModifiedDate" content="text">${modified}</opf:meta><opf:meta name="keyword"      content="text">${keyword}</opf:meta><opf:meta name="trackchageConfig" content="text">0</opf:meta></opf:metadata><opf:manifest>${items}</opf:manifest><opf:spine><opf:itemref idref="header" linear="yes"/><opf:itemref idref="section0" linear="yes"/></opf:spine></opf:package>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><opf:package ${NS} version="" unique-identifier="" id=""><opf:metadata><opf:title>${title}</opf:title><opf:language>ko</opf:language><opf:meta name="creator"      content="text">${creator}</opf:meta><opf:meta name="subject"      content="text">${subject}</opf:meta><opf:meta name="description"  content="text">${desc}</opf:meta><opf:meta name="CreatedDate"  content="text">${created}</opf:meta><opf:meta name="ModifiedDate" content="text">${modified}</opf:meta><opf:meta name="keyword"      content="text">${keyword}</opf:meta><opf:meta name="trackchageConfig" content="text">0</opf:meta></opf:metadata><opf:manifest>${items}</opf:manifest><opf:spine><opf:itemref idref="header" linear="yes"/>${Array.from({ length: sectionCount }, (_, i) => `<opf:itemref idref="section${i}" linear="yes"/>`).join("")}</opf:spine></opf:package>`;
 }
 function buildSettingsXml() {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><ha:HWPApplicationSetting xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"><ha:CaretPosition listIDRef="0" paraIDRef="0" pos="0"/><config:config-item-set name="PrintInfo"><config:config-item name="PrintAutoFootNote" type="boolean">false</config:config-item><config:config-item name="PrintAutoHeadNote" type="boolean">false</config:config-item><config:config-item name="PrintMethod" type="short">4</config:config-item><config:config-item name="OverlapSize" type="short">0</config:config-item><config:config-item name="PrintCropMark" type="short">0</config:config-item><config:config-item name="BinderHoleType" type="short">0</config:config-item><config:config-item name="ZoomX" type="short">100</config:config-item><config:config-item name="ZoomY" type="short">100</config:config-item></config:config-item-set></ha:HWPApplicationSetting>`;
@@ -5531,7 +5982,17 @@ function buildNumberingsXml() {
 function buildBulletsXml() {
   return `<hh:bullets itemCnt="1"><hh:bullet id="1" char="&#x2022;" useImage="0"><hh:paraHead level="0" align="LEFT" useInstWidth="0" autoIndent="1" widthAdjust="0" textOffsetType="PERCENT" textOffset="50" numFormat="DIGIT" charPrIDRef="0" checkable="0"/></hh:bullet></hh:bullets>`;
 }
-function buildHeaderXml(dims, meta, ctx) {
+function hancomVerticalMargins(dims) {
+  const top = Math.max(0, Math.min(dims.mt, dims.headerPt ?? dims.mt));
+  const bottom = Math.max(0, Math.min(dims.mb, dims.footerPt ?? dims.mb));
+  return {
+    top: Metric.ptToHwp(top),
+    bottom: Metric.ptToHwp(bottom),
+    header: Metric.ptToHwp(Math.max(0, dims.mt - top)),
+    footer: Metric.ptToHwp(Math.max(0, dims.mb - bottom))
+  };
+}
+function buildHeaderXml(dims, meta, ctx, sectionCount = 1) {
   const fontFacesXml = ctx.fontBank.toXml();
   let charPrXml = "";
   for (const cp of ctx.charPrs) {
@@ -5548,14 +6009,14 @@ function buildHeaderXml(dims, meta, ctx) {
     const wrap = pp.lineWrap ?? "BREAK";
     const lsType = pp.lineSpacingFixed !== void 0 ? "AT_LEAST" : "PERCENT";
     const lsValue = pp.lineSpacingFixed !== void 0 ? pp.lineSpacingFixed : pp.lineSpacing;
-    paraPrXml += `<hh:paraPr id="${pp.id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="0" suppressLineNumbers="0" checked="0"><hh:align horizontal="${pp.align}" vertical="${ver}"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="${wrap}"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/><hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar"><hh:margin><hc:indent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="${pp.rightHwp}" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/></hp:case><hp:default><hh:margin><hc:indent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="${pp.rightHwp}" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/></hp:default></hp:switch><hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>`;
+    paraPrXml += `<hh:paraPr id="${pp.id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="0" suppressLineNumbers="0" checked="0"><hh:align horizontal="${pp.align}" vertical="${ver}"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="${pp.widowControl ? 1 : 0}" keepWithNext="${pp.keepWithNext ? 1 : 0}" keepLines="${pp.keepLines ? 1 : 0}" pageBreakBefore="${pp.pageBreakBefore ? 1 : 0}" lineWrap="${wrap}"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/><hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar"><hh:margin><hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="${pp.rightHwp}" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/></hp:case><hp:default><hh:margin><hc:intent value="${pp.intentHwp}" unit="HWPUNIT"/><hc:left value="${pp.leftHwp}" unit="HWPUNIT"/><hc:right value="${pp.rightHwp}" unit="HWPUNIT"/><hc:prev value="${pp.prevHwp}" unit="HWPUNIT"/><hc:next value="${pp.nextHwp}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="${lsType}" value="${lsValue}" unit="HWPUNIT"/></hp:default></hp:switch><hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>`;
   }
   const borderFillXml = ctx.borderFillBank.toXml();
   const denseStyles = materializeContiguousStyles(ctx.hwpxStyles);
   const stylesXml2 = `<hh:styles itemCnt="${denseStyles.length}">` + denseStyles.map(
     (s) => `<hh:style id="${s.id}" type="PARA" name="${esc(s.name)}" engName="${esc(s.engName)}" paraPrIDRef="${s.paraPrIDRef}" charPrIDRef="${s.charPrIDRef}" nextStyleIDRef="0" langID="1042" lockForm="0"/>`
   ).join("") + `</hh:styles>`;
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hh:head ${NS} version="1.4" secCnt="1"><hh:beginNum page="1" footnote="1" endnote="1" pic="1" tbl="1" equation="1"/><hh:refList>` + fontFacesXml + borderFillXml + `<hh:charProperties itemCnt="${ctx.charPrs.length}">${charPrXml}</hh:charProperties><hh:tabProperties itemCnt="1"><hh:tabPr id="0" autoTabLeft="0" autoTabRight="0"/></hh:tabProperties>` + buildNumberingsXml() + buildBulletsXml() + `<hh:paraProperties itemCnt="${ctx.paraPrs.length}">${paraPrXml}</hh:paraProperties>` + stylesXml2 + `</hh:refList><hh:compatibleDocument targetProgram="HWP201X"><hh:layoutCompatibility/></hh:compatibleDocument><hh:docOption><hh:linkinfo path="" pageInherit="0" footnoteInherit="0"/></hh:docOption><hh:trackchageConfig flags="56"/></hh:head>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hh:head ${NS} version="1.4" secCnt="${sectionCount}"><hh:beginNum page="1" footnote="1" endnote="1" pic="1" tbl="1" equation="1"/><hh:refList>` + fontFacesXml + borderFillXml + `<hh:charProperties itemCnt="${ctx.charPrs.length}">${charPrXml}</hh:charProperties><hh:tabProperties itemCnt="1"><hh:tabPr id="0" autoTabLeft="0" autoTabRight="0"/></hh:tabProperties>` + buildNumberingsXml() + buildBulletsXml() + `<hh:paraProperties itemCnt="${ctx.paraPrs.length}">${paraPrXml}</hh:paraProperties>` + stylesXml2 + `</hh:refList><hh:compatibleDocument targetProgram="HWP201X"><hh:layoutCompatibility/></hh:compatibleDocument><hh:docOption><hh:linkinfo path="" pageInherit="0" footnoteInherit="0"/></hh:docOption><hh:trackchageConfig flags="56"/></hh:head>`;
 }
 function buildHeaderFooterRunXml(sheet, dims, ctx) {
   const headers = sheet.headers || {};
@@ -5565,8 +6026,8 @@ function buildHeaderFooterRunXml(sheet, dims, ctx) {
   const availW = ctx.availableWidth;
   const mtHwp = Metric.ptToHwp(dims.mt);
   const mbHwp = Metric.ptToHwp(dims.mb);
-  const headerZoneH = dims.headerPt ? Metric.ptToHwp(dims.headerPt) : 4252;
-  const footerZoneH = dims.footerPt ? Metric.ptToHwp(dims.footerPt) : 4252;
+  const headerZoneH = hancomVerticalMargins(dims).header;
+  const footerZoneH = hancomVerticalMargins(dims).footer;
   let inner = "";
   const hideFirst = !!(headers.first || footers.first);
   inner += `<hp:ctrl><hp:pageHiding hideHeader="${hideFirst ? 1 : 0}" hideFooter="${hideFirst ? 1 : 0}" hideMasterPage="0" hideBorder="0" hideFill="0" hidePageNum="0"/></hp:ctrl>`;
@@ -5674,10 +6135,7 @@ function buildSecPrXml(dims) {
   const hHwp = Metric.ptToHwp(dims.hPt);
   const ml = Metric.ptToHwp(dims.ml);
   const mr = Metric.ptToHwp(dims.mr);
-  const mt = Metric.ptToHwp(dims.mt);
-  const mb = Metric.ptToHwp(dims.mb);
-  const headerZone = dims.headerPt ? Metric.ptToHwp(dims.headerPt) : 0;
-  const footerZone = dims.footerPt ? Metric.ptToHwp(dims.footerPt) : 0;
+  const { top: mt, bottom: mb, header: headerZone, footer: footerZone } = hancomVerticalMargins(dims);
   const pageBorderFill = `<hp:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="EVEN" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill><hp:pageBorderFill type="ODD" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill>`;
   return `<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0"><hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/><hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/><hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/><hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/><hp:pagePr landscape="WIDELY" width="${wHwp}" height="${hHwp}" gutterType="LEFT_ONLY"><hp:margin header="${headerZone}" footer="${footerZone}" gutter="0" left="${ml}" right="${mr}" top="${mt}" bottom="${mb}"/></hp:pagePr><hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar="" supscript="1"/><hp:noteLine length="-1" type="SOLID" width="0.25 mm" color="#000000"/><hp:noteSpacing betweenNotes="283" belowLine="0" aboveLine="1000"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr><hp:endNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar="" supscript="1"/><hp:noteLine length="-1" type="SOLID" width="0.25 mm" color="#000000"/><hp:noteSpacing betweenNotes="0" belowLine="0" aboveLine="1000"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="END_OF_DOCUMENT" beneathText="0"/></hp:endNotePr>` + pageBorderFill + `</hp:secPr>`;
 }
@@ -5847,12 +6305,12 @@ function encodeParaPositioned(para, ctx, vertPos, secPr = "", availWidth, hfRun 
   const firstHorzPos = Math.max(
     0,
     paraShapeHwpToLayoutHwp(
-      (paraPr?.leftHwp ?? 0) + (paraPr?.intentHwp ?? 0)
+      (paraPr?.leftHwp ?? 0) + Math.max(0, paraPr?.intentHwp ?? 0)
     )
   );
   const restHorzPos = Math.max(
     0,
-    paraShapeHwpToLayoutHwp(paraPr?.leftHwp ?? 0)
+    paraShapeHwpToLayoutHwp((paraPr?.leftHwp ?? 0) - Math.min(0, paraPr?.intentHwp ?? 0))
   );
   const { xml: linesegXml, totalHeight } = buildLinesegarray(
     paraText2,
@@ -5958,10 +6416,15 @@ function encodeRunInner(span) {
   let xml = "";
   for (const kid of span.kids) {
     if (kid.tag === "txt") {
-      const content = esc(kid.content);
-      if (content) xml += `<hp:t xml:space="preserve">${content}</hp:t>`;
+      const raw = kid.content.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "");
+      if (!raw) continue;
+      const lines = TextKit.splitLines(raw);
+      for (let li = 0; li < lines.length; li++) {
+        if (lines[li] !== "") xml += `<hp:t xml:space="preserve">${esc(lines[li]).replace(/\t/g, '<hp:tab width="4000" leader="0" type="1"/>')}</hp:t>`;
+        if (li < lines.length - 1) xml += `<hp:t><hp:lineBreak/></hp:t>`;
+      }
     } else if (kid.tag === "br") {
-      xml += `<hp:br/>`;
+      xml += `<hp:t><hp:lineBreak/></hp:t>`;
     } else if (kid.tag === "pagenum") {
       const fmt = kid.format === "roman" ? "ROMAN_LOWER" : kid.format === "romanCaps" ? "ROMAN_UPPER" : "DIGIT";
       const numType = kid.format === "total" ? "TOTAL_PAGE" : "PAGE";
@@ -6406,44 +6869,63 @@ var DocxEncoder = class extends BaseEncoder {
         nextId: 10,
         nextImgNum: 1,
         warns: [],
-        imgMap: /* @__PURE__ */ new WeakMap()
+        imgMap: /* @__PURE__ */ new WeakMap(),
+        paragraphStyleIds: /* @__PURE__ */ new Set(),
+        sectionParts: [],
+        hyperlinks: /* @__PURE__ */ new Map()
       };
       collectImages(allKids, ctx);
-      const headerContents = [...firstSheet?.headers?.default ?? []];
-      const footerContents = [...firstSheet?.footers?.default ?? []];
-      const hasHeader = headerContents.length > 0;
-      const hasFooter = footerContents.length > 0;
-      if (hasHeader) collectImages(headerContents, ctx);
-      if (hasFooter) collectImages(footerContents, ctx);
+      const parts = [];
       const fonts = collectFonts(allKids);
-      if (hasHeader) collectFonts(headerContents, fonts);
-      if (hasFooter) collectFonts(footerContents, fonts);
+      sheets.forEach((sheet, sectionIndex) => {
+        const sectionParts = [];
+        for (const kind of ["header", "footer"]) {
+          const source = kind === "header" ? sheet.headers : sheet.footers;
+          for (const type of ["default", "first", "even"]) {
+            const contents = source?.[type];
+            if (contents === void 0) continue;
+            const part = {
+              kind,
+              type,
+              contents,
+              dims: normalizeDims(sheet.dims),
+              rId: `rId${ctx.nextId++}`,
+              name: `${kind}${parts.filter((p) => p.kind === kind).length + 1}.xml`
+            };
+            parts.push(part);
+            sectionParts.push(part);
+            collectImages(contents, ctx);
+            collectFonts(contents, fonts);
+          }
+        }
+        ctx.sectionParts[sectionIndex] = sectionParts;
+      });
       fonts.add("\uD568\uCD08\uB86C\uBC14\uD0D5");
       fonts.add("\uB9D1\uC740 \uACE0\uB515");
       const hasFontTable = fonts.size > 0;
-      const headerRId = hasHeader ? `rId${ctx.nextId++}` : "";
-      const footerRId = hasFooter ? `rId${ctx.nextId++}` : "";
       const numInfo = collectNumbering(allKids);
-      const kids = allKids;
-      const mainDocumentXml = documentXml(kids, dims, ctx, headerRId, footerRId);
-      const headerXml = hasHeader ? headerFooterXml("hdr", headerContents, ctx, dims) : "";
-      const footerXml = hasFooter ? headerFooterXml("ftr", footerContents, ctx, dims) : "";
+      const mainDocumentXml = documentXml(sheets, ctx);
+      const partXmls = parts.map((part) => {
+        ctx.dims = part.dims;
+        return headerFooterXml(part.kind === "header" ? "hdr" : "ftr", part.contents, ctx, part.dims);
+      });
+      ctx.dims = dims;
       const entries = [
         {
           name: "[Content_Types].xml",
-          data: this.stringToBytes(contentTypes(images, hasHeader, hasFooter, hasFontTable))
+          data: this.stringToBytes(contentTypes(images, parts, hasFontTable))
         },
         { name: "_rels/.rels", data: this.stringToBytes(pkgRels()) },
         {
           name: "word/document.xml",
           data: this.stringToBytes(mainDocumentXml)
         },
-        { name: "word/styles.xml", data: this.stringToBytes(stylesXml()) },
-        { name: "word/settings.xml", data: this.stringToBytes(settingsXml()) },
+        { name: "word/styles.xml", data: this.stringToBytes(stylesXml(ctx.paragraphStyleIds)) },
+        { name: "word/settings.xml", data: this.stringToBytes(settingsXml(doc.meta.evenAndOddHeaders ?? parts.some((part) => part.type === "even"))) },
         {
           name: "word/_rels/document.xml.rels",
           data: this.stringToBytes(
-            docRels(images, headerRId, footerRId, numInfo.hasLists, hasFontTable)
+            docRels(images, parts, numInfo.hasLists, hasFontTable, ctx.hyperlinks)
           )
         },
         { name: "docProps/app.xml", data: this.stringToBytes(appXml()) },
@@ -6464,26 +6946,10 @@ var DocxEncoder = class extends BaseEncoder {
           data: this.stringToBytes(fontTableXml(fonts))
         });
       }
-      if (hasHeader) {
-        entries.push({
-          name: "word/header1.xml",
-          data: this.stringToBytes(headerXml)
-        });
-        entries.push({
-          name: "word/_rels/header1.xml.rels",
-          data: this.stringToBytes(imagePartRels(images))
-        });
-      }
-      if (hasFooter) {
-        entries.push({
-          name: "word/footer1.xml",
-          data: this.stringToBytes(footerXml)
-        });
-        entries.push({
-          name: "word/_rels/footer1.xml.rels",
-          data: this.stringToBytes(imagePartRels(images))
-        });
-      }
+      parts.forEach((part, index) => {
+        entries.push({ name: `word/${part.name}`, data: this.stringToBytes(partXmls[index]) });
+        entries.push({ name: `word/_rels/${part.name}.rels`, data: this.stringToBytes(imagePartRels(images, ctx.hyperlinks)) });
+      });
       for (const img of images) {
         entries.push({ name: `word/media/${img.name}`, data: img.data });
       }
@@ -6598,7 +7064,7 @@ function collectNumbering(kids) {
   }
   return { hasLists: hasBullet || hasNumbered, hasBullet, hasNumbered };
 }
-function contentTypes(images, hasHeader, hasFooter, hasFontTable) {
+function contentTypes(images, parts, hasFontTable) {
   const imgDefaults = /* @__PURE__ */ new Set();
   for (const img of images) imgDefaults.add(img.ext);
   let defaults = `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
@@ -6613,12 +7079,10 @@ function contentTypes(images, hasHeader, hasFooter, hasFontTable) {
   <Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>
   <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
   <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>`;
-  if (hasHeader)
+  for (const part of parts) {
     overrides += `
-  <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>`;
-  if (hasFooter)
-    overrides += `
-  <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>`;
+  <Override PartName="/word/${part.name}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${part.kind}+xml"/>`;
+  }
   if (hasFontTable)
     overrides += `
   <Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/>`;
@@ -6636,7 +7100,7 @@ function pkgRels() {
   <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
 </Relationships>`;
 }
-function docRels(images, headerRId, footerRId, hasLists, hasFontTable) {
+function docRels(images, parts, hasLists, hasFontTable, hyperlinks = /* @__PURE__ */ new Map()) {
   let rels = `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
   <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>`;
   if (hasLists) {
@@ -6651,26 +7115,26 @@ function docRels(images, headerRId, footerRId, hasLists, hasFontTable) {
     rels += `
   <Relationship Id="${img.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${img.name}"/>`;
   }
-  if (headerRId) {
+  for (const part of parts) {
     rels += `
-  <Relationship Id="${headerRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>`;
+  <Relationship Id="${part.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${part.kind}" Target="${part.name}"/>`;
   }
-  if (footerRId) {
-    rels += `
-  <Relationship Id="${footerRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>`;
-  }
+  rels += hyperlinkRelationships(hyperlinks);
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   ${rels}
 </Relationships>`;
 }
-function imagePartRels(images) {
+function hyperlinkRelationships(links) {
+  return [...links].map(([target, id]) => `<Relationship Id="${id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${esc2(target)}" TargetMode="External"/>`).join("");
+}
+function imagePartRels(images, links) {
   const rels = images.map(
     (img) => `<Relationship Id="${img.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${img.name}"/>`
   ).join("\n  ");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  ${rels}
+  ${rels}${hyperlinkRelationships(links)}
 </Relationships>`;
 }
 function appXml() {
@@ -6689,7 +7153,18 @@ function coreXml(meta) {
   <dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified>
 </cp:coreProperties>`;
 }
-function stylesXml() {
+function stylesXml(usedIds) {
+  const known = /* @__PURE__ */ new Set([
+    ...Array.from({ length: 34 }, (_, i) => String(i)),
+    "Normal",
+    "Heading1",
+    "Heading2",
+    "Heading3",
+    "Header",
+    "Footer",
+    "ListParagraph"
+  ]);
+  const extraStyles = [...usedIds].filter((id) => !known.has(id)).sort().map((id) => `<w:style w:type="paragraph" w:customStyle="1" w:styleId="${id}"><w:name w:val="HWP paragraph ${id}"/><w:basedOn w:val="Normal"/></w:style>`).join("\n");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:docDefaults>
@@ -6703,6 +7178,7 @@ function stylesXml() {
       <w:jc w:val="both"/>
     </w:pPr></w:pPrDefault>
   </w:docDefaults>
+  ${extraStyles}
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
   <w:style w:type="paragraph" w:styleId="0"><w:name w:val="\uBC14\uD0D5\uAE00"/><w:basedOn w:val="Normal"/></w:style>
   <w:style w:type="paragraph" w:styleId="1"><w:name w:val="\uBCF8\uBB38"/><w:basedOn w:val="Normal"/></w:style>
@@ -6747,9 +7223,10 @@ function stylesXml() {
   <w:style w:type="table" w:styleId="TableGrid"><w:name w:val="Table Grid"/><w:tblPr><w:tblBorders><w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/><w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/><w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/><w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/><w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/><w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/></w:tblBorders></w:tblPr></w:style>
 </w:styles>`;
 }
-function settingsXml() {
+function settingsXml(evenAndOdd = false) {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  ${evenAndOdd ? "<w:evenAndOddHeaders/>" : ""}
   <w:zoom w:percent="100"/>
   <w:bordersDoNotSurroundHeader/>
   <w:bordersDoNotSurroundFooter/>
@@ -6806,42 +7283,88 @@ function headerFooterXml(type, contents, ctx, dims) {
 ${body}
 </${tag}>`;
 }
-function documentXml(kids, dims, ctx, headerRId, footerRId) {
-  const body = kids.map((k) => encodeContent(k, ctx, dims)).join("\n");
-  let sectRefs = "";
-  if (headerRId)
-    sectRefs += `
-      <w:headerReference w:type="default" r:id="${headerRId}"/>`;
-  if (footerRId)
-    sectRefs += `
-      <w:footerReference w:type="default" r:id="${footerRId}"/>`;
+function documentXml(sheets, ctx) {
+  const bodyParts = [];
+  for (let sectionIndex = 0; sectionIndex < sheets.length; sectionIndex++) {
+    const sheet = sheets[sectionIndex];
+    const dims = normalizeDims(sheet?.dims ?? A4);
+    ctx.dims = dims;
+    const kids = sheet?.kids ?? [];
+    const isFinalSection = sectionIndex === sheets.length - 1;
+    if (isFinalSection) {
+      bodyParts.push(...kids.map((kid) => encodeContent(kid, ctx, dims)));
+      continue;
+    }
+    const boundarySectPr = sectionPropertiesXml(
+      dims,
+      ctx.sectionParts[sectionIndex] ?? [],
+      sheet.sectionType ?? "nextPage",
+      sheet.differentFirstPage
+    );
+    const lastKid = kids[kids.length - 1];
+    if (lastKid?.tag === "para") {
+      for (let kidIndex = 0; kidIndex < kids.length - 1; kidIndex++) {
+        bodyParts.push(encodeContent(kids[kidIndex], ctx, dims));
+      }
+      bodyParts.push(encodeParaInner(lastKid, ctx, void 0, boundarySectPr));
+    } else {
+      bodyParts.push(...kids.map((kid) => encodeContent(kid, ctx, dims)));
+      bodyParts.push(
+        `    <w:p><w:pPr>${boundarySectPr}</w:pPr></w:p>`
+      );
+    }
+  }
+  const finalSheet = sheets[sheets.length - 1];
+  const finalDims = normalizeDims(finalSheet?.dims ?? A4);
+  const finalSectPr = sectionPropertiesXml(
+    finalDims,
+    ctx.sectionParts[sheets.length - 1] ?? [],
+    finalSheet?.sectionType,
+    finalSheet?.differentFirstPage
+  );
+  const body = bodyParts.join("\n");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
   <w:body>
 ${body}
-    <w:sectPr>${sectRefs}
-      <w:pgSz w:w="${Metric.ptToDxa(dims.wPt)}" w:h="${Metric.ptToDxa(dims.hPt)}"${dims.orient === "landscape" ? ' w:orient="landscape"' : ""}/>
-      <w:pgMar w:top="${Metric.ptToDxa(dims.mt)}" w:right="${Metric.ptToDxa(dims.mr)}" w:bottom="${Metric.ptToDxa(dims.mb)}" w:left="${Metric.ptToDxa(dims.ml)}" w:header="${Metric.ptToDxa(dims.headerPt ?? 42.52)}" w:footer="${Metric.ptToDxa(dims.footerPt ?? 42.52)}" w:gutter="0"/>
-    </w:sectPr>
+    ${finalSectPr}
   </w:body>
 </w:document>`;
+}
+function sectionPropertiesXml(dims, references, breakType, differentFirstPage) {
+  const parts = [];
+  for (const ref of references) {
+    parts.push(`<w:${ref.kind}Reference w:type="${ref.type}" r:id="${ref.rId}"/>`);
+  }
+  if (breakType) parts.push(`<w:type w:val="${breakType}"/>`);
+  parts.push(
+    `<w:pgSz w:w="${Metric.ptToDxa(dims.wPt)}" w:h="${Metric.ptToDxa(dims.hPt)}"${dims.orient === "landscape" ? ' w:orient="landscape"' : ""}/>`
+  );
+  parts.push(
+    `<w:pgMar w:top="${Metric.ptToDxa(dims.mt)}" w:right="${Metric.ptToDxa(dims.mr)}" w:bottom="${Metric.ptToDxa(dims.mb)}" w:left="${Metric.ptToDxa(dims.ml)}" w:header="${Metric.ptToDxa(dims.headerPt ?? 42.52)}" w:footer="${Metric.ptToDxa(dims.footerPt ?? 42.52)}" w:gutter="0"/>`
+  );
+  if (differentFirstPage ?? references.some((ref) => ref.type === "first")) parts.push("<w:titlePg/>");
+  return `<w:sectPr>${parts.join("")}</w:sectPr>`;
 }
 function encodeContent(node, ctx, dims) {
   return node.tag === "grid" ? encodeGrid(node, ctx, dims) : encodeParaInner(node, ctx);
 }
-function encodeParaInner(para, ctx, maxWidthPt) {
+function encodeParaInner(para, ctx, maxWidthPt, sectionPrXml = "") {
   const align = para.props.align;
   let headStyle = "";
   if (para.props.hwpStyleId !== void 0) {
+    ctx.paragraphStyleIds.add(String(para.props.hwpStyleId));
     headStyle = `<w:pStyle w:val="${para.props.hwpStyleId}"/>`;
   } else if (para.props.heading) {
+    ctx.paragraphStyleIds.add(`Heading${para.props.heading}`);
     headStyle = `<w:pStyle w:val="Heading${para.props.heading}"/>`;
   }
   let numPr = "";
   if (para.props.listOrd !== void 0) {
     const numId = para.props.listOrd ? 2 : 1;
     const ilvl = para.props.listLv ?? 0;
-    numPr = `<w:pStyle w:val="ListParagraph"/><w:numPr><w:ilvl w:val="${ilvl}"/><w:numId w:val="${numId}"/></w:numPr>`;
+    if (!headStyle) headStyle = `<w:pStyle w:val="ListParagraph"/>`;
+    numPr = `<w:numPr><w:ilvl w:val="${ilvl}"/><w:numId w:val="${numId}"/></w:numPr>`;
   }
   let spacingXml = "";
   const { spaceBefore, spaceAfter, lineHeight, lineHeightFixed, lineHeightRule } = para.props;
@@ -6864,34 +7387,42 @@ function encodeParaInner(para, ctx, maxWidthPt) {
     spacingXml = `<w:spacing ${parts.join(" ")}/>`;
   }
   let indentXml = "";
-  let leftDxa = Math.round(Metric.ptToDxa(para.props.indentPt ?? 0));
-  const rightDxa = Math.round(Metric.ptToDxa(para.props.indentRightPt ?? 0));
-  const firstPt = para.props.firstLineIndentPt ?? 0;
   const indParts = [];
-  if (rightDxa > 0) indParts.push(`w:right="${rightDxa}"`);
-  if (firstPt > 0)
-    indParts.push(`w:firstLine="${Math.round(Metric.ptToDxa(firstPt))}"`);
-  if (firstPt < 0) {
-    const hangingDxa = Math.round(Metric.ptToDxa(-firstPt));
-    if (hangingDxa > 0) {
-      const baseLeftDxa = Math.max(0, leftDxa);
-      leftDxa = baseLeftDxa + hangingDxa;
-      if (baseLeftDxa <= 0 || hangingDxa > baseLeftDxa) {
-        ctx.warns.push(
-          `[DocxEncoder] w:hanging=${hangingDxa} exceeds w:left=${baseLeftDxa}`
-        );
-      }
-      indParts.push(`w:hanging="${hangingDxa}"`);
-    }
+  if (para.props.indentPt !== void 0 || (para.props.firstLineIndentPt ?? 0) < 0)
+    indParts.push(`w:left="${Math.round(Metric.ptToDxa(para.props.indentPt ?? 0))}"`);
+  if (para.props.indentRightPt !== void 0)
+    indParts.push(`w:right="${Math.round(Metric.ptToDxa(para.props.indentRightPt))}"`);
+  if (para.props.firstLineIndentPt !== void 0) {
+    const first = Math.round(Metric.ptToDxa(para.props.firstLineIndentPt));
+    indParts.push(first < 0 ? `w:hanging="${-first}"` : `w:firstLine="${first}"`);
   }
-  if (leftDxa > 0) indParts.unshift(`w:left="${leftDxa}"`);
   if (indParts.length > 0) indentXml = `<w:ind ${indParts.join(" ")}/>`;
   const cjkLineBreakXml = "<w:kinsoku/><w:wordWrap/><w:overflowPunct/>";
+  const paginationXml = [
+    ["pageBreakBefore", "pageBreakBefore"],
+    ["keepWithNext", "keepNext"],
+    ["keepLines", "keepLines"],
+    ["widowControl", "widowControl"]
+  ].filter(([key]) => para.props[key] !== void 0).map(([key, tag]) => para.props[key] ? `<w:${tag}/>` : `<w:${tag} w:val="0"/>`).join("");
   const omitEmptyLeftAlign = align === "left" && paraTextContent(para) === "";
   const jcXml = align && !omitEmptyLeftAlign ? `<w:jc w:val="${docxJcValue(align)}"/>` : "";
+  const blankSpan = paraTextContent(para) === "" && !paraHasNonTextContent(para) ? para.kids.find((kid) => kid.tag === "span") : void 0;
+  const markProps = blankSpan ? encodeTextProperties(blankSpan.props) : [];
+  const markXml = markProps.length ? `<w:rPr>${markProps.join("")}</w:rPr>` : "";
   const runs = para.kids.map((k) => {
     if (k.tag === "span") return encodeRun(k, ctx);
     if (k.tag === "img") return encodeImage2(k, ctx, maxWidthPt);
+    if (k.tag === "link") {
+      const content = k.kids.map((span) => encodeRun(span, ctx)).join("");
+      if (!k.href) return content;
+      if (k.href.startsWith("#")) return `<w:hyperlink w:anchor="${esc2(k.href.slice(1))}">${content}</w:hyperlink>`;
+      let id = ctx.hyperlinks.get(k.href);
+      if (!id) {
+        id = `rId${ctx.nextId++}`;
+        ctx.hyperlinks.set(k.href, id);
+      }
+      return `<w:hyperlink r:id="${id}">${content}</w:hyperlink>`;
+    }
     if (k.tag === "pagenum") {
       const instr = k.format === "total" ? " NUMPAGES " : " PAGE ";
       return `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>${instr}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`;
@@ -6899,7 +7430,7 @@ function encodeParaInner(para, ctx, maxWidthPt) {
     return "";
   }).join("");
   return `    <w:p>
-      <w:pPr>${headStyle}${numPr}${spacingXml}${indentXml}${cjkLineBreakXml}${jcXml}</w:pPr>
+      <w:pPr>${headStyle}${paginationXml}${numPr}${spacingXml}${indentXml}${cjkLineBreakXml}${jcXml}${markXml}${sectionPrXml}</w:pPr>
       ${runs}
     </w:p>`;
 }
@@ -6919,11 +7450,25 @@ function paraTextContent(para) {
   collect(para.kids);
   return text;
 }
+function paraHasNonTextContent(para) {
+  let found = false;
+  const visit = (kids) => {
+    for (const kid of kids ?? []) {
+      if (kid.tag === "img" || kid.tag === "br" || kid.tag === "pb" || kid.tag === "pagenum") {
+        found = true;
+        return;
+      }
+      if (kid.kids) visit(kid.kids);
+      if (found) return;
+    }
+  };
+  visit(para.kids);
+  return found;
+}
 function docxLineHeightRatio(lineHeight) {
   return Math.max(0.01, lineHeight);
 }
-function encodeRun(span, _ctx) {
-  const p = span.props;
+function encodeTextProperties(p) {
   const rPr = [];
   if (p.b) rPr.push("<w:b/>");
   if (p.i) rPr.push("<w:i/>");
@@ -6941,14 +7486,23 @@ function encodeRun(span, _ctx) {
       `<w:rFonts w:ascii="${esc2(p.font)}" w:hAnsi="${esc2(p.font)}" w:eastAsia="${esc2(p.font)}" w:hint="eastAsia"/>`
     );
   if (p.bg) rPr.push(`<w:shd w:val="clear" w:color="auto" w:fill="${p.bg}"/>`);
+  return rPr;
+}
+function encodeRun(span, _ctx) {
+  const rPr = encodeTextProperties(span.props);
   const parts = [];
   for (const kid of span.kids) {
     if (kid.tag === "txt") {
       const content = kid.content.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "");
-      if (content || rPr.length > 0) {
-        parts.push(
-          `<w:r><w:rPr>${rPr.join("")}</w:rPr><w:t xml:space="preserve">${esc2(content)}</w:t></w:r>`
-        );
+      const lines = TextKit.splitLines(content);
+      const textRun = (t) => `<w:r><w:rPr>${rPr.join("")}</w:rPr><w:t xml:space="preserve">${esc2(t).replace(/\t/g, '</w:t><w:tab/><w:t xml:space="preserve">')}</w:t></w:r>`;
+      if (content) {
+        for (let li = 0; li < lines.length; li++) {
+          if (lines[li] !== "") parts.push(textRun(lines[li]));
+          if (li < lines.length - 1) parts.push(`<w:r><w:br/></w:r>`);
+        }
+      } else if (rPr.length > 0) {
+        parts.push(textRun(""));
       }
     } else if (kid.tag === "pagenum") {
       const instr = kid.format === "total" ? " NUMPAGES " : " PAGE ";
@@ -7364,62 +7918,76 @@ function encodePara(para, warns, includeImages) {
   const text = para.kids.map((k) => {
     if (k.tag === "span") return encodeSpan(k, warns);
     if (k.tag === "img") return encodeImage3(k, includeImages);
+    if (k.tag === "link") {
+      const label = k.kids.map((span) => encodeSpan(span, warns)).join("");
+      return `[${label}](${k.href})`;
+    }
+    if (k.tag === "pagenum") {
+      warnOnce(warns, "[SHIELD] MD: \uD398\uC774\uC9C0 \uBC88\uD638 \uD45C\uD604 \uBD88\uAC00 \u2014 \uC790\uB9AC\uD45C\uC2DC\uC790\uB85C \uB300\uCCB4\uB428");
+      return "[\uD398\uC774\uC9C0 \uBC88\uD638]";
+    }
     return "";
   }).join("");
   if (para.props.heading) return `${"#".repeat(para.props.heading)} ${text}`;
   if (para.props.listOrd !== void 0) {
     const indent = "  ".repeat(para.props.listLv ?? 0);
-    return `${indent}${para.props.listOrd ? "1." : "-"} ${text}`;
+    const sourceMark = para.props.listMark;
+    const marker = para.props.listOrd ? sourceMark && /^\d+\.$/.test(sourceMark) ? sourceMark : "1." : sourceMark && /^[-*+]$/.test(sourceMark) ? sourceMark : "-";
+    return `${indent}${marker} ${text}`;
   }
   if (para.props.align && para.props.align !== "left" && para.props.align !== "justify") {
-    return `<div align="${para.props.align}">${text}</div>`;
+    warnOnce(warns, "[SHIELD] MD: \uBB38\uB2E8 \uC815\uB82C \uD45C\uD604 \uBD88\uAC00 \u2014 \uC815\uB82C \uC815\uBCF4\uAC00 \uC190\uC2E4\uB428");
   }
   return text;
+}
+function warnOnce(warns, warning) {
+  if (!warns.includes(warning)) warns.push(warning);
+}
+function isCodeFont(font) {
+  return !!font && /courier|consolas|monaco|menlo|monospace/i.test(font);
+}
+function wrapInlineCode(text) {
+  const longestRun = Math.max(
+    0,
+    ...(text.match(/`+/g) ?? []).map((run) => run.length)
+  );
+  const fence = "`".repeat(longestRun + 1);
+  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+  return `${fence}${pad}${text}${pad}${fence}`;
 }
 function encodeSpan(span, warns) {
   let hasPageNum = false;
   const textParts = [];
   for (const kid of span.kids) {
     if (kid.tag === "txt") textParts.push(kid.content);
-    else if (kid.tag === "pagenum") {
+    else if (kid.tag === "br") textParts.push("  \n");
+    else if (kid.tag === "pb") {
+      warnOnce(warns, "[SHIELD] MD: \uCABD \uB098\uB204\uAE30 \uD45C\uD604 \uBD88\uAC00 \u2014 \uC190\uC2E4\uB428");
+    } else if (kid.tag === "pagenum") {
       hasPageNum = true;
-      warns.push("[SHIELD] MD: \uD398\uC774\uC9C0 \uBC88\uD638 \uD45C\uD604 \uBD88\uAC00 \u2014 \uC190\uC2E4\uB428");
+      warnOnce(warns, "[SHIELD] MD: \uD398\uC774\uC9C0 \uBC88\uD638 \uD45C\uD604 \uBD88\uAC00 \u2014 \uC790\uB9AC\uD45C\uC2DC\uC790\uB85C \uB300\uCCB4\uB428");
     }
   }
   let r = textParts.join("");
   if (hasPageNum && r === "") r = "[\uD398\uC774\uC9C0 \uBC88\uD638]";
-  const cssStyles = [];
-  if (span.props.font) cssStyles.push(`font-family: ${span.props.font}`);
-  if (span.props.pt) cssStyles.push(`font-size: ${span.props.pt}pt`);
-  if (span.props.color) cssStyles.push(`color: #${span.props.color}`);
-  if (span.props.bg) cssStyles.push(`background-color: #${span.props.bg}`);
-  const hasHtmlStyle = cssStyles.length > 0;
-  if (hasHtmlStyle) {
-    if (span.props.b) cssStyles.push("font-weight: bold");
-    if (span.props.i) cssStyles.push("font-style: italic");
-    if (span.props.s) cssStyles.push("text-decoration: line-through");
-    if (span.props.u) {
-      const existing = cssStyles.find((s) => s.startsWith("text-decoration:"));
-      if (existing) {
-        const idx = cssStyles.indexOf(existing);
-        cssStyles[idx] = existing.replace("line-through", "underline line-through");
-        if (!existing.includes("line-through")) cssStyles[idx] = existing + " underline";
-      } else {
-        cssStyles.push("text-decoration: underline");
-      }
-    }
-    const styleAttr = cssStyles.join("; ");
-    if (span.props.sup) return `<sup style="${styleAttr}">${r}</sup>`;
-    if (span.props.sub) return `<sub style="${styleAttr}">${r}</sub>`;
-    return `<span style="${styleAttr}">${r}</span>`;
+  const code = isCodeFont(span.props.font);
+  if (span.props.font && !code) {
+    warnOnce(warns, "[SHIELD] MD: \uAE00\uAF34\uBA85 \uD45C\uD604 \uBD88\uAC00 \u2014 \uAE00\uAF34 \uC815\uBCF4\uAC00 \uC190\uC2E4\uB428");
   }
+  if (span.props.pt !== void 0) {
+    warnOnce(warns, "[SHIELD] MD: \uAE00\uC790 \uD06C\uAE30 \uD45C\uD604 \uBD88\uAC00 \u2014 \uD06C\uAE30 \uC815\uBCF4\uAC00 \uC190\uC2E4\uB428");
+  }
+  if (span.props.color || span.props.bg) {
+    warnOnce(warns, "[SHIELD] MD: \uAE00\uC790\uC0C9/\uBC30\uACBD\uC0C9 \uD45C\uD604 \uBD88\uAC00 \u2014 \uC0C9\uC0C1 \uC815\uBCF4\uAC00 \uC190\uC2E4\uB428");
+  }
+  if (span.props.u || span.props.sup || span.props.sub) {
+    warnOnce(warns, "[SHIELD] MD: \uBC11\uC904/\uC704\uCCA8\uC790/\uC544\uB798\uCCA8\uC790 \uD45C\uD604 \uBD88\uAC00 \u2014 \uD574\uB2F9 \uC11C\uC2DD\uC774 \uC190\uC2E4\uB428");
+  }
+  if (code) r = wrapInlineCode(r);
   if (span.props.b && span.props.i) r = `***${r}***`;
   else if (span.props.b) r = `**${r}**`;
   else if (span.props.i) r = `*${r}*`;
   if (span.props.s) r = `~~${r}~~`;
-  if (span.props.u) r = `<u>${r}</u>`;
-  if (span.props.sup) r = `<sup>${r}</sup>`;
-  if (span.props.sub) r = `<sub>${r}</sub>`;
   return r;
 }
 function encodeImage3(img, includeImages) {
@@ -7438,6 +8006,59 @@ function strokeToCss(s) {
 }
 function encodeGrid2(grid, warns, includeImages) {
   if (grid.kids.length === 0) return "";
+  if (canEncodePipeTable(grid)) {
+    const losesLayout = Object.keys(grid.props).length > 0 || grid.kids.some(
+      (row) => row.heightPt !== void 0 || row.kids.some((cell) => Object.keys(cell.props).length > 0)
+    );
+    if (losesLayout) {
+      warnOnce(
+        warns,
+        "[SHIELD] MD: \uD30C\uC774\uD504 \uD45C\uAC00 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uB294 \uB108\uBE44/\uD14C\uB450\uB9AC/\uBC30\uACBD/\uC815\uB82C \uC815\uBCF4\uAC00 \uC190\uC2E4\uB428"
+      );
+    }
+    return encodePipeTable(grid, warns, includeImages);
+  }
+  warnOnce(
+    warns,
+    "[SHIELD] MD: \uBCD1\uD569 \uC140 \uB610\uB294 \uC140 \uB0B4\uBD80 \uAC1C\uD589/\uBE14\uB85D \uC694\uC18C \uB54C\uBB38\uC5D0 HTML \uD45C\uB85C \uD3F4\uBC31\uD568"
+  );
+  return encodeHtmlTable(grid, warns, includeImages);
+}
+function paraHasLineBreak(para) {
+  return para.kids.some((kid) => {
+    if (kid.tag === "grid") return true;
+    if (kid.tag === "span") {
+      return kid.kids.some(
+        (child) => child.tag === "br" || child.tag === "pb" || child.tag === "txt" && /[\r\n]/.test(child.content)
+      );
+    }
+    if (kid.tag === "link") {
+      return kid.kids.some((span) => span.kids.some(
+        (child) => child.tag === "br" || child.tag === "pb" || child.tag === "txt" && /[\r\n]/.test(child.content)
+      ));
+    }
+    return false;
+  });
+}
+function canEncodePipeTable(grid) {
+  const columns = grid.kids[0]?.kids.length ?? 0;
+  if (columns === 0) return false;
+  return grid.kids.every(
+    (row) => row.kids.length === columns && row.kids.every(
+      (cell) => cell.cs === 1 && cell.rs === 1 && cell.kids.length === 1 && cell.kids[0].tag === "para" && cell.kids[0].props.heading === void 0 && cell.kids[0].props.listOrd === void 0 && !paraHasLineBreak(cell.kids[0])
+    )
+  );
+}
+function encodePipeTable(grid, warns, includeImages) {
+  const rows = grid.kids.map((row) => row.kids.map((cell) => {
+    const para = cell.kids[0];
+    return encodePara(para, warns, includeImages).replace(/\|/g, "\\|");
+  }));
+  const renderRow = (cells) => `| ${cells.join(" | ")} |`;
+  const separator = renderRow(rows[0].map(() => "---"));
+  return [renderRow(rows[0]), separator, ...rows.slice(1).map(renderRow)].join("\n");
+}
+function encodeHtmlTable(grid, warns, includeImages) {
   const rowCount = grid.kids.length;
   const occupancy = Array.from({ length: rowCount }, () => /* @__PURE__ */ new Set());
   let colCount = 0;
@@ -7682,36 +8303,433 @@ registry.registerEncoder(new HtmlEncoder());
 
 // src/encoders/hwp/HwpEncoder.ts
 var import_pako3 = __toESM(require("pako"));
+
+// src/encoders/hwp/verify.ts
+var HWPTAG_BEGIN2 = 16;
+var TAG_ID_MAPPINGS = HWPTAG_BEGIN2 + 1;
+var TAG_BIN_DATA = HWPTAG_BEGIN2 + 2;
+var TAG_FACE_NAME2 = HWPTAG_BEGIN2 + 3;
+var TAG_BORDER_FILL2 = HWPTAG_BEGIN2 + 4;
+var TAG_CHAR_SHAPE2 = HWPTAG_BEGIN2 + 5;
+var TAG_TAB_DEF = HWPTAG_BEGIN2 + 6;
+var TAG_NUMBERING2 = HWPTAG_BEGIN2 + 7;
+var TAG_BULLET2 = HWPTAG_BEGIN2 + 8;
+var TAG_PARA_SHAPE2 = HWPTAG_BEGIN2 + 9;
+var TAG_STYLE2 = HWPTAG_BEGIN2 + 10;
+var TAG_MEMO_SHAPE = HWPTAG_BEGIN2 + 76;
+var TAG_TRACK_CHANGE = HWPTAG_BEGIN2 + 80;
+var TAG_TRACK_CHANGE_AUTHOR = HWPTAG_BEGIN2 + 81;
+var TAG_PARA_HEADER2 = HWPTAG_BEGIN2 + 50;
+var TAG_PARA_TEXT2 = HWPTAG_BEGIN2 + 51;
+var TAG_PARA_CHAR_SHAPE2 = HWPTAG_BEGIN2 + 52;
+var TAG_PARA_LINE_SEG = HWPTAG_BEGIN2 + 53;
+var TAG_LIST_HEADER2 = HWPTAG_BEGIN2 + 56;
+var TAG_PAGE_BORDER_FILL = HWPTAG_BEGIN2 + 59;
+var TAG_TABLE = HWPTAG_BEGIN2 + 61;
+var ID_MAPPING_COUNT = 18;
+var PARA_HEADER_SIZE = 24;
+var PARA_SHAPE_BORDER_FILL_OFFSET = 32;
+var CHAR_SHAPE_BORDER_FILL_OFFSET = 68;
+var CHAR_SHAPE_RANGE_SIZE = 8;
+var LINE_SEG_SIZE = 36;
+var CELL_LIST_HEADER_SIZE = 47;
+var BULLET_RECORD_MIN_SIZE = 23;
+function readU16(data, offset) {
+  return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint16(
+    offset,
+    true
+  );
+}
+function readU32(data, offset) {
+  return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(
+    offset,
+    true
+  );
+}
+function readI32(data, offset) {
+  return new DataView(data.buffer, data.byteOffset, data.byteLength).getInt32(
+    offset,
+    true
+  );
+}
+function parseHwpRecords(data) {
+  const records = [];
+  let offset = 0;
+  while (offset < data.length) {
+    const recordOffset = offset;
+    if (data.length - offset < 4) {
+      throw new Error(
+        `offset ${offset}: ${data.length - offset} trailing record byte(s)`
+      );
+    }
+    const header = readU32(data, offset);
+    const tag = header & 1023;
+    const level = header >>> 10 & 1023;
+    let size = header >>> 20 & 4095;
+    offset += 4;
+    if (size === 4095) {
+      if (data.length - offset < 4) {
+        throw new Error(`offset ${recordOffset}: missing extended record size`);
+      }
+      size = readU32(data, offset);
+      offset += 4;
+    }
+    if (size > data.length - offset) {
+      throw new Error(
+        `offset ${recordOffset}: record size ${size} exceeds ${data.length - offset} remaining byte(s)`
+      );
+    }
+    records.push({
+      tag,
+      level,
+      offset: recordOffset,
+      data: data.subarray(offset, offset + size)
+    });
+    offset += size;
+  }
+  return records;
+}
+function countTag(records, tag) {
+  return records.reduce(
+    (count, record) => count + (record.tag === tag ? 1 : 0),
+    0
+  );
+}
+function verifyBorderFillId(borderFillId, borderFillCount, label, errors) {
+  if (borderFillId < 1 || borderFillId > borderFillCount) {
+    errors.push(
+      `${label} references borderFillId ${borderFillId}, but valid BorderFill IDs are 1..${borderFillCount}`
+    );
+  }
+}
+function verifyIdMappings(records, errors) {
+  const mappings = records.filter((record) => record.tag === TAG_ID_MAPPINGS);
+  if (mappings.length !== 1) {
+    errors.push(`ID_MAPPINGS record count is ${mappings.length}, expected 1`);
+    return;
+  }
+  if (mappings[0].data.length < ID_MAPPING_COUNT * 4) {
+    errors.push(
+      `ID_MAPPINGS payload is ${mappings[0].data.length} bytes, expected at least ${ID_MAPPING_COUNT * 4}`
+    );
+    return;
+  }
+  const values = Array.from(
+    { length: ID_MAPPING_COUNT },
+    (_, index) => readI32(mappings[0].data, index * 4)
+  );
+  for (let index = 0; index < values.length; index++) {
+    if (values[index] < 0) {
+      errors.push(`ID_MAPPINGS[${index}] is negative (${values[index]})`);
+    }
+  }
+  const faceNameDeclared = values.slice(1, 8).reduce((sum, value) => sum + value, 0);
+  const faceNameActual = countTag(records, TAG_FACE_NAME2);
+  if (faceNameDeclared !== faceNameActual) {
+    errors.push(
+      `ID_MAPPINGS FACE_NAME total is ${faceNameDeclared}, actual record count is ${faceNameActual}`
+    );
+  }
+  const mappingIndexToTag = [
+    [0, TAG_BIN_DATA],
+    [8, TAG_BORDER_FILL2],
+    [9, TAG_CHAR_SHAPE2],
+    [10, TAG_TAB_DEF],
+    [11, TAG_NUMBERING2],
+    [12, TAG_BULLET2],
+    [13, TAG_PARA_SHAPE2],
+    [14, TAG_STYLE2],
+    [15, TAG_MEMO_SHAPE],
+    [16, TAG_TRACK_CHANGE],
+    [17, TAG_TRACK_CHANGE_AUTHOR]
+  ];
+  for (const [index, tag] of mappingIndexToTag) {
+    const actual = countTag(records, tag);
+    if (values[index] !== actual) {
+      errors.push(
+        `ID_MAPPINGS[${index}] is ${values[index]}, tag ${tag} record count is ${actual}`
+      );
+    }
+  }
+}
+function directChildren(records, parentIndex) {
+  const parentLevel = records[parentIndex].level;
+  const children = [];
+  for (let index = parentIndex + 1; index < records.length; index++) {
+    const record = records[index];
+    if (record.level <= parentLevel) break;
+    if (record.level === parentLevel + 1) children.push(record);
+  }
+  return children;
+}
+function verifyHwpRecordStreams(docInfoRaw, sectionRaw) {
+  const errors = [];
+  let docInfoRecords = [];
+  let bodyRecords = [];
+  try {
+    docInfoRecords = parseHwpRecords(docInfoRaw);
+  } catch (error) {
+    errors.push(
+      `DocInfo record framing: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  try {
+    bodyRecords = parseHwpRecords(sectionRaw);
+  } catch (error) {
+    errors.push(
+      `Section0 record framing: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  const charShapeCount = countTag(docInfoRecords, TAG_CHAR_SHAPE2);
+  const pendingParagraphs = /* @__PURE__ */ new Map();
+  const checkListEnd = (record, isLast) => {
+    if (record.data.length >= 4 && Boolean(readU32(record.data, 0) & 2147483648) !== isLast) {
+      errors.push(`PARA_HEADER at offset ${record.offset} has an incorrect paragraph-list end bit`);
+    }
+  };
+  for (const record of bodyRecords) {
+    for (const [level, previous] of pendingParagraphs) {
+      if (level > record.level || level === record.level && record.tag !== TAG_PARA_HEADER2) {
+        checkListEnd(previous, true);
+        pendingParagraphs.delete(level);
+      }
+    }
+    if (record.tag === TAG_PARA_HEADER2) {
+      const previous = pendingParagraphs.get(record.level);
+      if (previous) checkListEnd(previous, false);
+      pendingParagraphs.set(record.level, record);
+    }
+  }
+  for (const record of pendingParagraphs.values()) checkListEnd(record, true);
+  const binDataCount = countTag(docInfoRecords, TAG_BIN_DATA);
+  const paraShapeCount = countTag(docInfoRecords, TAG_PARA_SHAPE2);
+  const styleCount = countTag(docInfoRecords, TAG_STYLE2);
+  const borderFillCount = countTag(docInfoRecords, TAG_BORDER_FILL2);
+  let maxCharShapeId = -1;
+  let paragraphCount = 0;
+  if (docInfoRecords.length > 0) verifyIdMappings(docInfoRecords, errors);
+  for (const record of docInfoRecords) {
+    if (record.tag === TAG_PARA_SHAPE2) {
+      if (record.data.length < PARA_SHAPE_BORDER_FILL_OFFSET + 2) {
+        errors.push(
+          `PARA_SHAPE at offset ${record.offset} is ${record.data.length} bytes, expected at least ${PARA_SHAPE_BORDER_FILL_OFFSET + 2}`
+        );
+        continue;
+      }
+      verifyBorderFillId(
+        readU16(record.data, PARA_SHAPE_BORDER_FILL_OFFSET),
+        borderFillCount,
+        `PARA_SHAPE at offset ${record.offset}`,
+        errors
+      );
+    } else if (record.tag === TAG_CHAR_SHAPE2) {
+      if (record.data.length < CHAR_SHAPE_BORDER_FILL_OFFSET + 2) {
+        errors.push(
+          `CHAR_SHAPE at offset ${record.offset} is ${record.data.length} bytes, expected at least ${CHAR_SHAPE_BORDER_FILL_OFFSET + 2}`
+        );
+        continue;
+      }
+      verifyBorderFillId(
+        readU16(record.data, CHAR_SHAPE_BORDER_FILL_OFFSET),
+        borderFillCount,
+        `CHAR_SHAPE at offset ${record.offset}`,
+        errors
+      );
+    } else if (record.tag === TAG_BULLET2) {
+      if (record.data.length < BULLET_RECORD_MIN_SIZE) {
+        errors.push(
+          `BULLET at offset ${record.offset} is ${record.data.length} bytes, expected at least ${BULLET_RECORD_MIN_SIZE}`
+        );
+        continue;
+      }
+      const charShapeId = readU32(record.data, 8);
+      if (charShapeId !== 4294967295 && charShapeId >= charShapeCount) {
+        errors.push(
+          `BULLET at offset ${record.offset} references charShapeId ${charShapeId}, but only ${charShapeCount} CHAR_SHAPE record(s) exist`
+        );
+      }
+      const imageBinDataId = readU16(record.data, 21);
+      if (imageBinDataId > binDataCount) {
+        errors.push(
+          `BULLET at offset ${record.offset} references BinData ID ${imageBinDataId}, but only ${binDataCount} BIN_DATA record(s) exist`
+        );
+      }
+    }
+  }
+  for (let index = 0; index < bodyRecords.length; index++) {
+    const header = bodyRecords[index];
+    if (header.tag !== TAG_PARA_HEADER2) continue;
+    paragraphCount++;
+    if (header.data.length < PARA_HEADER_SIZE) {
+      errors.push(
+        `PARA_HEADER at offset ${header.offset} is ${header.data.length} bytes, expected at least ${PARA_HEADER_SIZE}`
+      );
+      continue;
+    }
+    const rawCharCount = readU32(header.data, 0);
+    const nChars = rawCharCount & 2147483647;
+    const paraShapeId = readU16(header.data, 8);
+    const styleId = header.data[10];
+    const csCount = readU16(header.data, 12);
+    const lineAlignCount = readU16(header.data, 16);
+    const label = `PARA_HEADER at offset ${header.offset}`;
+    if (paraShapeId >= paraShapeCount) {
+      errors.push(
+        `${label} references paraShapeId ${paraShapeId}, but only ${paraShapeCount} PARA_SHAPE record(s) exist`
+      );
+    }
+    if (styleId >= styleCount) {
+      errors.push(
+        `${label} references styleId ${styleId}, but only ${styleCount} STYLE record(s) exist`
+      );
+    }
+    const children = directChildren(bodyRecords, index);
+    const paraTexts = children.filter((record) => record.tag === TAG_PARA_TEXT2);
+    const charShapeRanges = children.filter(
+      (record) => record.tag === TAG_PARA_CHAR_SHAPE2
+    );
+    const lineSegs = children.filter(
+      (record) => record.tag === TAG_PARA_LINE_SEG
+    );
+    let textBytes = 0;
+    for (const record of paraTexts) {
+      if (record.data.length % 2 !== 0) {
+        errors.push(
+          `${label} has an odd-sized PARA_TEXT payload (${record.data.length} bytes)`
+        );
+      }
+      textBytes += record.data.length;
+    }
+    if (nChars !== textBytes / 2) {
+      errors.push(
+        `${label} declares nChars ${nChars}, but direct PARA_TEXT payloads contain ${textBytes / 2} UTF-16 code unit(s)`
+      );
+    }
+    let actualCsCount = 0;
+    for (const record of charShapeRanges) {
+      if (record.data.length % CHAR_SHAPE_RANGE_SIZE !== 0) {
+        errors.push(
+          `${label} has a PARA_CHAR_SHAPE payload of ${record.data.length} bytes, not a multiple of ${CHAR_SHAPE_RANGE_SIZE}`
+        );
+        continue;
+      }
+      actualCsCount += record.data.length / CHAR_SHAPE_RANGE_SIZE;
+      for (let offset = 0; offset < record.data.length; offset += CHAR_SHAPE_RANGE_SIZE) {
+        const charShapeId = readU32(record.data, offset + 4);
+        maxCharShapeId = Math.max(maxCharShapeId, charShapeId);
+        if (charShapeId >= charShapeCount) {
+          errors.push(
+            `${label} references charShapeId ${charShapeId}, but only ${charShapeCount} CHAR_SHAPE record(s) exist`
+          );
+        }
+      }
+    }
+    if (csCount !== actualCsCount) {
+      errors.push(
+        `${label} declares csCount ${csCount}, but has ${actualCsCount} PARA_CHAR_SHAPE range(s)`
+      );
+    }
+    let actualLineAlignCount = 0;
+    for (const record of lineSegs) {
+      if (record.data.length % LINE_SEG_SIZE !== 0) {
+        errors.push(
+          `${label} has a PARA_LINE_SEG payload of ${record.data.length} bytes, not a multiple of ${LINE_SEG_SIZE}`
+        );
+        continue;
+      }
+      actualLineAlignCount += record.data.length / LINE_SEG_SIZE;
+    }
+    if (lineAlignCount !== actualLineAlignCount) {
+      errors.push(
+        `${label} declares lineAlignCount ${lineAlignCount}, but has ${actualLineAlignCount} LINE_SEG item(s)`
+      );
+    }
+  }
+  for (const record of bodyRecords) {
+    let borderFillId;
+    if (record.tag === TAG_PAGE_BORDER_FILL) {
+      if (record.data.length < 14) {
+        errors.push(
+          `PAGE_BORDER_FILL at offset ${record.offset} is ${record.data.length} bytes, expected at least 14`
+        );
+        continue;
+      }
+      borderFillId = readU16(record.data, 12);
+    } else if (record.tag === TAG_LIST_HEADER2 && record.data.length === CELL_LIST_HEADER_SIZE) {
+      borderFillId = readU16(record.data, 32);
+    } else if (record.tag === TAG_TABLE) {
+      if (record.data.length < 6) {
+        errors.push(
+          `TABLE at offset ${record.offset} is ${record.data.length} bytes, expected at least 6`
+        );
+        continue;
+      }
+      const rowCount = readU16(record.data, 4);
+      const borderFillOffset = 18 + rowCount * 2;
+      if (record.data.length < borderFillOffset + 2) {
+        errors.push(
+          `TABLE at offset ${record.offset} is ${record.data.length} bytes, expected borderFillId at offset ${borderFillOffset}`
+        );
+        continue;
+      }
+      borderFillId = readU16(record.data, borderFillOffset);
+    }
+    if (borderFillId !== void 0) {
+      verifyBorderFillId(
+        borderFillId,
+        borderFillCount,
+        `record tag ${record.tag} at offset ${record.offset}`,
+        errors
+      );
+    }
+  }
+  return {
+    ok: errors.length === 0,
+    errors,
+    stats: {
+      charShapeCount,
+      maxCharShapeId,
+      paraShapeCount,
+      styleCount,
+      borderFillCount,
+      paragraphCount
+    }
+  };
+}
+
+// src/encoders/hwp/HwpEncoder.ts
 var T = 16;
 var TAG_DOCUMENT_PROPERTIES = T + 0;
-var TAG_ID_MAPPINGS = T + 1;
-var TAG_BIN_DATA = T + 2;
-var TAG_FACE_NAME2 = T + 3;
-var TAG_BORDER_FILL2 = T + 4;
-var TAG_CHAR_SHAPE2 = T + 5;
-var TAG_TAB_DEF = T + 6;
-var TAG_PARA_SHAPE2 = T + 9;
-var TAG_STYLE = T + 10;
-var TAG_PARA_HEADER2 = T + 50;
-var TAG_PARA_TEXT2 = T + 51;
-var TAG_PARA_CHAR_SHAPE2 = T + 52;
-var TAG_PARA_LINE_SEG = T + 53;
+var TAG_ID_MAPPINGS2 = T + 1;
+var TAG_BIN_DATA2 = T + 2;
+var TAG_FACE_NAME3 = T + 3;
+var TAG_BORDER_FILL3 = T + 4;
+var TAG_CHAR_SHAPE3 = T + 5;
+var TAG_TAB_DEF2 = T + 6;
+var TAG_NUMBERING3 = T + 7;
+var TAG_BULLET3 = T + 8;
+var TAG_PARA_SHAPE3 = T + 9;
+var TAG_STYLE3 = T + 10;
+var TAG_DOC_DATA = T + 11;
+var TAG_COMPATIBLE_DOCUMENT = T + 14;
+var TAG_LAYOUT_COMPATIBILITY = T + 15;
+var TAG_PARA_HEADER3 = T + 50;
+var TAG_PARA_TEXT3 = T + 51;
+var TAG_PARA_CHAR_SHAPE3 = T + 52;
+var TAG_PARA_LINE_SEG2 = T + 53;
 var TAG_CTRL_HEADER2 = T + 55;
-var TAG_LIST_HEADER2 = T + 56;
+var TAG_LIST_HEADER3 = T + 56;
 var TAG_PAGE_DEF2 = T + 57;
 var TAG_FOOTNOTE_SHAPE = T + 58;
-var TAG_PAGE_BORDER_FILL = T + 59;
+var TAG_PAGE_BORDER_FILL2 = T + 59;
 var TAG_SHAPE_COMPONENT = T + 60;
-var TAG_TABLE = T + 61;
+var TAG_TABLE2 = T + 61;
 var TAG_SHAPE_COMPONENT_PICTURE2 = T + 69;
-var TAG_CTRL_DATA = T + 71;
 var CTRL_TABLE2 = 1952607264;
 var CTRL_SECD2 = 1936024420;
 var CTRL_COLD = 1668246628;
 var CTRL_GSO2 = 1735618336;
 var CTRL_PIC2 = 611346787;
-var CTRL_FIELD_BEGIN = 1684825637;
-var CTRL_FIELD_END = 1684825692;
 var TABLE_CTRL_MASK = 1 << 11;
 var BORDER_W_PT2 = [
   0.28,
@@ -7865,6 +8883,7 @@ function isKoreanFont(face) {
 var HwpStyleBank = class {
   // id=0 → 모두 0
   constructor() {
+    this.NONE_STROKE = { kind: "none", pt: 0, color: "000000" };
     this.DEF_STROKE = { kind: "solid", pt: 0.5, color: "000000" };
     // 언어별 독립 폰트 목록 (ANYTOHWP langFontFaces)
     this.langFonts = new Map(
@@ -7881,10 +8900,13 @@ var HwpStyleBank = class {
     this.bfData = [];
     this.bfIdx = /* @__PURE__ */ new Map();
     this.maxStyleId = 0;
+    this.styleParaShapeIds = /* @__PURE__ */ new Map([[0, 0]]);
+    this.hasNumbering = false;
+    this.hasBullet = false;
     // charShape마다 언어별 fontId를 기록
     this.csFontIds = [[0, 0, 0, 0, 0, 0, 0]];
     for (const g of LANG_GROUPS2) this._registerLangFont(g, "\uD568\uCD08\uB86C\uBC14\uD0D5");
-    this.addBorderFill(this.DEF_STROKE);
+    this.addBorderFill(this.NONE_STROKE);
   }
   _registerLangFont(lang, face) {
     const idx = this.langFontIdx.get(lang);
@@ -7933,13 +8955,29 @@ var HwpStyleBank = class {
     this.psIdx.set(k, id);
     return id;
   }
-  registerStyleId(styleId) {
+  registerStyleId(styleId, paraShapeId) {
     if (styleId === void 0) return;
     if (!Number.isInteger(styleId) || styleId < 0 || styleId > 255) return;
     this.maxStyleId = Math.max(this.maxStyleId, styleId);
+    if (paraShapeId !== void 0 && !this.styleParaShapeIds.has(styleId)) {
+      this.styleParaShapeIds.set(styleId, paraShapeId);
+    }
   }
   getStyleCount() {
     return this.maxStyleId + 1;
+  }
+  getStyleParaShapeId(styleId) {
+    return this.styleParaShapeIds.get(styleId) ?? 0;
+  }
+  registerList(p) {
+    if (p.listOrd === true) this.hasNumbering = true;
+    if (p.listOrd === false) this.hasBullet = true;
+  }
+  getNumberingCount() {
+    return this.hasNumbering ? 1 : 0;
+  }
+  getBulletCount() {
+    return this.hasBullet ? 1 : 0;
   }
   addBorderFill(s, bg) {
     const k = bfKey(s, bg);
@@ -7974,6 +9012,13 @@ function csKey(p) {
 function psKey(p) {
   return [
     p.align ?? "left",
+    p.pageBreakBefore ?? false,
+    p.keepWithNext ?? false,
+    p.keepLines ?? false,
+    p.widowControl ?? false,
+    p.heading ?? 0,
+    p.listOrd === void 0 ? "" : p.listOrd ? "number" : "bullet",
+    p.listLv ?? 0,
     p.indentPt ?? 0,
     p.indentRightPt ?? 0,
     p.firstLineIndentPt ?? 0,
@@ -7992,6 +9037,7 @@ function hwpStyleIdForPara(p) {
     const id = Number(p.styleId);
     if (Number.isInteger(id) && id >= 0 && id <= 255) return id;
   }
+  if (p.heading !== void 0) return p.heading + 1;
   return void 0;
 }
 function bfKey(s, bg) {
@@ -8000,13 +9046,19 @@ function bfKey(s, bg) {
 function bfPerSideKey(l, r, t, b, bg) {
   return `${bfKey(l)}/${bfKey(r)}/${bfKey(t)}/${bfKey(b)}/${bg ?? ""}`;
 }
+function collectInlineCharShapes(kids, bank) {
+  for (const kid of kids ?? []) {
+    if (!kid || typeof kid !== "object") continue;
+    if (kid.tag === "span") bank.addCharShape(kid.props);
+    if (Array.isArray(kid.kids)) collectInlineCharShapes(kid.kids, bank);
+  }
+}
 function collectNode(node, bank) {
   if (node.tag === "para") {
-    bank.registerStyleId(hwpStyleIdForPara(node.props));
-    bank.addParaShape(node.props);
-    for (const kid of node.kids) {
-      if (kid.tag === "span") bank.addCharShape(kid.props);
-    }
+    const paraShapeId = bank.addParaShape(node.props);
+    bank.registerStyleId(hwpStyleIdForPara(node.props), paraShapeId);
+    bank.registerList(node.props);
+    collectInlineCharShapes(node.kids, bank);
   } else if (node.tag === "grid") {
     if (node.props.defaultStroke) bank.addBorderFill(node.props.defaultStroke);
     for (const row of node.kids) {
@@ -8029,8 +9081,8 @@ function collectNode(node, bank) {
     }
   }
 }
-function mkDocumentProperties() {
-  return new BufWriter().u16(1).u16(1).u16(1).u16(1).u16(1).u16(1).u16(1).u32(0).u32(0).u32(0).build();
+function mkDocumentProperties(sectionCount) {
+  return new BufWriter().u16(sectionCount).u16(1).u16(1).u16(1).u16(1).u16(1).u16(1).u32(0).u32(0).u32(0).build();
 }
 function mkIdMappings(bank, nBinData = 0) {
   const w = new BufWriter();
@@ -8039,8 +9091,8 @@ function mkIdMappings(bank, nBinData = 0) {
   w.u32(bank.bfData.length);
   w.u32(bank.csProps.length);
   w.u32(1);
-  w.u32(0);
-  w.u32(0);
+  w.u32(bank.getNumberingCount());
+  w.u32(bank.getBulletCount());
   w.u32(bank.psProps.length);
   w.u32(bank.getStyleCount());
   w.u32(0);
@@ -8048,25 +9100,53 @@ function mkIdMappings(bank, nBinData = 0) {
   w.u32(0);
   return w.build();
 }
-function mkStyle(name, engName, paraPrId, charPrId) {
-  return new BufWriter().u16(name.length).utf16(name).u16(engName.length).utf16(engName).u8(0).u8(0).i16(1042).u16(paraPrId).u16(charPrId).u16(0).build();
+function mkStyle(name, engName, paraPrId, charPrId, nextStyleId2 = 0) {
+  return new BufWriter().u16(name.length).utf16(name).u16(engName.length).utf16(engName).u8(0).u8(nextStyleId2).i16(1042).u16(paraPrId).u16(charPrId).u16(0).build();
 }
 function mkTabDef() {
   return new Uint8Array(8);
 }
+function writeNumberingLevel(writer, attr, format) {
+  writer.u32(attr).u16(0).u16(50).u32(4294967295).u16(format.length).utf16(format);
+}
+function mkNumbering() {
+  const writer = new BufWriter();
+  const levels = [
+    [12, "^1."],
+    [268, "^2."],
+    [12, "^3)"],
+    [268, "^4)"],
+    [12, "(^5)"],
+    [268, "(^6)"],
+    [44, "^7"]
+  ];
+  for (const [attr, format] of levels) {
+    writeNumberingLevel(writer, attr, format);
+  }
+  writer.u16(0);
+  for (let level = 0; level < 7; level++) writer.u32(1);
+  writeNumberingLevel(writer, 300, "^8");
+  writeNumberingLevel(writer, 332, "");
+  writeNumberingLevel(writer, 108, "");
+  for (let level = 0; level < 3; level++) writer.u32(1);
+  return writer.build();
+}
+function mkBullet() {
+  return new BufWriter().u32(12).u16(0).u16(50).u32(4294967295).u16(8226).i32(0).u8(0).u8(0).u8(0).u16(0).u16(0).build();
+}
 var HWP_STYLE_NAMES = [
   ["\uBC14\uD0D5\uAE00", "Normal"],
-  ["\uBCF8\uBB38", "Body Text"],
-  ["\uAC1C\uC694 1", "Heading 1"],
-  ["\uAC1C\uC694 2", "Heading 2"],
-  ["\uAC1C\uC694 3", "Heading 3"],
-  ["\uAC1C\uC694 4", "Heading 4"],
-  ["\uAC1C\uC694 5", "Heading 5"],
-  ["\uAC1C\uC694 6", "Heading 6"],
-  ["\uAC1C\uC694 7", "Heading 7"],
-  ["\uAC1C\uC694 8", "Heading 8"],
-  ["\uAC1C\uC694 9", "Heading 9"],
-  ["\uAC1C\uC694 10", "Heading 10"],
+  ["\uBCF8\uBB38", "Body"],
+  ["\uAC1C\uC694 1", "Outline 1"],
+  ["\uAC1C\uC694 2", "Outline 2"],
+  ["\uAC1C\uC694 3", "Outline 3"],
+  ["\uAC1C\uC694 4", "Outline 4"],
+  ["\uAC1C\uC694 5", "Outline 5"],
+  ["\uAC1C\uC694 6", "Outline 6"],
+  ["\uAC1C\uC694 7", "Outline 7"],
+  ["\uAC1C\uC694 8", "Outline 8"],
+  ["\uAC1C\uC694 9", "Outline 9"],
+  ["\uAC1C\uC694 10", "Outline 10"],
   ["\uCABD \uBC88\uD638", "Page Number"],
   ["\uBA38\uB9AC\uB9D0", "Header"],
   ["\uAC01\uC8FC", "Footnote"],
@@ -8076,7 +9156,7 @@ var HWP_STYLE_NAMES = [
   ["\uCC28\uB840 1", "TOC 1"],
   ["\uCC28\uB840 2", "TOC 2"],
   ["\uCC28\uB840 3", "TOC 3"],
-  ["\uBCF8\uBB38 \uC81C\uBAA9", "Body Title"],
+  ["\uCEA1\uC158", "Caption"],
   ["\uADF8\uB9BC", "Figure"],
   ["\uD45C", "Table"],
   ["\uC218\uC2DD", "Equation"],
@@ -8186,40 +9266,51 @@ function mkCharShape(fontIds, p) {
   w.colorRef("000000");
   w.colorRef(p.bg ?? "FFFFFF");
   w.colorRef("000000");
-  w.u16(0);
+  w.u16(1);
   w.colorRef("000000");
   return w.build();
 }
 function mkParaShape(p) {
   const alignVal = ALIGN_CODE[p.align ?? "left"] ?? 1;
   const lineSpacingType = p.lineHeightFixed !== void 0 ? 3 : 0;
-  const attr1 = lineSpacingType & 3 | (alignVal & 7) << 2;
+  let attr1 = lineSpacingType & 3 | (alignVal & 7) << 2;
+  if (p.widowControl) attr1 |= 1 << 16;
+  if (p.keepWithNext) attr1 |= 1 << 17;
+  if (p.keepLines) attr1 |= 1 << 18;
+  if (p.pageBreakBefore) attr1 |= 1 << 19;
+  if (p.heading !== void 0) {
+    attr1 |= 1 << 23;
+    attr1 |= p.heading - 1 << 25;
+  } else if (p.listOrd !== void 0) {
+    attr1 |= (p.listOrd ? 2 : 3) << 23;
+    attr1 |= Math.max(0, Math.min(6, p.listLv ?? 0)) << 25;
+  }
   const lineSpaceValue = p.lineHeightFixed !== void 0 ? Math.max(
     Metric.ptToHwp(p.lineHeightFixed) * 2,
     Math.ceil(Metric.ptToHwp(10) * 1.15) * 2
   ) : Math.max(100, p.lineHeight ? Math.round(p.lineHeight * 100) : 160);
   const paraShapeUnit = (pt) => Metric.ptToHwp(pt) * 2;
-  return new BufWriter().u32(attr1).i32(paraShapeUnit(p.indentPt ?? 0)).i32(paraShapeUnit(p.indentRightPt ?? 0)).i32(paraShapeUnit(p.firstLineIndentPt ?? 0)).i32(paraShapeUnit(p.spaceBefore ?? 0)).i32(paraShapeUnit(p.spaceAfter ?? 0)).i32(lineSpaceValue).u16(0).u16(0).u16(0).i16(0).i16(0).i16(0).i16(0).u32(0).u32(lineSpacingType).u32(lineSpaceValue).u32(0).build();
+  return new BufWriter().u32(attr1).i32(paraShapeUnit((p.indentPt ?? 0) + Math.min(0, p.firstLineIndentPt ?? 0))).i32(paraShapeUnit(p.indentRightPt ?? 0)).i32(paraShapeUnit(p.firstLineIndentPt ?? 0)).i32(paraShapeUnit(p.spaceBefore ?? 0)).i32(paraShapeUnit(p.spaceAfter ?? 0)).i32(lineSpaceValue).u16(0).u16(p.listOrd === void 0 ? 0 : 1).u16(1).i16(0).i16(0).i16(0).i16(0).u32(0).u32(lineSpacingType).u32(lineSpaceValue).u32(0).build();
 }
 function mkBinData(id, ext) {
   return new BufWriter().u16(33).u16(id).u16(ext.length).utf16(ext).build();
 }
-function buildDocInfoStream(bank, images = []) {
+function buildDocInfoStream(bank, images = [], sectionCount = 1) {
   const chunks = [];
-  chunks.push(mkRec(TAG_DOCUMENT_PROPERTIES, 0, mkDocumentProperties()));
-  chunks.push(mkRec(TAG_ID_MAPPINGS, 0, mkIdMappings(bank, images.length)));
+  chunks.push(mkRec(TAG_DOCUMENT_PROPERTIES, 0, mkDocumentProperties(sectionCount)));
+  chunks.push(mkRec(TAG_ID_MAPPINGS2, 0, mkIdMappings(bank, images.length)));
   for (const img of images) {
-    chunks.push(mkRec(TAG_BIN_DATA, 1, mkBinData(img.id, img.ext)));
+    chunks.push(mkRec(TAG_BIN_DATA2, 1, mkBinData(img.id, img.ext)));
   }
   for (const lang of LANG_GROUPS2) {
     for (const face of bank.getFontsForLang(lang)) {
-      chunks.push(mkRec(TAG_FACE_NAME2, 1, mkFaceName(face)));
+      chunks.push(mkRec(TAG_FACE_NAME3, 1, mkFaceName(face)));
     }
   }
   for (const entry of bank.bfData) {
     chunks.push(
       mkRec(
-        TAG_BORDER_FILL2,
+        TAG_BORDER_FILL3,
         1,
         entry.uniform ? mkBorderFill(entry.s, entry.bg) : mkBorderFillPerSide(entry.l, entry.r, entry.t, entry.b, entry.bg)
       )
@@ -8227,28 +9318,64 @@ function buildDocInfoStream(bank, images = []) {
   }
   for (let i = 0; i < bank.csProps.length; i++) {
     chunks.push(
-      mkRec(TAG_CHAR_SHAPE2, 1, mkCharShape(bank.csFontIds[i], bank.csProps[i]))
+      mkRec(TAG_CHAR_SHAPE3, 1, mkCharShape(bank.csFontIds[i], bank.csProps[i]))
     );
   }
-  chunks.push(mkRec(TAG_TAB_DEF, 1, mkTabDef()));
+  chunks.push(mkRec(TAG_TAB_DEF2, 1, mkTabDef()));
+  if (bank.getNumberingCount() > 0) {
+    chunks.push(mkRec(TAG_NUMBERING3, 1, mkNumbering()));
+  }
+  if (bank.getBulletCount() > 0) {
+    chunks.push(mkRec(TAG_BULLET3, 1, mkBullet()));
+  }
   for (const p of bank.psProps) {
-    chunks.push(mkRec(TAG_PARA_SHAPE2, 1, mkParaShape(p)));
+    chunks.push(mkRec(TAG_PARA_SHAPE3, 1, mkParaShape(p)));
   }
   for (let i = 0; i < bank.getStyleCount(); i++) {
     const [name, engName] = styleNameForId(i);
-    chunks.push(mkRec(TAG_STYLE, 1, mkStyle(name, engName, 0, 0)));
+    chunks.push(
+      mkRec(
+        TAG_STYLE3,
+        1,
+        mkStyle(
+          name,
+          engName,
+          bank.getStyleParaShapeId(i),
+          0,
+          i === 0 ? 0 : i
+        )
+      )
+    );
   }
+  chunks.push(mkRec(TAG_COMPATIBLE_DOCUMENT, 0, new Uint8Array(4)));
+  chunks.push(mkRec(TAG_LAYOUT_COMPATIBILITY, 1, new Uint8Array(20)));
   return concatU8(chunks);
 }
 function mkPageDef(dims) {
-  const rawTopPt = dims.headerPt ?? dims.mt;
-  const rawBottomPt = dims.footerPt ?? dims.mb;
+  const rawTopPt = Math.max(0, Math.min(dims.mt, dims.headerPt ?? dims.mt));
+  const rawBottomPt = Math.max(0, Math.min(dims.mb, dims.footerPt ?? dims.mb));
   const rawHeaderPt = Math.max(0, dims.mt - rawTopPt);
   const rawFooterPt = Math.max(0, dims.mb - rawBottomPt);
   return new BufWriter().u32(Metric.ptToHwp(dims.wPt)).u32(Metric.ptToHwp(dims.hPt)).u32(Metric.ptToHwp(dims.ml)).u32(Metric.ptToHwp(dims.mr)).u32(Metric.ptToHwp(rawTopPt)).u32(Metric.ptToHwp(rawBottomPt)).u32(Metric.ptToHwp(rawHeaderPt)).u32(Metric.ptToHwp(rawFooterPt)).u32(0).u32(dims.orient === "landscape" ? 1 : 0).build();
 }
 function mkParaHeader(nchars, ctrlMask, psId, csCount, lineAlignCount = 0, instanceId = 0, styleId = 0, divideSort = 0) {
-  return new BufWriter().u32(nchars).u32(ctrlMask).u16(psId).u8(Math.max(0, Math.min(255, Math.trunc(styleId)))).u8(Math.max(0, Math.min(255, Math.trunc(divideSort)))).u16(csCount).u16(0).u16(lineAlignCount).u32(instanceId).u16(0).build();
+  return new BufWriter().u32(nchars & 2147483647).u32(ctrlMask).u16(psId).u8(Math.max(0, Math.min(255, Math.trunc(styleId)))).u8(Math.max(0, Math.min(255, Math.trunc(divideSort)))).u16(csCount).u16(0).u16(lineAlignCount).u32(instanceId).u16(0).build();
+}
+function markParagraphListEnds(stream) {
+  const pending = /* @__PURE__ */ new Map();
+  const mark = (level, data) => {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    view.setUint32(0, view.getUint32(0, true) | 2147483648, true);
+    pending.delete(level);
+  };
+  for (const record of parseHwpRecords(stream)) {
+    for (const [level, data] of pending) {
+      if (level > record.level || level === record.level && record.tag !== TAG_PARA_HEADER3) mark(level, data);
+    }
+    if (record.tag === TAG_PARA_HEADER3) pending.set(record.level, record.data);
+  }
+  for (const [level, data] of pending) mark(level, data);
+  return stream;
 }
 function mkParaText(text) {
   const w = new BufWriter();
@@ -8550,12 +9677,6 @@ function mkObjectCtrl(ctrlId, wHwp, hHwp, instanceId, layout) {
   if (!layout || layout.wrap === "inline") attr |= 1 | 1 << 2;
   return new BufWriter().u32(ctrlId).u32(attr).i32(layout?.yPt ? Metric.ptToHwp(layout.yPt) : 0).i32(layout?.xPt ? Metric.ptToHwp(layout.xPt) : 0).u32(wHwp).u32(hHwp).i32(layout?.zOrder ?? 0).u16(layout?.distL ? Metric.ptToHwp(layout.distL) : 0).u16(layout?.distR ? Metric.ptToHwp(layout.distR) : 0).u16(layout?.distT ? Metric.ptToHwp(layout.distT) : 0).u16(layout?.distB ? Metric.ptToHwp(layout.distB) : 0).u32(instanceId).i32(0).u16(0).build();
 }
-function mkFieldBeginCtrl(instanceId) {
-  return new BufWriter().u32(CTRL_FIELD_BEGIN).u32(2).zeros(28).u32(instanceId).zeros(6).build();
-}
-function mkFieldEndCtrl(beginId) {
-  return new BufWriter().u32(CTRL_FIELD_END).u32(0).zeros(28).u32(beginId).zeros(6).build();
-}
 function encodePicPara(imgNode, binDataId, bank, lv, idGen, availWidthHwp, divideSort = 0, vertPos = 0, maxHeightHwp = Number.MAX_SAFE_INTEGER) {
   const { w: wHwp, h: hHwp } = imageDisplaySizeHwp(
     imgNode,
@@ -8567,14 +9688,14 @@ function encodePicPara(imgNode, binDataId, bank, lv, idGen, availWidthHwp, divid
   const psId = bank.addParaShape({});
   return [
     mkRec(
-      TAG_PARA_HEADER2,
+      TAG_PARA_HEADER3,
       lv,
       mkParaHeader(9, CTRL_MASK, psId, 1, 1, instanceId, 0, divideSort)
     ),
-    mkRec(TAG_PARA_TEXT2, lv + 1, mkPicParaText()),
-    mkRec(TAG_PARA_CHAR_SHAPE2, lv + 1, mkParaCharShape([[0, 0]])),
+    mkRec(TAG_PARA_TEXT3, lv + 1, mkPicParaText()),
+    mkRec(TAG_PARA_CHAR_SHAPE3, lv + 1, mkParaCharShape([[0, 0]])),
     mkRec(
-      TAG_PARA_LINE_SEG,
+      TAG_PARA_LINE_SEG2,
       lv + 1,
       buildObjectLineSeg(availWidthHwp, hHwp, vertPos)
     ),
@@ -8600,9 +9721,6 @@ function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPo
   const csPairs = [];
   let pos = 0;
   const fontHwp = maxFontHwpInPara(para);
-  const ctrlRecords = [];
-  let localIdCounter = 1e4;
-  const localIdGen = () => localIdCounter++;
   function processKids(kids) {
     for (const kid of kids) {
       if (kid.tag === "span") {
@@ -8613,8 +9731,9 @@ function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPo
         }
         for (const t of span.kids) {
           if (t.tag === "txt") {
-            text += t.content;
-            pos += t.content.length;
+            const encoded = TextKit.stripControl(t.content.replace(/\r\n|\r/g, "\n")).replace(/\t/g, "	\0\0\0\0\0\0	");
+            text += encoded;
+            pos += encoded.length;
           } else if (t.tag === "br") {
             text += "\n";
             pos += 1;
@@ -8622,19 +9741,7 @@ function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPo
         }
       } else if (kid.tag === "link") {
         const link = kid;
-        mask |= 1 << 11;
-        const fieldBeginId = localIdGen();
-        text += String.fromCharCode(3);
-        pos += 1;
-        ctrlRecords.push(
-          mkRec(TAG_CTRL_HEADER2, lv + 1, mkFieldBeginCtrl(fieldBeginId))
-        );
         processKids(link.kids);
-        text += String.fromCharCode(4);
-        pos += 1;
-        ctrlRecords.push(
-          mkRec(TAG_CTRL_HEADER2, lv + 1, mkFieldEndCtrl(fieldBeginId))
-        );
       }
     }
   }
@@ -8665,7 +9772,7 @@ function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPo
   );
   return [
     mkRec(
-      TAG_PARA_HEADER2,
+      TAG_PARA_HEADER3,
       lv,
       mkParaHeader(
         nchars,
@@ -8678,15 +9785,14 @@ function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPo
         effectiveDivideSort
       )
     ),
-    mkRec(TAG_PARA_TEXT2, lv + 1, paraTextData),
-    mkRec(TAG_PARA_CHAR_SHAPE2, lv + 1, mkParaCharShape(effectiveCsPairs)),
+    mkRec(TAG_PARA_TEXT3, lv + 1, paraTextData),
+    mkRec(TAG_PARA_CHAR_SHAPE3, lv + 1, mkParaCharShape(effectiveCsPairs)),
     mkRec(
-      TAG_PARA_LINE_SEG,
+      TAG_PARA_LINE_SEG2,
       lv + 1,
       lineSegs.data
     ),
-    ...sectionRecords,
-    ...ctrlRecords
+    ...sectionRecords
   ];
 }
 function mkTableCtrl(wHwp, hHwp, instanceId, align = "left") {
@@ -8781,7 +9887,7 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
   );
   records.push(
     mkRec(
-      TAG_TABLE,
+      TAG_TABLE2,
       lv + 1,
       mkTableRecord(
         rowCnt,
@@ -8831,7 +9937,7 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
       }, 0);
       records.push(
         mkRec(
-          TAG_LIST_HEADER2,
+          TAG_LIST_HEADER3,
           lv + 1,
           mkCellListHeader(
             Math.max(1, encodedCellParagraphs),
@@ -8857,18 +9963,18 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
           const nestedGridHeight = minGridHeightHwp(kid);
           records.push(
             mkRec(
-              TAG_PARA_HEADER2,
+              TAG_PARA_HEADER3,
               lv + 1,
               mkParaHeader(9, TABLE_CTRL_MASK, 0, 1, 1, idGen())
             )
           );
-          records.push(mkRec(TAG_PARA_TEXT2, lv + 2, mkTableParaText()));
+          records.push(mkRec(TAG_PARA_TEXT3, lv + 2, mkTableParaText()));
           records.push(
-            mkRec(TAG_PARA_CHAR_SHAPE2, lv + 2, mkParaCharShape([[0, 0]]))
+            mkRec(TAG_PARA_CHAR_SHAPE3, lv + 2, mkParaCharShape([[0, 0]]))
           );
           records.push(
             mkRec(
-              TAG_PARA_LINE_SEG,
+              TAG_PARA_LINE_SEG2,
               lv + 2,
               buildObjectLineSeg(cellWidthHwp, nestedGridHeight, cellVertPos)
             )
@@ -8927,27 +10033,15 @@ function mkColumnDefCtrl() {
 function mkPageBorderFill() {
   return new BufWriter().u32(1).u16(1417).u16(1417).u16(1417).u16(1417).u16(1).build();
 }
-var SECTION_CTRL_DATA_HEX = "1b020100000019020080190203000000024009000100000000400900000000006602008066020f000000094001800a000000050000000000050064000000050000000000050000000000050000000000050000000000050000000000050000000000050000000000050000000000084001800a00000005000000ff000500000000000500000000000500000000000500000000000500000000000500000000000500000000000500000000000500000000000a4006003200000007400500020000000640050064000000034005000000000005400500000000000440050032000000024005000100000001400900040000001e40028000002140020000000000224002000000000020400500000000002440050005000000";
-function bytesFromHex(hex) {
-  const out = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < out.length; i++) {
-    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return out;
-}
-function mkSectionCtrlData() {
-  return bytesFromHex(SECTION_CTRL_DATA_HEX);
-}
 function buildSectionControlRecords(dims, level) {
   return [
     mkRec(TAG_CTRL_HEADER2, level, mkSectionCtrl()),
-    mkRec(TAG_CTRL_DATA, level + 1, mkSectionCtrlData()),
     mkRec(TAG_PAGE_DEF2, level + 1, mkPageDef(dims)),
     mkRec(TAG_FOOTNOTE_SHAPE, level + 1, new Uint8Array(28)),
     mkRec(TAG_FOOTNOTE_SHAPE, level + 1, new Uint8Array(28)),
-    mkRec(TAG_PAGE_BORDER_FILL, level + 1, mkPageBorderFill()),
-    mkRec(TAG_PAGE_BORDER_FILL, level + 1, mkPageBorderFill()),
-    mkRec(TAG_PAGE_BORDER_FILL, level + 1, mkPageBorderFill()),
+    mkRec(TAG_PAGE_BORDER_FILL2, level + 1, mkPageBorderFill()),
+    mkRec(TAG_PAGE_BORDER_FILL2, level + 1, mkPageBorderFill()),
+    mkRec(TAG_PAGE_BORDER_FILL2, level + 1, mkPageBorderFill()),
     mkRec(TAG_CTRL_HEADER2, level, mkColumnDefCtrl())
   ];
 }
@@ -8960,18 +10054,18 @@ function buildSectionParagraph(dims, instanceId) {
   );
   return [
     mkRec(
-      TAG_PARA_HEADER2,
+      TAG_PARA_HEADER3,
       0,
-      mkParaHeader(nchars, SECD_CTRL_MASK, 0, 1, 1, instanceId)
+      mkParaHeader(nchars, SECD_CTRL_MASK, 0, 2, 1, instanceId)
     ),
     mkRec(
-      TAG_PARA_TEXT2,
+      TAG_PARA_TEXT3,
       1,
       new BufWriter().bytes(mkSectionAndColumnParaTextPrefix()).bytes(mkParaText(" ")).build()
     ),
-    mkRec(TAG_PARA_CHAR_SHAPE2, 1, mkParaCharShape([[0, 0], [16, 0]])),
+    mkRec(TAG_PARA_CHAR_SHAPE3, 1, mkParaCharShape([[0, 0], [16, 0]])),
     mkRec(
-      TAG_PARA_LINE_SEG,
+      TAG_PARA_LINE_SEG2,
       1,
       buildDefaultLineSeg(availWidthHwp, 1e3, nchars)
     ),
@@ -9061,16 +10155,16 @@ function buildBodyTextStream(doc, bank, images) {
           if (vertPos > 0 && vertPos + gridHeight > bodyHeightHwp) vertPos = 0;
           chunks.push(
             mkRec(
-              TAG_PARA_HEADER2,
+              TAG_PARA_HEADER3,
               0,
               mkParaHeader(9, TABLE_CTRL_MASK | paraMask, 0, 1, 1, idGen(), 0, paraDivideSort)
             )
           );
-          chunks.push(mkRec(TAG_PARA_TEXT2, 1, mkTableParaText()));
-          chunks.push(mkRec(TAG_PARA_CHAR_SHAPE2, 1, mkParaCharShape([[0, 0]])));
+          chunks.push(mkRec(TAG_PARA_TEXT3, 1, mkTableParaText()));
+          chunks.push(mkRec(TAG_PARA_CHAR_SHAPE3, 1, mkParaCharShape([[0, 0]])));
           chunks.push(
             mkRec(
-              TAG_PARA_LINE_SEG,
+              TAG_PARA_LINE_SEG2,
               1,
               buildObjectLineSeg(availWidthHwp, gridHeight, vertPos)
             )
@@ -9137,7 +10231,7 @@ function buildBodyTextStream(doc, bank, images) {
               void 0,
               bodyHeightHwp
             )) {
-              if (r[0] === (TAG_PARA_HEADER2 & 255)) {
+              if (r[0] === (TAG_PARA_HEADER3 & 255)) {
               }
               chunks.push(r);
             }
@@ -9179,16 +10273,16 @@ function buildBodyTextStream(doc, bank, images) {
         if (vertPos > 0 && vertPos + gridHeight > bodyHeightHwp) vertPos = 0;
         chunks.push(
           mkRec(
-            TAG_PARA_HEADER2,
+            TAG_PARA_HEADER3,
             0,
             mkParaHeader(9, TABLE_CTRL_MASK, 0, 1, 1, idGen())
           )
         );
-        chunks.push(mkRec(TAG_PARA_TEXT2, 1, mkTableParaText()));
-        chunks.push(mkRec(TAG_PARA_CHAR_SHAPE2, 1, mkParaCharShape([[0, 0]])));
+        chunks.push(mkRec(TAG_PARA_TEXT3, 1, mkTableParaText()));
+        chunks.push(mkRec(TAG_PARA_CHAR_SHAPE3, 1, mkParaCharShape([[0, 0]])));
         chunks.push(
           mkRec(
-            TAG_PARA_LINE_SEG,
+            TAG_PARA_LINE_SEG2,
             1,
             buildObjectLineSeg(availWidthHwp, gridHeight, vertPos)
           )
@@ -9235,7 +10329,7 @@ function buildHwpFileHeader() {
   }
   return buf;
 }
-function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = []) {
+function buildHwpOle2(fileHeaderData, docInfoData, sectionData, binImages = []) {
   const SS = 512;
   const MSS = 64;
   const ENDOFCHAIN = 4294967294;
@@ -9262,9 +10356,9 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
   });
   streams.push({
     name: "Section0",
-    data: section0Data,
+    data: sectionData[0],
     dirIdx: 4,
-    isMini: section0Data.length < 4096
+    isMini: sectionData[0].length < 4096
   });
   const prvTextDirIdx = binImages.length > 0 ? 6 + binImages.length : 5;
   const prvTextData = new BufWriter().utf16("HWPKit Preview\r\n").build();
@@ -9282,6 +10376,14 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
       data: img.data,
       dirIdx: 6 + i,
       isMini: img.data.length < 4096
+    });
+  }
+  for (let i = 1; i < sectionData.length; i++) {
+    streams.push({
+      name: `Section${i}`,
+      data: sectionData[i],
+      dirIdx: prvTextDirIdx + i,
+      isMini: sectionData[i].length < 4096
     });
   }
   const miniStreams = streams.filter((s) => s.isMini);
@@ -9317,7 +10419,7 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
     return out2;
   });
   const regNs = regPads.map((p) => p.length / SS);
-  const numDirEntries = 6 + (binImages.length > 0 ? 1 + binImages.length : 0);
+  const numDirEntries = 6 + (binImages.length > 0 ? 1 + binImages.length : 0) + sectionData.length - 1;
   const dirN = Math.max(1, Math.ceil(numDirEntries * 128 / SS));
   const miniFatN = Math.ceil(miniSectorList.length / 128);
   const miniStreamN = Math.ceil(miniStreamData.length / SS);
@@ -9587,6 +10689,8 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
     diStream.startSec,
     diStream.data.length
   );
+  const sectionStreams = streams.filter((stream) => /^Section\d+$/.test(stream.name));
+  const sectionTree = buildSiblingTree(sectionStreams.map((stream) => ({ idx: stream.dirIdx, name: stream.name })));
   const bodyLinks = rootLinks(3);
   writeDirEntry(
     3,
@@ -9595,22 +10699,24 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
     rootTree.colors.get(3) ?? 1,
     bodyLinks.left,
     bodyLinks.right,
-    4,
-    ENDOFCHAIN,
+    sectionTree.root,
+    0,
     0
   );
-  const s0Stream = streamMap.get(4);
-  writeDirEntry(
-    4,
-    "Section0",
-    2,
-    1,
-    -1,
-    -1,
-    -1,
-    s0Stream.startSec,
-    s0Stream.data.length
-  );
+  for (const stream of sectionStreams) {
+    const links = sectionTree.links.get(stream.dirIdx);
+    writeDirEntry(
+      stream.dirIdx,
+      stream.name,
+      2,
+      sectionTree.colors.get(stream.dirIdx) ?? 1,
+      links.left,
+      links.right,
+      -1,
+      stream.startSec,
+      stream.data.length
+    );
+  }
   const prvTextStream = streamMap.get(prvTextDirIdx);
   const prvTextLinks = rootLinks(prvTextDirIdx);
   writeDirEntry(
@@ -9640,7 +10746,7 @@ function buildHwpOle2(fileHeaderData, docInfoData, section0Data, binImages = [])
       binLinks.left,
       binLinks.right,
       binTree.root,
-      ENDOFCHAIN,
+      0,
       0
     );
     for (let i = 0; i < binImages.length; i++) {
@@ -9760,10 +10866,19 @@ var HwpEncoder = class extends BaseEncoder {
       for (const sheet of doc.kids) {
         for (const node of sheet.kids) collectImages3(node);
       }
-      const docInfoRaw = buildDocInfoStream(bank, images);
-      const bodyRaw = buildBodyTextStream(doc, bank, images);
+      const sections = doc.kids.length ? doc.kids : [{ tag: "sheet", dims: A4, kids: [] }];
+      const bodyRaw = sections.map((sheet) => markParagraphListEnds(
+        buildBodyTextStream({ ...doc, kids: [sheet] }, bank, images)
+      ));
+      const docInfoRaw = buildDocInfoStream(bank, images, sections.length);
+      for (const section of bodyRaw) {
+        const verification = verifyHwpRecordStreams(docInfoRaw, section);
+        if (!verification.ok) return fail(
+          `HwpEncoder: \uB808\uCF54\uB4DC \uCC38\uC870 \uBB34\uACB0\uC131 \uC624\uB958 - ${verification.errors.join("; ")}`
+        );
+      }
       const docInfoCmp = import_pako3.default.deflateRaw(docInfoRaw);
-      const bodyCmp = import_pako3.default.deflateRaw(bodyRaw);
+      const bodyCmp = bodyRaw.map((section) => import_pako3.default.deflateRaw(section));
       const fileHdr = buildHwpFileHeader();
       if (fileHdr.length !== 256) {
         return fail(
@@ -9796,9 +10911,9 @@ var Pipeline = class _Pipeline {
   /** 파일을 열고 포맷을 자동 감지하거나 명시 */
   static open(input, fmt) {
     if (typeof input === "string") {
-      return new _Pipeline(new TextEncoder().encode(input), fmt ?? "md");
+      return new _Pipeline(new TextEncoder().encode(input), normalizeFormat(fmt) ?? "md");
     }
-    return new _Pipeline(input, fmt ?? detectFormat(input));
+    return new _Pipeline(input, normalizeFormat(fmt));
   }
   /** File/Blob 비동기 입력 */
   static async openAsync(input, fmt) {
@@ -9807,14 +10922,17 @@ var Pipeline = class _Pipeline {
     }
     const buf = await input.arrayBuffer();
     const data = new Uint8Array(buf);
-    const detectedFmt = fmt ?? (input instanceof File ? getExt(input.name) : void 0) ?? detectFormat(data);
+    const extension = typeof File !== "undefined" && input instanceof File ? getExt(input.name) : void 0;
+    const hint = extension === "txt" ? "md" : extension === "htm" ? "html" : extension;
+    const detectedFmt = normalizeFormat(fmt) ?? (hint && ["hwp", "hwpx", "docx", "doc"].includes(hint) ? void 0 : hint);
     return new _Pipeline(data, detectedFmt);
   }
   /** 목표 포맷으로 변환 */
   async to(targetFmt, options) {
-    const decoder = registry.getDecoder(this.srcFmt);
-    const encoder = registry.getEncoder(targetFmt);
-    if (!decoder) return fail(`\uC9C0\uC6D0\uD558\uC9C0 \uC54A\uB294 \uC785\uB825 \uD3EC\uB9F7: ${this.srcFmt}`);
+    const srcFmt = this.srcFmt ?? await detectFormat(this.raw);
+    const decoder = registry.getDecoder(srcFmt);
+    const encoder = registry.getEncoder(normalizeFormat(targetFmt) ?? targetFmt);
+    if (!decoder) return fail(`\uC9C0\uC6D0\uD558\uC9C0 \uC54A\uB294 \uC785\uB825 \uD3EC\uB9F7: ${srcFmt}`);
     if (!encoder) return fail(`\uC9C0\uC6D0\uD558\uC9C0 \uC54A\uB294 \uCD9C\uB825 \uD3EC\uB9F7: ${targetFmt}`);
     const docResult = await decoder.decode(this.raw);
     if (!docResult.ok) return docResult;
@@ -9824,22 +10942,40 @@ var Pipeline = class _Pipeline {
   }
   /** DocRoot만 추출 (인코딩 없이) */
   async inspect() {
-    const decoder = registry.getDecoder(this.srcFmt);
-    if (!decoder) return fail(`\uB514\uCF54\uB354 \uC5C6\uC74C: ${this.srcFmt}`);
+    const srcFmt = this.srcFmt ?? await detectFormat(this.raw);
+    const decoder = registry.getDecoder(srcFmt);
+    if (!decoder) return fail(`\uB514\uCF54\uB354 \uC5C6\uC74C: ${srcFmt}`);
     return decoder.decode(this.raw);
   }
 };
-function detectFormat(data) {
-  if (data[0] === 208 && data[1] === 207 && data[2] === 17 && data[3] === 224) return "hwp";
-  if (data[0] === 80 && data[1] === 75) {
-    const str = new TextDecoder("utf-8", { fatal: false }).decode(data.slice(0, 4096));
-    if (str.includes("wordprocessingml")) return "docx";
-    if (str.includes("ha-xml")) return "hwpx";
-    if (str.includes("hwpml/")) return "hwpx";
-    if (str.includes("word/")) return "docx";
-    return "hwpx";
+async function detectFormat(data) {
+  if (BinaryKit.isOle2(data)) {
+    try {
+      const streams = BinaryKit.parseCfb(data);
+      const header = streams.get("FileHeader");
+      if (header && new TextDecoder().decode(header.subarray(0, 17)) === "HWP Document File") return "hwp";
+      if (streams.has("WordDocument")) return "doc";
+    } catch {
+    }
+    return "ole";
   }
+  if (data[0] === 80 && data[1] === 75) {
+    try {
+      const zip = await import_jszip.default.loadAsync(data);
+      if (zip.file("word/document.xml")) return "docx";
+      if (zip.file("Contents/content.hpf") || zip.file("Contents/section0.xml")) return "hwpx";
+    } catch {
+    }
+    return "zip";
+  }
+  const prefix = new TextDecoder().decode(data.subarray(0, 4096)).trimStart();
+  if (prefix.startsWith("%PDF-")) return "pdf";
+  if (prefix.startsWith("{\\rtf")) return "rtf";
+  if (/^(?:<!doctype\s+html\b|<html\b)/i.test(prefix)) return "html";
   return "md";
+}
+function normalizeFormat(fmt) {
+  return fmt?.trim().toLowerCase().replace(/^\./, "") || void 0;
 }
 function getExt(name) {
   const parts = name.split(".");
@@ -9926,6 +11062,7 @@ function validateRoot(root) {
   buildRow,
   buildSheet,
   buildSpan,
+  configureDocConverter,
   countNodes,
   fail,
   normalizeDims,
