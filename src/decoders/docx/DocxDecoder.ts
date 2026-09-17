@@ -1,5 +1,6 @@
 import type {
   DocRoot,
+  SheetNode,
   ContentNode,
   ParaNode,
   SpanNode,
@@ -38,6 +39,7 @@ import {
   buildRow,
   buildCell,
   buildPb,
+  buildBr,
 } from "../../model/builders";
 import { ShieldedParser } from "../../safety/ShieldedParser";
 import {
@@ -91,6 +93,17 @@ export class DocxDecoder extends BaseDecoder {
         }
       }
 
+      meta.evenAndOddHeaders = false;
+      const settings = getFile("word/settings.xml");
+      if (settings) {
+        try {
+          const parsed: any = await XmlKit.parseStrict(TextKit.decode(settings));
+          const node = parsed?.["w:settings"]?.[0]?.["w:evenAndOddHeaders"]?.[0];
+          if (node != null) meta.evenAndOddHeaders = !["0", "false", "off"].includes(
+            String(node?._attr?.["w:val"] ?? "1").toLowerCase());
+        } catch { /* malformed optional settings do not block body decoding */ }
+      }
+
       // Parse numbering.xml for list support
       const numXml = getFile("word/numbering.xml");
       let numMap: NumMap = new Map();
@@ -140,57 +153,45 @@ export class DocxDecoder extends BaseDecoder {
         paraStyleMap,
       };
 
-      const kids: ContentNode[] = [];
+      const sections: { kids: ContentNode[]; sp: any }[] = [];
+      let kids: ContentNode[] = [];
       for (const el of elements) {
         const nodes = shield.guard(
           () => decodeElement(el, decCtx),
           [buildPara([buildSpan("[요소 파싱 실패]")])],
           "docx:bodyElement",
         );
-        if (Array.isArray(nodes)) {
-          kids.push(...nodes);
-        } else {
-          kids.push(nodes);
-        }
-
-        // Inline sectPr in pPr = section break → insert page-break paragraph after
-        if (el.type === "para") {
-          const pPr = el.node?.["w:pPr"]?.[0] ?? el.node?.pPr?.[0] ?? {};
-          const inlineSectPr = pPr?.["w:sectPr"]?.[0] ?? pPr?.sectPr?.[0];
-          if (inlineSectPr) {
-            const typeAttr = inlineSectPr?.["w:type"]?.[0]?._attr;
-            const sectType = typeAttr?.["w:val"] ?? typeAttr?.val ?? "nextPage";
-            if (sectType !== "continuous") {
-              kids.push(
-                buildPara([{ tag: "span", props: {}, kids: [buildPb()] }]),
-              );
-            }
-          }
+        kids.push(...(Array.isArray(nodes) ? nodes : [nodes]));
+        const pPr = el.type === "para" ? (el.node?.["w:pPr"]?.[0] ?? el.node?.pPr?.[0]) : undefined;
+        const sp = pPr?.["w:sectPr"]?.[0] ?? pPr?.sectPr?.[0];
+        if (sp) {
+          // sectPr belongs to the section ending here, not to the next paragraph.
+          sections.push({ kids, sp });
+          kids = [];
         }
       }
-
-      // Decode header/footer
-      const headersMap = await decodeHeaderFooter(
-        "header",
-        body,
-        relsMap,
-        files,
-        decCtx,
-      );
-      const footersMap = await decodeHeaderFooter(
-        "footer",
-        body,
-        relsMap,
-        files,
-        decCtx,
-      );
-
+      sections.push({ kids, sp: body?.["w:sectPr"]?.[0] ?? body?.sectPr?.[0] });
+      const sheets: SheetNode[] = [];
+      let headers: SheetNode["headers"];
+      let footers: SheetNode["footers"];
+      for (const section of sections) {
+        const sectionBody = { "w:sectPr": [section.sp] };
+        const sectionDims = extractDims(sectionBody) ?? dims;
+        const ownHeaders = await decodeHeaderFooter("header", sectionBody, relsMap, files, decCtx);
+        const ownFooters = await decodeHeaderFooter("footer", sectionBody, relsMap, files, decCtx);
+        if (ownHeaders) headers = { ...headers, ...ownHeaders };
+        if (ownFooters) footers = { ...footers, ...ownFooters };
+        const sheet = buildSheet(section.kids.filter(Boolean), sectionDims, { headers, footers });
+        const titlePage = section.sp?.["w:titlePg"]?.[0] ?? section.sp?.titlePg?.[0];
+        sheet.differentFirstPage = titlePage != null && !["0", "false", "off"].includes(
+          String(titlePage?._attr?.["w:val"] ?? titlePage?._attr?.val ?? "1").toLowerCase());
+        const attr = section.sp?.["w:type"]?.[0]?._attr ?? section.sp?.type?.[0]?._attr;
+        const type = attr?.["w:val"] ?? attr?.val;
+        if (["nextPage", "continuous", "evenPage", "oddPage", "nextColumn"].includes(type)) sheet.sectionType = type;
+        sheets.push(sheet);
+      }
       warns.push(...shield.flush());
-      const sheet = buildSheet(kids.filter(Boolean) as ContentNode[], dims, {
-        headers: headersMap,
-        footers: footersMap,
-      });
-      return succeed(buildRoot(meta, [sheet]), warns);
+      return succeed(buildRoot(meta, sheets), warns);
     } catch (e: any) {
       warns.push(...shield.flush());
       return fail(`DOCX decode error: ${e?.message ?? String(e)}`, warns);
@@ -227,6 +228,10 @@ interface ParaStyleDef {
     font?: string;
   };
   pPr?: {
+    pageBreakBefore?: boolean;
+    keepWithNext?: boolean;
+    keepLines?: boolean;
+    widowControl?: boolean;
     align?: string;
     spaceBefore?: number;
     spaceAfter?: number;
@@ -380,8 +385,8 @@ function extractDims(body: any): PageDims | null {
     const sz = sp?.["w:pgSz"]?.[0]?._attr ?? sp?.pgSz?.[0]?._attr;
     const mar = sp?.["w:pgMar"]?.[0]?._attr ?? sp?.pgMar?.[0]?._attr;
     if (!sz) return null;
-    const headerDxa = Number(mar?.["w:header"] ?? mar?.header ?? 0);
-    const footerDxa = Number(mar?.["w:footer"] ?? mar?.footer ?? 0);
+    const headerDxa = Number(mar?.["w:header"] ?? mar?.header ?? NaN);
+    const footerDxa = Number(mar?.["w:footer"] ?? mar?.footer ?? NaN);
     return {
       wPt: Metric.dxaToPt(Number(sz["w:w"] ?? sz.w ?? 11906)),
       hPt: Metric.dxaToPt(Number(sz["w:h"] ?? sz.h ?? 16838)),
@@ -393,8 +398,8 @@ function extractDims(body: any): PageDims | null {
         (sz["w:orient"] ?? sz.orient) === "landscape"
           ? "landscape"
           : "portrait",
-      headerPt: headerDxa > 0 ? Metric.dxaToPt(headerDxa) : undefined,
-      footerPt: footerDxa > 0 ? Metric.dxaToPt(footerDxa) : undefined,
+      headerPt: Number.isFinite(headerDxa) && headerDxa >= 0 ? Metric.dxaToPt(headerDxa) : undefined,
+      footerPt: Number.isFinite(footerDxa) && footerDxa >= 0 ? Metric.dxaToPt(footerDxa) : undefined,
     };
   } catch {
     return null;
@@ -664,23 +669,11 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
 
   // Indentation
   const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
-  const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
-  const rightVal = Number(indAttr?.["w:right"] ?? indAttr?.right ?? 0);
-  const firstLineVal = Number(
-    indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0,
-  );
-  const hangingVal = Number(indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0);
-  if (leftVal > 0) props.indentPt = Metric.dxaToPt(leftVal);
-  else if (styleInherited.pPr?.indentPt)
-    props.indentPt = styleInherited.pPr.indentPt;
-  if (rightVal > 0) props.indentRightPt = Metric.dxaToPt(rightVal);
-  else if (styleInherited.pPr?.indentRightPt)
-    props.indentRightPt = styleInherited.pPr.indentRightPt;
-  if (firstLineVal > 0) props.firstLineIndentPt = Metric.dxaToPt(firstLineVal);
-  else if (hangingVal > 0)
-    props.firstLineIndentPt = -Metric.dxaToPt(hangingVal);
-  else if (styleInherited.pPr?.firstLineIndentPt)
-    props.firstLineIndentPt = styleInherited.pPr.firstLineIndentPt;
+  const indentation = parseDocxIndentation(indAttr);
+  for (const key of ['indentPt', 'indentRightPt', 'firstLineIndentPt'] as const) {
+    const value = indentation[key] ?? styleInherited.pPr?.[key];
+    if (value !== undefined) props[key] = value;
+  }
 
   // Alignment from style if not set inline
   if (!alignVal && styleInherited.pPr?.align)
@@ -707,12 +700,11 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
     }
   }
 
-  // pageBreakBefore: paragraph always starts on a new page
-  const pbBeforeNode =
-    pPr?.["w:pageBreakBefore"]?.[0] ?? pPr?.pageBreakBefore?.[0];
-  const hasPageBreakBefore =
-    pbBeforeNode != null &&
-    (pbBeforeNode?._attr?.["w:val"] ?? pbBeforeNode?._attr?.val ?? "1") !== "0";
+  const pagination = parsePaginationProps(pPr);
+  for (const key of ['pageBreakBefore', 'keepWithNext', 'keepLines', 'widowControl'] as const) {
+    const value = pagination[key] ?? styleInherited.pPr?.[key];
+    if (value !== undefined) props[key] = value;
+  }
 
   // Resolve all children (runs AND hyperlinks) in document order
   const children = p?.["_childOrder"] as string[] | undefined;
@@ -745,7 +737,8 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
         const hl = hlArr[hi++];
         if (hl) {
           const rId = hl?._attr?.["r:id"] ?? hl?._attr?.id;
-          const url = rId ? ctx.relsMap.get(rId) : "";
+          const anchor = hl?._attr?.['w:anchor'] ?? hl?._attr?.anchor;
+          const url = rId ? ctx.relsMap.get(rId) : (anchor ? `#${anchor}` : "");
           const hlRuns = toArr(hl?.["w:r"] ?? hl?.r);
           const hlKids = hlRuns.map((r: any) =>
             decodeRun(r, ctx, {
@@ -798,11 +791,6 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   }
 
   const filteredKids = kids.filter(Boolean) as ParaNode["kids"];
-
-  // Prepend pb span when pageBreakBefore is set
-  if (hasPageBreakBefore) {
-    filteredKids.unshift({ tag: "span", props: {}, kids: [buildPb()] });
-  }
 
   return buildPara(filteredKids, props);
 }
@@ -1091,31 +1079,50 @@ function decodeRun(
   const fldChar = run?.["w:fldChar"]?.[0]?._attr ?? run?.fldChar?.[0]?._attr;
   const instrText = run?.["w:instrText"]?.[0];
 
-  // Page break: <w:br w:type="page"/>
+  // Breaks: <w:br/> (line) and <w:br w:type="page"/> (page). Interleaved with
+  // <w:t> in document order so the span keeps [txt, br, txt, ...] structure.
   const brNodes = toArr(run?.["w:br"] ?? run?.br ?? []);
-  for (const br of brNodes) {
-    const brType = br?._attr?.["w:type"] ?? br?._attr?.type;
-    if (brType === "page") {
-      return { tag: "span", props, kids: [buildPb()] };
+  const textNodes = toArr(run?.["w:t"] ?? run?.t);
+  const childOrder = (run?._childOrder as string[] | undefined) ?? [];
+  const textVals = textNodes.map(
+    (t: any) => (typeof t === "string" ? t : (t?._ ?? t?._text ?? "")),
+  );
+  const kids: (any)[] = [];
+  if (childOrder.length) {
+    let ti = 0;
+    let bi = 0;
+    for (const tag of childOrder) {
+      if (tag === "w:t" || tag === "t") {
+        kids.push({ tag: "txt", content: textVals[ti++] ?? "" });
+      } else if (tag === "w:tab" || tag === "tab") {
+        kids.push({ tag: "txt", content: '\t' });
+      } else if (tag === "w:br" || tag === "br") {
+        const br = brNodes[bi++];
+        const brType = br?._attr?.["w:type"] ?? br?._attr?.type;
+        kids.push(brType === "page" ? buildPb() : buildBr());
+      }
+    }
+  } else {
+    for (const v of textVals) if (v) kids.push({ tag: "txt", content: v });
+    for (const br of brNodes) {
+      const brType = br?._attr?.["w:type"] ?? br?._attr?.type;
+      kids.push(brType === "page" ? buildPb() : buildBr());
     }
   }
-
-  const textNodes = toArr(run?.["w:t"] ?? run?.t);
-  const content = textNodes
-    .map((t: any) => (typeof t === "string" ? t : (t?._ ?? t?._text ?? "")))
-    .join("");
-
-  // Handle page number field in instrText
+  // Page number fields occupy the whole run (no sibling text).
   if (instrText) {
     const instrStr =
       typeof instrText === "string" ? instrText : (instrText?._text ?? "");
     if (instrStr.trim().toUpperCase() === "PAGE") {
-      const pageNum: PageNumNode = { tag: "pagenum", format: "decimal" };
-      return { tag: "span", props, kids: [pageNum] };
+      return {
+        tag: "span",
+        props,
+        kids: [{ tag: "pagenum" as const, format: "decimal" as const }, ...kids],
+      };
     }
   }
-
-  return buildSpan(content, props);
+  if (!kids.length) kids.push({ tag: "txt", content: "" });
+  return { tag: "span", props, kids };
 }
 
 /** Parse all 6 border sides from a w:tblBorders or w:tcBorders node */
@@ -1242,7 +1249,7 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
       stylesRoot?.["w:docDefaults"]?.[0]?.["w:pPrDefault"]?.[0]?.["w:pPr"]?.[0] ??
       stylesRoot?.docDefaults?.[0]?.pPrDefault?.[0]?.pPr?.[0];
     map.set(DOCX_DEFAULT_STYLE_KEY, {
-      pPr: parseDocxSpacingProps(defaultsPPr, true),
+      pPr: { ...parseDocxSpacingProps(defaultsPPr, true), ...parsePaginationProps(defaultsPPr) },
     });
     const styleArr = toArr(stylesRoot?.["w:style"] ?? stylesRoot?.style);
     for (const style of styleArr) {
@@ -1304,28 +1311,14 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
         const spacingProps = parseDocxSpacingProps(pPr);
         const indAttr =
           pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
-        const leftVal = Number(indAttr?.["w:left"] ?? indAttr?.left ?? 0);
-        const rightVal = Number(indAttr?.["w:right"] ?? indAttr?.right ?? 0);
-        const firstLineVal = Number(
-          indAttr?.["w:firstLine"] ?? indAttr?.firstLine ?? 0,
-        );
-        const hangingVal = Number(
-          indAttr?.["w:hanging"] ?? indAttr?.hanging ?? 0,
-        );
         const alignVal =
           pPr?.["w:jc"]?.[0]?._attr?.["w:val"] ??
           pPr?.["w:jc"]?.[0]?._attr?.val;
         def.pPr = {
           ...spacingProps,
+          ...parsePaginationProps(pPr),
           align: alignVal,
-          indentPt: leftVal > 0 ? Metric.dxaToPt(leftVal) : undefined,
-          indentRightPt: rightVal > 0 ? Metric.dxaToPt(rightVal) : undefined,
-          firstLineIndentPt:
-            firstLineVal > 0
-              ? Metric.dxaToPt(firstLineVal)
-              : hangingVal > 0
-                ? -Metric.dxaToPt(hangingVal)
-                : undefined,
+          ...parseDocxIndentation(indAttr),
         };
       }
 
@@ -1335,6 +1328,43 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
     /* non-fatal */
   }
   return map;
+}
+
+function parsePaginationProps(pPr: any): Partial<ParaProps> {
+  const props: Partial<ParaProps> = {};
+  for (const [key, tag] of [['pageBreakBefore', 'pageBreakBefore'], ['keepWithNext', 'keepNext'],
+    ['keepLines', 'keepLines'], ['widowControl', 'widowControl']] as const) {
+    const node = pPr?.[`w:${tag}`]?.[0] ?? pPr?.[tag]?.[0];
+    if (node != null) {
+      const val = String(node?._attr?.['w:val'] ?? node?._attr?.val ?? '1').toLowerCase();
+      props[key] = !['0', 'false', 'off'].includes(val);
+    }
+  }
+  return props;
+}
+
+/** ECMA-376 Part 1 §17.3.1.12: hanging takes precedence, including zero. */
+function parseDocxIndentation(attrs: Record<string, string>): Pick<ParaProps,
+  'indentPt' | 'indentRightPt' | 'firstLineIndentPt'> {
+  const result: Pick<ParaProps, 'indentPt' | 'indentRightPt' | 'firstLineIndentPt'> = {};
+  const read = (name: string): number | undefined => {
+    const raw = docxAttr(attrs, name);
+    if (raw === undefined) return undefined;
+    const value = Number(raw);
+    return Number.isFinite(value) ? Metric.dxaToPt(value) : undefined;
+  };
+  const left = read('left');
+  const right = read('right');
+  const hanging = read('hanging');
+  const first = hanging !== undefined ? -hanging : read('firstLine');
+  if (left !== undefined) result.indentPt = left;
+  if (right !== undefined) result.indentRightPt = right;
+  if (first !== undefined) result.firstLineIndentPt = first === 0 ? 0 : first;
+  return result;
+}
+
+function definedProps<T extends object>(value: T): Partial<T> {
+  return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as Partial<T>;
 }
 
 /** Resolve paragraph style inheritance chain (max depth 8) */
@@ -1354,7 +1384,7 @@ function resolveParaStyle(
       merged.rPr = { ...def.rPr, ...merged.rPr };
     }
     if (def.pPr) {
-      merged.pPr = { ...def.pPr, ...merged.pPr };
+      merged.pPr = { ...definedProps(def.pPr), ...definedProps(merged.pPr ?? {}) };
     }
     cur = def.basedOn;
   }

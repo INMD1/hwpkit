@@ -38,6 +38,10 @@ export interface TextProps {
   color?: string;
   bg?: string;
 }export interface ParaProps {
+  keepWithNext?: boolean;
+  keepLines?: boolean;
+  widowControl?: boolean;
+  pageBreakBefore?: boolean;
   align?: Align;
   heading?: Heading;
   styleId?: string;              // DOCX pStyle styleId (e.g. "Heading1", "TOC1")
@@ -101,6 +105,14 @@ export interface GridProps {
   layout?: ImgLayout;     // 표 배치/위치 정보 (없으면 inline 흐름 표)
 }
 
+/**
+ * 모든 값은 종이 가장자리로부터의 거리(pt), DOCX w:pgMar 기준이다.
+ * mt / mb        : 본문 시작/끝까지의 거리 (머리말·꼬리말 영역 포함)
+ * headerPt       : 종이 위쪽에서 머리말까지의 거리
+ * footerPt       : 종이 아래쪽에서 꼬리말까지의 거리
+ * HWP/HWPX의 top + header = mt, top = headerPt이며 bottom도 같은 방식이다.
+ * HWP/HWPX 코덱 경계에서만 합산/분리한다. DOCX에 다시 더하지 않는다.
+ */
 export interface PageDims {
   wPt: number;
   hPt: number;
@@ -109,11 +121,12 @@ export interface PageDims {
   ml: number;
   mr: number;
   orient?: 'portrait' | 'landscape';
-  headerPt?: number;  // distance from paper top to header top (DOCX w:header)
-  footerPt?: number;  // distance from paper bottom to footer bottom (DOCX w:footer)
+  headerPt?: number;
+  footerPt?: number;
 }
 
 export interface DocMeta {
+  evenAndOddHeaders?: boolean;
   title?: string;
   author?: string;
   subject?: string;
