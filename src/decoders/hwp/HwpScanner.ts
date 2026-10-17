@@ -11,6 +11,7 @@ import { Metric, safeHex, safeFont } from '../../safety/StyleBridge';
 import { registry } from '../../pipeline/registry';
 import { A4 } from '../../model/doc-props';
 import { inferColumnWidths } from '../../toolkit/TableGeometry';
+import { lineTypeToStrokeKind, textWrapCodeToImgWrap } from '../../toolkit/HancomEnums';
 import pako from 'pako';
 
 /* ═══════════════════════════════════════════════════════════════
@@ -395,7 +396,7 @@ function parseParaShape(d: Uint8Array): HwpParaShape {
     [36:4] faceColor (bgColor for solid fill)                        */
 
 const BORDER_W_PT = [0.28, 0.34, 0.43, 0.57, 0.71, 0.85, 1.13, 1.42, 1.70, 1.98, 2.84, 4.25, 5.67, 8.50, 11.34, 14.17];
-const BORDER_KIND: Record<number, StrokeKind> = { 0:'none',1:'solid',2:'dash',3:'dot',4:'dash',5:'dash',6:'dash',7:'double',8:'double',9:'double',10:'none' };
+// 선 종류 값은 HancomEnums.HANCOM_LINE_TYPES 인덱스와 같다(2=긴 점선, 3=점선, 8=이중선).
 
 function parseBorderFill(d: Uint8Array): HwpBorderFill {
   // HWP 5 BorderFill:
@@ -456,9 +457,8 @@ function parseObjectLayout(data: Uint8Array): ImgLayout | undefined {
     horzRelCode === 2 ? 'column' : horzRelCode === 3 ? 'para' : 'page';
   const vertAlign = (['top', 'center', 'bottom'] as const)[vertAlignCode];
   const horzAlign = (['left', 'center', 'right'] as const)[horzAlignCode];
-  const wrap = (
-    ['square', 'tight', 'through', 'topAndBottom', 'behind', 'front'] as const
-  )[wrapCode] ?? 'square';
+  // 0=어울림, 1=자리 차지, 2=글 뒤로, 3=글 앞으로 (HancomEnums.HANCOM_TEXT_WRAPS)
+  const wrap = textWrapCodeToImgWrap(wrapCode);
 
   // The binary layout stores vertical offset first and horizontal offset next.
   const rawY = i32(data, 8);
@@ -1313,7 +1313,7 @@ function colorRef(d: Uint8Array, o: number): string {
 }
 
 function toStroke(b: { type: number; widthPt: number; color: string }): Stroke {
-  return { kind: BORDER_KIND[b.type] ?? 'solid', pt: b.widthPt, color: b.color };
+  return { kind: lineTypeToStrokeKind(b.type), pt: b.widthPt, color: b.color };
 }
 
 // Apply borderFill to CellProps. Preserve explicit NONE so DOCX tcBorders can
@@ -1332,8 +1332,7 @@ function strokeFromBF(bfId: number, di: DocInfo): Stroke | undefined {
   if (bfId <= 0 || bfId > di.borderFills.length) return undefined;
   const bf = di.borderFills[bfId - 1];
   if (!bf.borders.length) return undefined;
-  const b = bf.borders[0];
-  return { kind: BORDER_KIND[b.type] ?? 'solid', pt: b.widthPt, color: b.color };
+  return toStroke(bf.borders[0]);
 }
 
 function headingFromStyle(style?: HwpStyle): Heading | undefined {

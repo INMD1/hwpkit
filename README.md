@@ -128,6 +128,7 @@ LibreOffice 연결은 파일을 외부 서비스에 업로드하지 않고, 임�
 npm test
 HWPKIT_TEST_LIBREOFFICE=1 npm test -- src/node/LibreOfficeDoc.test.ts
 node tools/audit-conversions.mjs /path/to/documents /tmp/conversion-audit.json
+node tools/check-hwpx-enums.mjs out.hwpx   # 한컴 OWPML 열거형 이름 검사
 ```
 
 [2026-09-08 파일 열기·DOC 입력 점검](docs/opening-and-doc-audit-2026-09-08.md)

@@ -31,6 +31,7 @@ import type {
   PageDims,
   Align,
   CellProps,
+  ImgLayout,
 } from "../../model/doc-props";
 import { succeed, fail } from "../../contract/result";
 import { Metric, safeFontToKr } from "../../safety/StyleBridge";
@@ -39,6 +40,7 @@ import { A4 } from "../../model/doc-props";
 import pako from "pako";
 import { TextKit } from "../../toolkit/TextKit";
 import { fitColumnWidths } from "../../toolkit/TableGeometry";
+import { imgWrapToTextWrapCode, strokeKindToLineType } from "../../toolkit/HancomEnums";
 import { BaseEncoder } from "../../core/BaseEncoder";
 import { parseHwpRecords, verifyHwpRecordStreams } from "./verify";
 
@@ -89,14 +91,7 @@ const BORDER_W_PT = [
   8.5, 11.34, 14.17,
 ];
 
-const BORDER_KIND_IDX: Record<string, number> = {
-  solid: 1,
-  dot: 3,
-  dash: 2,
-  double: 7,
-  triple: 8,
-  none: 0,
-};
+// 선 종류 값은 HancomEnums.strokeKindToLineType을 쓴다(2=긴 점선, 3=점선, 7=원형 점선, 8=이중선).
 
 const ALIGN_CODE: Record<string, number> = {
   justify: 0,
@@ -780,7 +775,7 @@ function borderWidthIdx(pt: number): number {
 
 function mkBorderFill(s: Stroke, bg?: string): Uint8Array {
   const w = new BufWriter();
-  const t = BORDER_KIND_IDX[s.kind] ?? 0;
+  const t = strokeKindToLineType(s.kind);
   const wi = borderWidthIdx(s.pt);
   const col = s.color || "000000";
   w.u16(0);
@@ -803,10 +798,9 @@ function mkBorderFillPerSide(
 ): Uint8Array {
   const w = new BufWriter();
   w.u16(0);
-  w.u8(BORDER_KIND_IDX[l.kind] ?? 0).u8(borderWidthIdx(l.pt)).colorRef(l.color || "000000");
-  w.u8(BORDER_KIND_IDX[r.kind] ?? 0).u8(borderWidthIdx(r.pt)).colorRef(r.color || "000000");
-  w.u8(BORDER_KIND_IDX[t.kind] ?? 0).u8(borderWidthIdx(t.pt)).colorRef(t.color || "000000");
-  w.u8(BORDER_KIND_IDX[b.kind] ?? 0).u8(borderWidthIdx(b.pt)).colorRef(b.color || "000000");
+  for (const s of [l, r, t, b]) {
+    w.u8(strokeKindToLineType(s.kind)).u8(borderWidthIdx(s.pt)).colorRef(s.color || "000000");
+  }
   w.u8(0).u8(0).colorRef("000000");
   if (bg) {
     w.u32(1).colorRef(bg).colorRef(bg).u32(0xffffffff).u32(0).u8(0);
@@ -1490,17 +1484,6 @@ function mkPicParaText(): Uint8Array {
 
 // ─── 이미지 관련 레코드 (ANYTOHWP 영감: 픽셀 치수 우선 사용)
 
-interface ImgLayout {
-  wrap?: string;
-  xPt?: number;
-  yPt?: number;
-  zOrder?: number;
-  distL?: number;
-  distR?: number;
-  distT?: number;
-  distB?: number;
-}
-
 function imageDisplaySizeHwp(
   imgNode: ImgNode,
   maxWidthHwp: number,
@@ -1575,6 +1558,29 @@ function mkShapeComponentPicture(
     .build();
 }
 
+/**
+ * 개체 공통 속성(HWP 5 표 70)의 배치 비트를 layout으로 채운다.
+ * bit 3-4 세로 기준(0 종이,1 쪽,2 문단), 5-7 세로 정렬, 8-9 가로 기준(0 종이,1 쪽,2 단,3 문단),
+ * 10-12 가로 정렬, 21-23 textWrap. IR page/margin은 디코더와 같게 쪽(1)으로 쓴다.
+ */
+function objectLayoutAttr(base: number, layout: ImgLayout): number {
+  const VERT_REL: Record<string, number> = { page: 1, margin: 1, para: 2, line: 2 };
+  const HORZ_REL: Record<string, number> = { page: 1, margin: 1, column: 2, para: 3 };
+  const ALIGN: Record<string, number> = { top: 0, left: 0, center: 1, bottom: 2, right: 2 };
+  let attr = base;
+  const set = (shift: number, bits: number, value: number | undefined) => {
+    if (value === undefined) return;
+    const mask = ((1 << bits) - 1) << shift;
+    attr = (attr & ~mask) | ((value << shift) & mask);
+  };
+  set(3, 2, layout.vertRelTo ? VERT_REL[layout.vertRelTo] : undefined);
+  set(5, 3, layout.vertAlign ? ALIGN[layout.vertAlign] : undefined);
+  set(8, 2, layout.horzRelTo ? HORZ_REL[layout.horzRelTo] : undefined);
+  set(10, 3, layout.horzAlign ? ALIGN[layout.horzAlign] : undefined);
+  set(21, 3, imgWrapToTextWrapCode(layout.wrap));
+  return attr >>> 0;
+}
+
 function mkObjectCtrl(
   ctrlId: number,
   wHwp: number,
@@ -1584,6 +1590,7 @@ function mkObjectCtrl(
 ): Uint8Array {
   let attr = 0x082a2210;
   if (!layout || layout.wrap === "inline") attr |= 1 | (1 << 2);
+  else attr = objectLayoutAttr(attr, layout);
   return new BufWriter()
     .u32(ctrlId)
     .u32(attr)

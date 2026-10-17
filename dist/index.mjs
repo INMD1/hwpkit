@@ -353,6 +353,113 @@ var ShieldedParser = class {
   }
 };
 
+// src/toolkit/HancomEnums.ts
+var HANCOM_LINE_TYPES = [
+  "NONE",
+  "SOLID",
+  "DOT",
+  "DASH",
+  "DASH_DOT",
+  "DASH_DOT_DOT",
+  "LONG_DASH",
+  "CIRCLE",
+  "DOUBLE_SLIM",
+  "SLIM_THICK",
+  "THICK_SLIM",
+  "SLIM_THICK_SLIM",
+  "WAVE",
+  "DOUBLEWAVE",
+  "THICK3D",
+  "THICKREV3D",
+  "3D",
+  "REV3D"
+];
+var HANCOM_LINE_WIDTHS = [
+  "0.1 mm",
+  "0.12 mm",
+  "0.15 mm",
+  "0.2 mm",
+  "0.25 mm",
+  "0.3 mm",
+  "0.4 mm",
+  "0.5 mm",
+  "0.6 mm",
+  "0.7 mm",
+  "1.0 mm",
+  "1.5 mm",
+  "2.0 mm",
+  "3.0 mm",
+  "4.0 mm",
+  "5.0 mm"
+];
+var HANCOM_TEXT_WRAPS = ["SQUARE", "TOP_AND_BOTTOM", "BEHIND_TEXT", "IN_FRONT_OF_TEXT"];
+var PT_PER_MM = 72 / 25.4;
+var STROKE_TO_LINE_TYPE = {
+  none: 0,
+  solid: 1,
+  dash: 2,
+  dot: 3,
+  dashDot: 4,
+  dashDotDot: 5,
+  double: 8,
+  wave: 12
+};
+function strokeKindToLineType(kind) {
+  return STROKE_TO_LINE_TYPE[kind ?? "solid"] ?? 1;
+}
+function lineTypeToStrokeKind(code) {
+  if (code === 0) return "none";
+  if (code === 2 || code === 6) return "dash";
+  if (code === 3 || code === 7) return "dot";
+  if (code === 4) return "dashDot";
+  if (code === 5) return "dashDotDot";
+  if (code >= 8 && code <= 11) return "double";
+  if (code === 12 || code === 13) return "wave";
+  return "solid";
+}
+function strokeKindToHwpxLineType(kind) {
+  return HANCOM_LINE_TYPES[strokeKindToLineType(kind)];
+}
+function hwpxLineTypeToStrokeKind(name) {
+  const code = HANCOM_LINE_TYPES.indexOf(name ?? "");
+  return code < 0 ? void 0 : lineTypeToStrokeKind(code);
+}
+function nearestLineWidthIndex(pt) {
+  const mm = pt / PT_PER_MM;
+  let best = 0;
+  for (let i = 1; i < HANCOM_LINE_WIDTHS.length; i++) {
+    if (Math.abs(parseFloat(HANCOM_LINE_WIDTHS[i]) - mm) < Math.abs(parseFloat(HANCOM_LINE_WIDTHS[best]) - mm)) best = i;
+  }
+  return best;
+}
+var WRAP_TO_CODE = {
+  inline: 1,
+  square: 0,
+  tight: 0,
+  through: 0,
+  topAndBottom: 1,
+  behind: 2,
+  front: 3,
+  none: 3
+};
+function imgWrapToTextWrapCode(wrap) {
+  return WRAP_TO_CODE[wrap ?? "square"] ?? 0;
+}
+function imgWrapToHwpxTextWrap(wrap) {
+  return HANCOM_TEXT_WRAPS[imgWrapToTextWrapCode(wrap)];
+}
+function textWrapCodeToImgWrap(code) {
+  return ["square", "topAndBottom", "behind", "front"][code] ?? "square";
+}
+function pageNumFormatToHwpx(format) {
+  return format === "roman" ? "ROMAN_SMALL" : format === "romanCaps" ? "ROMAN_CAPITAL" : "DIGIT";
+}
+function hwpxNumberTypeToPageNumFormat(name) {
+  if (name === "ROMAN_SMALL" || name === "ROMAN_LOWER") return "roman";
+  if (name === "ROMAN_CAPITAL" || name === "ROMAN_UPPER") return "romanCaps";
+  return "decimal";
+}
+
 // src/safety/StyleBridge.ts
 var Metric = {
   // HWP 세계 (1 inch = 7200 HWPUNIT)
@@ -406,15 +513,8 @@ var ALIGN_MAP = {
 function safeAlign(raw) {
   return ALIGN_MAP[raw ?? ""] ?? "left";
 }
-var HWPX_STROKE = {
-  SOLID: "solid",
-  NONE: "none",
-  DASH: "dash",
-  DOT: "dot",
+var LEGACY_HWPX_STROKE = {
   DOUBLE: "double",
-  LONG_DASH: "dash",
-  DASH_DOT: "dashDot",
-  DASH_DOT_DOT: "dashDotDot",
   THICK_THIN: "double",
   THIN_THICK: "double",
   TRIPLE: "double"
@@ -438,7 +538,7 @@ var DOCX_STROKE = {
 };
 function safeStrokeHwpx(type, w, c) {
   return {
-    kind: HWPX_STROKE[type ?? ""] ?? "solid",
+    kind: hwpxLineTypeToStrokeKind(type) ?? LEGACY_HWPX_STROKE[type ?? ""] ?? "solid",
     pt: w != null ? Metric.hwpToPt(w) : 0.5,
     color: safeHex(c) ?? "000000"
   };
@@ -1113,6 +1213,14 @@ function getTag(obj, ...names) {
   }
   return [];
 }
+function autoNumPageNum(ctrl) {
+  const autoNum = getTag(ctrl, "hp:autoNum")[0];
+  const numType = autoNum?._attr?.numType;
+  if (numType === "TOTAL_PAGE") return { tag: "pagenum", format: "total" };
+  if (numType !== "PAGE") return void 0;
+  const type = getTag(autoNum, "hp:autoNumFormat")[0]?._attr?.type;
+  return { tag: "pagenum", format: hwpxNumberTypeToPageNumFormat(type) };
+}
 function extractMeta(headObj) {
   try {
     const root = headObj?.["hh:head"]?.[0] ?? headObj?.["hh:HEAD"]?.[0] ?? headObj?.HEAD?.[0] ?? headObj;
@@ -1609,7 +1717,7 @@ function decodePara(p, ctx) {
     const pageNums = getTag(run, "hp:pageNum", "hp:PAGENUM");
     if (pageNums.length > 0) {
       const pn = pageNums[0]?._attr ?? {};
-      const fmt = pn.formatType === "ROMAN_LOWER" ? "roman" : pn.formatType === "ROMAN_UPPER" ? "romanCaps" : "decimal";
+      const fmt = hwpxNumberTypeToPageNumFormat(pn.formatType);
       const pageNumNode = { tag: "pagenum", format: fmt };
       const spanProps = resolveCharPr(run, ctx);
       kids.push({ tag: "span", props: spanProps, kids: [pageNumNode] });
@@ -1618,25 +1726,32 @@ function decodePara(p, ctx) {
     const runPics = collectPics(run);
     const textNodes = getTag(run, "hp:t", "hp:T", "hp:CHAR");
     const textVals = textNodes.map(decodeHwpxText);
+    const ctrlPageNums = getTag(run, "hp:ctrl").map(autoNumPageNum);
     const runKids = [];
     const runOrder = run?._childOrder ?? [];
     if (runOrder.length) {
       let ti = 0;
+      let ci = 0;
       for (const tag of runOrder) {
         if (tag === "hp:t" || tag === "hp:T" || tag === "hp:CHAR" || tag === "CHAR") {
           runKids.push(...textVals[ti++] ?? []);
         } else if (tag === "hp:br" || tag === "hp:BR" || tag === "BR") {
           runKids.push({ tag: "br" });
+        } else if (tag === "hp:ctrl") {
+          const pageNum = ctrlPageNums[ci++];
+          if (pageNum) runKids.push(pageNum);
         }
       }
     } else {
       for (const v of textVals) runKids.push(...v);
+      for (const pageNum of ctrlPageNums) if (pageNum) runKids.push(pageNum);
     }
+    const hasAutoPageNum = ctrlPageNums.some(Boolean);
     const content = runKids.filter((k) => k.tag === "txt").map((k) => k.content).join("");
-    if (content === "" && (run?.["hp:secPr"]?.[0] || run?.["hp:SECPR"]?.[0]) && runPics.length === 0 && pageNums.length === 0)
+    if (content === "" && (run?.["hp:secPr"]?.[0] || run?.["hp:SECPR"]?.[0]) && runPics.length === 0 && pageNums.length === 0 && !hasAutoPageNum)
       continue;
-    if (content !== "" || runPics.length === 0 && pageNums.length === 0) {
-      const spanProps = content === "" ? {} : resolveCharPr(run, ctx);
+    if (content !== "" || hasAutoPageNum || runPics.length === 0 && pageNums.length === 0) {
+      const spanProps = content === "" && !hasAutoPageNum ? {} : resolveCharPr(run, ctx);
       if (runKids.length) kids.push({ tag: "span", props: spanProps, kids: runKids });
       else kids.push(buildSpan("", spanProps));
     }
@@ -1746,21 +1861,17 @@ function extractHwpxObjectLayout(posAttr, textWrap) {
     TOP_AND_BOTTOM: "topAndBottom",
     // float, 위아래 텍스트 흐름
     SQUARE: "square",
-    BOTH_SIDES: "tight",
-    LEFT: "tight",
-    RIGHT: "tight",
-    LARGER_ONLY: "tight",
-    SMALLER_ONLY: "tight",
-    LARGEST_ONLY: "tight",
     BEHIND_TEXT: "behind",
-    FRONT_TEXT: "front",
-    IN_FRONT_OF_TEXT: "front"
+    IN_FRONT_OF_TEXT: "front",
+    BOTH_SIDES: "tight",
+    FRONT_TEXT: "front"
   };
   const wrap = wrapMap[textWrap] ?? "square";
   const horzRelToMap = {
     PARA: "para",
     MARGIN: "margin",
     PAGE: "page",
+    PAPER: "page",
     COLUMN: "column"
   };
   const vertRelToMap = {
@@ -2194,7 +2305,6 @@ function parseParaShape(d) {
   };
 }
 var BORDER_W_PT = [0.28, 0.34, 0.43, 0.57, 0.71, 0.85, 1.13, 1.42, 1.7, 1.98, 2.84, 4.25, 5.67, 8.5, 11.34, 14.17];
-var BORDER_KIND = { 0: "none", 1: "solid", 2: "dash", 3: "dot", 4: "dash", 5: "dash", 6: "dash", 7: "double", 8: "double", 9: "double", 10: "none" };
 function parseBorderFill(d) {
   const borders = [];
   for (let i = 0; i < 4; i++) {
@@ -2225,7 +2335,7 @@ function parseObjectLayout(data) {
   const horzRelTo = horzRelCode === 2 ? "column" : horzRelCode === 3 ? "para" : "page";
   const vertAlign = ["top", "center", "bottom"][vertAlignCode];
   const horzAlign = ["left", "center", "right"][horzAlignCode];
-  const wrap = ["square", "tight", "through", "topAndBottom", "behind", "front"][wrapCode] ?? "square";
+  const wrap = textWrapCodeToImgWrap(wrapCode);
   const rawY = i32(data, 8);
   const rawX = i32(data, 12);
   const layout = {
@@ -2915,7 +3025,7 @@ function colorRef(d, o) {
   return (d[o] << 16 | d[o + 1] << 8 | d[o + 2]).toString(16).padStart(6, "0").toUpperCase();
 }
 function toStroke(b) {
-  return { kind: BORDER_KIND[b.type] ?? "solid", pt: b.widthPt, color: b.color };
+  return { kind: lineTypeToStrokeKind(b.type), pt: b.widthPt, color: b.color };
 }
 function applyCellBorderFill(bf, props) {
   if (bf.borders.length >= 4) {
@@ -2930,8 +3040,7 @@ function strokeFromBF(bfId, di) {
   if (bfId <= 0 || bfId > di.borderFills.length) return void 0;
   const bf = di.borderFills[bfId - 1];
   if (!bf.borders.length) return void 0;
-  const b = bf.borders[0];
-  return { kind: BORDER_KIND[b.type] ?? "solid", pt: b.widthPt, color: b.color };
+  return toStroke(bf.borders[0]);
 }
 function headingFromStyle(style) {
   if (!style) return void 0;
@@ -5439,35 +5548,8 @@ var LangFontBank = class {
     return xml + `</hh:fontfaces>`;
   }
 };
-var KIND_MAP = {
-  solid: "SOLID",
-  dash: "DASH",
-  dot: "DOT",
-  double: "DOUBLE",
-  none: "NONE",
-  dash_dot: "DASH_DOT",
-  dash_dot_dot: "DASH_DOT_DOT"
-};
 function quantizeBorderWidth(pt) {
-  const mm = pt * 0.3528;
-  const standardWidths = [0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 1, 1.5, 2, 3, 4, 5];
-  let closest = standardWidths[0];
-  let minDiff = Math.abs(mm - closest);
-  for (let i = 1; i < standardWidths.length; i++) {
-    const diff = Math.abs(mm - standardWidths[i]);
-    if (diff < minDiff) {
-      minDiff = diff;
-      closest = standardWidths[i];
-    }
-  }
-  let str = closest.toFixed(2);
-  if (str.endsWith("0")) {
-    str = str.slice(0, -1);
-  }
-  if (str.endsWith(".0")) {
-    str = str.slice(0, -2);
-  }
-  return `${str} mm`;
+  return HANCOM_LINE_WIDTHS[nearestLineWidthIndex(pt)];
 }
 var BorderFillBank = class {
   constructor() {
@@ -5480,7 +5562,7 @@ var BorderFillBank = class {
     this._addXml(this._buildXml(defS, defS, defS, defS, void 0));
   }
   _strokeXml(tag, s) {
-    const type = s && s.kind !== "none" ? KIND_MAP[s.kind] ?? "SOLID" : "NONE";
+    const type = s && s.kind !== "none" ? strokeKindToHwpxLineType(s.kind) : "NONE";
     const w = s && s.kind !== "none" ? quantizeBorderWidth(s.pt) : "0.12 mm";
     const c = s ? s.color.startsWith("#") ? s.color : `#${s.color}` : "#000000";
     return `<hh:${tag} type="${type}" width="${w}" color="${c}"/>`;
@@ -6355,7 +6437,7 @@ function encodeRunInner(span) {
     } else if (kid.tag === "br") {
       xml += `<hp:t><hp:lineBreak/></hp:t>`;
     } else if (kid.tag === "pagenum") {
-      const fmt = kid.format === "roman" ? "ROMAN_LOWER" : kid.format === "romanCaps" ? "ROMAN_UPPER" : "DIGIT";
+      const fmt = pageNumFormatToHwpx(kid.format);
       const numType = kid.format === "total" ? "TOTAL_PAGE" : "PAGE";
       xml += `<hp:ctrl><hp:autoNum num="1" numType="${numType}"><hp:autoNumFormat type="${fmt}" userChar="" prefixChar="" suffixChar="" supscript="0"/></hp:autoNum></hp:ctrl>`;
     }
@@ -6375,15 +6457,6 @@ function encodeLinkInner(link, ctx) {
   xml += `<hp:ctrl><hp:fieldEnd beginIDRef="${instanceId}"/></hp:ctrl>`;
   return xml;
 }
-var WRAP_MAP = {
-  inline: "TOP_AND_BOTTOM",
-  square: "SQUARE",
-  tight: "BOTH_SIDES",
-  through: "BOTH_SIDES",
-  none: "FRONT_TEXT",
-  behind: "BEHIND_TEXT",
-  front: "FRONT_TEXT"
-};
 var FLOW_MAP = {
   inline: "BOTH_SIDES",
   square: "LARGEST_ONLY",
@@ -6427,11 +6500,11 @@ function encodeImage(img, ctx) {
   const rotationCenterX = Math.round(wHwp / 2);
   const rotationCenterY = Math.round(hHwp / 2);
   const layout = img.layout;
-  const isInline = !layout || layout.wrap === "inline";
-  const textWrap = layout ? WRAP_MAP[layout.wrap] ?? "SQUARE" : "SQUARE";
   const textFlow = layout ? FLOW_MAP[layout.wrap] ?? "BOTH_SIDES" : "BOTH_SIDES";
+  const placement = buildObjectLayoutAttrs(layout, "LEFT", 0);
+  const textWrap = imgWrapToHwpxTextWrap(layout?.wrap ?? "inline");
   const zOrder = ctx.nextZOrder++;
-  return `<hp:pic id="${ctx.nextElementId++}" zOrder="${zOrder}" numberingType="PICTURE" textWrap="${textWrap}" textFlow="${textFlow}" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="0" reverse="0"><hp:offset x="0" y="0"/><hp:orgSz width="${wHwp}" height="${hHwp}"/><hp:curSz width="${wHwp}" height="${hHwp}"/><hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="${rotationCenterX}" centerY="${rotationCenterY}" rotateimage="1"/><hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo><hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${wHwp}" y="0"/><hc:pt2 x="${wHwp}" y="${hHwp}"/><hc:pt3 x="0" y="${hHwp}"/></hp:imgRect><hp:imgClip left="0" right="${sourceDims.w}" top="0" bottom="${sourceDims.h}"/><hp:inMargin left="0" right="0" top="0" bottom="0"/><hp:imgDim dimwidth="${sourceDims.w}" dimheight="${sourceDims.h}"/><hc:img binaryItemIDRef="${binId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/><hp:effects/><hp:sz width="${wHwp}" widthRelTo="ABSOLUTE" height="${hHwp}" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="${isInline ? 1 : 0}" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/><hp:outMargin left="0" right="0" top="0" bottom="0"/></hp:pic>`;
+  return `<hp:pic id="${ctx.nextElementId++}" zOrder="${zOrder}" numberingType="PICTURE" textWrap="${textWrap}" textFlow="${textFlow}" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="0" reverse="0"><hp:offset x="0" y="0"/><hp:orgSz width="${wHwp}" height="${hHwp}"/><hp:curSz width="${wHwp}" height="${hHwp}"/><hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="${rotationCenterX}" centerY="${rotationCenterY}" rotateimage="1"/><hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo><hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${wHwp}" y="0"/><hc:pt2 x="${wHwp}" y="${hHwp}"/><hc:pt3 x="0" y="${hHwp}"/></hp:imgRect><hp:imgClip left="0" right="${sourceDims.w}" top="0" bottom="${sourceDims.h}"/><hp:inMargin left="0" right="0" top="0" bottom="0"/><hp:imgDim dimwidth="${sourceDims.w}" dimheight="${sourceDims.h}"/><hc:img binaryItemIDRef="${binId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/><hp:effects/><hp:sz width="${wHwp}" widthRelTo="ABSOLUTE" height="${hHwp}" heightRelTo="ABSOLUTE" protect="0"/>` + placement.posXml + placement.outMarginXml + `</hp:pic>`;
 }
 function encodeImgWrapped(img, ctx) {
   const content = encodeImage(img, ctx);
@@ -6449,29 +6522,20 @@ function encodeGridPositioned(grid, ctx, vertPos, secPr = "", hfRun = "", pageFi
   const xml = `<hp:p id="${ctx.nextElementId++}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0" paraTcId="0">` + secPr + hfRun + `<hp:run charPrIDRef="0" charTcId="0">` + gridXml + `</hp:run>` + linesegXml + `</hp:p>`;
   return { xml, nextVertPos: vertPos + totalHeight, hasPageBreak: false };
 }
-function buildGridLayoutAttrs(layout, fallbackHorzAlign) {
+function buildObjectLayoutAttrs(layout, fallbackHorzAlign, defaultDistHwp = 138) {
   const floats = layout !== void 0 && layout.wrap !== "inline";
-  const textWrapMap = {
-    inline: "TOP_AND_BOTTOM",
-    topAndBottom: "TOP_AND_BOTTOM",
-    square: "SQUARE",
-    tight: "BOTH_SIDES",
-    through: "BOTH_SIDES",
-    none: "TOP_AND_BOTTOM",
-    behind: "BEHIND_TEXT",
-    front: "FRONT_TEXT"
-  };
+  const textWrap = layout?.wrap === "none" ? "TOP_AND_BOTTOM" : imgWrapToHwpxTextWrap(layout?.wrap ?? "inline");
   const horzRelMap = {
     para: "PARA",
-    margin: "MARGIN",
+    margin: "PAGE",
     page: "PAGE",
     column: "COLUMN"
   };
   const vertRelMap = {
     para: "PARA",
-    margin: "MARGIN",
+    margin: "PAGE",
     page: "PAGE",
-    line: "LINE"
+    line: "PARA"
   };
   const horzAlignMap = {
     left: "LEFT",
@@ -6490,10 +6554,10 @@ function buildGridLayoutAttrs(layout, fallbackHorzAlign) {
   const horzOffset = layout?.xPt != null ? Metric.ptToHwp(layout.xPt) : 0;
   const vertOffset = layout?.yPt != null ? Metric.ptToHwp(layout.yPt) : 0;
   const posXml = `<hp:pos treatAsChar="${floats ? "0" : "1"}" affectLSpacing="0" flowWithText="${floats && (layout?.vertRelTo === "page" || layout?.horzRelTo === "page") ? "0" : "1"}" allowOverlap="${floats ? "1" : "0"}" holdAnchorAndSO="0" vertRelTo="${vertRelTo}" horzRelTo="${horzRelTo}" vertAlign="${vertAlign}" horzAlign="${horzAlign}" vertOffset="${vertOffset}" horzOffset="${horzOffset}"/>`;
-  const dist = (value) => value != null ? Math.max(0, Metric.ptToHwp(value)) : 138;
+  const dist = (value) => value != null ? Math.max(0, Metric.ptToHwp(value)) : defaultDistHwp;
   const outMarginXml = `<hp:outMargin left="${dist(layout?.distL)}" right="${dist(layout?.distR)}" top="${dist(layout?.distT)}" bottom="${dist(layout?.distB)}"/>`;
   return {
-    textWrap: textWrapMap[layout?.wrap ?? "inline"] ?? "TOP_AND_BOTTOM",
+    textWrap,
     zOrder: Math.round(layout?.zOrder ?? 0),
     noAdjust: floats ? "1" : "0",
     posXml,
@@ -6621,7 +6685,7 @@ function buildGridXml(grid, ctx, maxWidth = ctx.availableWidth) {
     justify: "JUSTIFY"
   };
   const horzAlign = alignMap[grid.props.align ?? "left"] ?? "LEFT";
-  const layoutAttrs = buildGridLayoutAttrs(grid.props.layout, horzAlign);
+  const layoutAttrs = buildObjectLayoutAttrs(grid.props.layout, horzAlign);
   const repeatHeader = grid.props.headerRow ? 1 : 0;
   const xml = `<hp:tbl id="${ctx.nextElementId++}" zOrder="${layoutAttrs.zOrder}" numberingType="TABLE" textWrap="${layoutAttrs.textWrap}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="${repeatHeader}" rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${tblBfId}" noAdjust="${layoutAttrs.noAdjust}"><hp:sz width="${actualTotal}" widthRelTo="ABSOLUTE" height="${totalH}" heightRelTo="ABSOLUTE" protect="0"/>` + layoutAttrs.posXml + layoutAttrs.outMarginXml + `<hp:inMargin left="${tablePadL}" right="${tablePadR}" top="${tablePadT}" bottom="${tablePadB}"/>` + rowsXml + `</hp:tbl>`;
   return { xml, height: totalH };
@@ -8678,14 +8742,6 @@ var BORDER_W_PT2 = [
   11.34,
   14.17
 ];
-var BORDER_KIND_IDX = {
-  solid: 1,
-  dot: 3,
-  dash: 2,
-  double: 7,
-  triple: 8,
-  none: 0
-};
 var ALIGN_CODE = {
   justify: 0,
   left: 1,
@@ -9147,7 +9203,7 @@ function borderWidthIdx(pt) {
 }
 function mkBorderFill(s, bg) {
   const w = new BufWriter();
-  const t = BORDER_KIND_IDX[s.kind] ?? 0;
+  const t = strokeKindToLineType(s.kind);
   const wi = borderWidthIdx(s.pt);
   const col = s.color || "000000";
   w.u16(0);
@@ -9163,10 +9219,9 @@ function mkBorderFill(s, bg) {
 function mkBorderFillPerSide(l, r, t, b, bg) {
   const w = new BufWriter();
   w.u16(0);
-  w.u8(BORDER_KIND_IDX[l.kind] ?? 0).u8(borderWidthIdx(l.pt)).colorRef(l.color || "000000");
-  w.u8(BORDER_KIND_IDX[r.kind] ?? 0).u8(borderWidthIdx(r.pt)).colorRef(r.color || "000000");
-  w.u8(BORDER_KIND_IDX[t.kind] ?? 0).u8(borderWidthIdx(t.pt)).colorRef(t.color || "000000");
-  w.u8(BORDER_KIND_IDX[b.kind] ?? 0).u8(borderWidthIdx(b.pt)).colorRef(b.color || "000000");
+  for (const s of [l, r, t, b]) {
+    w.u8(strokeKindToLineType(s.kind)).u8(borderWidthIdx(s.pt)).colorRef(s.color || "000000");
+  }
   w.u8(0).u8(0).colorRef("000000");
   if (bg) {
     w.u32(1).colorRef(bg).colorRef(bg).u32(4294967295).u32(0).u8(0);
@@ -9601,9 +9656,27 @@ function mkShapeComponent(wHwp, hHwp) {
 function mkShapeComponentPicture(binDataId, wHwp, hHwp, instanceId) {
   return new BufWriter().u32(0).i32(0).u32(0).i32(0).i32(0).i32(wHwp).i32(0).i32(wHwp).i32(hHwp).i32(0).i32(hHwp).i32(0).i32(0).i32(wHwp).i32(hHwp).u16(0).u16(0).u16(0).u16(0).u8(0).u8(0).u8(0).u16(binDataId).u8(0).u32(instanceId).u32(0).u32(wHwp).u32(hHwp).u8(0).build();
 }
+function objectLayoutAttr(base, layout) {
+  const VERT_REL = { page: 1, margin: 1, para: 2, line: 2 };
+  const HORZ_REL = { page: 1, margin: 1, column: 2, para: 3 };
+  const ALIGN = { top: 0, left: 0, center: 1, bottom: 2, right: 2 };
+  let attr = base;
+  const set = (shift, bits, value) => {
+    if (value === void 0) return;
+    const mask = (1 << bits) - 1 << shift;
+    attr = attr & ~mask | value << shift & mask;
+  };
+  set(3, 2, layout.vertRelTo ? VERT_REL[layout.vertRelTo] : void 0);
+  set(5, 3, layout.vertAlign ? ALIGN[layout.vertAlign] : void 0);
+  set(8, 2, layout.horzRelTo ? HORZ_REL[layout.horzRelTo] : void 0);
+  set(10, 3, layout.horzAlign ? ALIGN[layout.horzAlign] : void 0);
+  set(21, 3, imgWrapToTextWrapCode(layout.wrap));
+  return attr >>> 0;
+}
 function mkObjectCtrl(ctrlId, wHwp, hHwp, instanceId, layout) {
   let attr = 136978960;
   if (!layout || layout.wrap === "inline") attr |= 1 | 1 << 2;
+  else attr = objectLayoutAttr(attr, layout);
   return new BufWriter().u32(ctrlId).u32(attr).i32(layout?.yPt ? Metric.ptToHwp(layout.yPt) : 0).i32(layout?.xPt ? Metric.ptToHwp(layout.xPt) : 0).u32(wHwp).u32(hHwp).i32(layout?.zOrder ?? 0).u16(layout?.distL ? Metric.ptToHwp(layout.distL) : 0).u16(layout?.distR ? Metric.ptToHwp(layout.distR) : 0).u16(layout?.distT ? Metric.ptToHwp(layout.distT) : 0).u16(layout?.distB ? Metric.ptToHwp(layout.distB) : 0).u32(instanceId).i32(0).u16(0).build();
 }
 function encodePicPara(imgNode, binDataId, bank, lv, idGen, availWidthHwp, divideSort = 0, vertPos = 0, maxHeightHwp = Number.MAX_SAFE_INTEGER) {

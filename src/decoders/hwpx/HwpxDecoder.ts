@@ -48,6 +48,7 @@ import { ArchiveKit } from "../../toolkit/ArchiveKit";
 import { XmlKit } from "../../toolkit/XmlKit";
 import { TextKit } from "../../toolkit/TextKit";
 import { inferColumnWidths } from "../../toolkit/TableGeometry";
+import { hwpxNumberTypeToPageNumFormat } from "../../toolkit/HancomEnums";
 import { registry } from "../../pipeline/registry";
 import { BaseDecoder } from "../../core/BaseDecoder";
 import { HWPX_MIME_TYPE } from "../../encoders/hwpx/constants";
@@ -219,6 +220,16 @@ function getTag(obj: any, ...names: string[]): any[] {
     if (v != null) return toArr(v);
   }
   return [];
+}
+
+/** hp:ctrl > hp:autoNum(numType PAGE/TOTAL_PAGE) → 본문 안 쪽 번호. 그림/표 번호 등은 제외. */
+function autoNumPageNum(ctrl: any): PageNumNode | undefined {
+  const autoNum = getTag(ctrl, "hp:autoNum")[0];
+  const numType = autoNum?._attr?.numType;
+  if (numType === "TOTAL_PAGE") return { tag: "pagenum", format: "total" };
+  if (numType !== "PAGE") return undefined;
+  const type = getTag(autoNum, "hp:autoNumFormat")[0]?._attr?.type;
+  return { tag: "pagenum", format: hwpxNumberTypeToPageNumFormat(type) };
 }
 
 function extractMeta(headObj: any): DocMeta {
@@ -934,12 +945,7 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
     const pageNums = getTag(run, "hp:pageNum", "hp:PAGENUM");
     if (pageNums.length > 0) {
       const pn = pageNums[0]?._attr ?? {};
-      const fmt =
-        pn.formatType === "ROMAN_LOWER"
-          ? ("roman" as const)
-          : pn.formatType === "ROMAN_UPPER"
-            ? ("romanCaps" as const)
-            : ("decimal" as const);
+      const fmt = hwpxNumberTypeToPageNumFormat(pn.formatType);
       const pageNumNode: PageNumNode = { tag: "pagenum", format: fmt };
       const spanProps = resolveCharPr(run, ctx);
       kids.push({ tag: "span", props: spanProps, kids: [pageNumNode] });
@@ -950,20 +956,27 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
     const runPics = collectPics(run);
     const textNodes = getTag(run, "hp:t", "hp:T", "hp:CHAR");
     const textVals = textNodes.map(decodeHwpxText);
+    const ctrlPageNums = getTag(run, "hp:ctrl").map(autoNumPageNum);
     const runKids: any[] = [];
     const runOrder = (run?._childOrder as string[] | undefined) ?? [];
     if (runOrder.length) {
       let ti = 0;
+      let ci = 0;
       for (const tag of runOrder) {
         if (tag === "hp:t" || tag === "hp:T" || tag === "hp:CHAR" || tag === "CHAR") {
           runKids.push(...(textVals[ti++] ?? []));
         } else if (tag === "hp:br" || tag === "hp:BR" || tag === "BR") {
           runKids.push({ tag: "br" });
+        } else if (tag === "hp:ctrl") {
+          const pageNum = ctrlPageNums[ci++];
+          if (pageNum) runKids.push(pageNum);
         }
       }
     } else {
       for (const v of textVals) runKids.push(...v);
+      for (const pageNum of ctrlPageNums) if (pageNum) runKids.push(pageNum);
     }
+    const hasAutoPageNum = ctrlPageNums.some(Boolean);
     const content = runKids
       .filter((k: any) => k.tag === "txt")
       .map((k: any) => k.content)
@@ -974,13 +987,14 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
       content === "" &&
       (run?.["hp:secPr"]?.[0] || run?.["hp:SECPR"]?.[0]) &&
       runPics.length === 0 &&
-      pageNums.length === 0
+      pageNums.length === 0 &&
+      !hasAutoPageNum
     )
       continue;
 
     // Only push text span when there's actual content and no image already pushed for this run
-    if (content !== "" || (runPics.length === 0 && pageNums.length === 0)) {
-      const spanProps = content === "" ? {} : resolveCharPr(run, ctx);
+    if (content !== "" || hasAutoPageNum || (runPics.length === 0 && pageNums.length === 0)) {
+      const spanProps = content === "" && !hasAutoPageNum ? {} : resolveCharPr(run, ctx);
       if (runKids.length) kids.push({ tag: "span", props: spanProps, kids: runKids });
       else kids.push(buildSpan("", spanProps));
     }
@@ -1126,28 +1140,25 @@ function extractHwpxObjectLayout(posAttr: any, textWrap: string): ImgLayout {
     posAttr.treatAsChar === "1" || posAttr.treatAsChar === "true";
   if (treatAsChar) return { wrap: "inline" };
 
-  // OWPML §7.5.8.1 textWrap → ImgWrap 매핑
-  // TOP_AND_BOTTOM: 텍스트가 이미지 위아래로만 흐름 → DOCX wrapTopAndBottom (float anchor)
+  // 한컴 textWrap은 SQUARE/TOP_AND_BOTTOM/BEHIND_TEXT/IN_FRONT_OF_TEXT 4종이다.
+  // BOTH_SIDES/FRONT_TEXT는 이전 hwpkit 출력 호환용이다(BOTH_SIDES는 원래 textFlow 값).
   const wrapMap: Record<string, ImgWrap> = {
     TOP_AND_BOTTOM: "topAndBottom", // float, 위아래 텍스트 흐름
     SQUARE: "square",
-    BOTH_SIDES: "tight",
-    LEFT: "tight",
-    RIGHT: "tight",
-    LARGER_ONLY: "tight",
-    SMALLER_ONLY: "tight",
-    LARGEST_ONLY: "tight",
     BEHIND_TEXT: "behind",
-    FRONT_TEXT: "front",
     IN_FRONT_OF_TEXT: "front",
+    BOTH_SIDES: "tight",
+    FRONT_TEXT: "front",
   };
   const wrap: ImgWrap = wrapMap[textWrap] ?? "square";
 
-  // 기준점
+  // 기준점: 한컴 horzRelTo PAPER/PAGE/COLUMN/PARA, vertRelTo PAPER/PAGE/PARA.
+  // MARGIN/LINE은 이전 hwpkit 출력 호환용이다.
   const horzRelToMap: Record<string, ImgHorzRelTo> = {
     PARA: "para",
     MARGIN: "margin",
     PAGE: "page",
+    PAPER: "page",
     COLUMN: "column",
   };
   const vertRelToMap: Record<string, ImgVertRelTo> = {
