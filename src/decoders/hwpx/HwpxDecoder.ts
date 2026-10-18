@@ -457,6 +457,13 @@ function buildFontIdMap(headObj: any): Map<string, string> {
   return fontMap;
 }
 
+/** Legacy inline CHARPRs use booleans as well as named decoration enums. */
+function decorationEnabled(raw: unknown, strikeout = false): boolean | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const value = String(raw).trim().toUpperCase();
+  return !['', '0', 'FALSE', 'OFF', 'NONE', ...(strikeout ? ['3D'] : [])].includes(value);
+}
+
 function extractCharPrs(headObj: any): Map<number, CharPrInfo> {
   const map = new Map<number, CharPrInfo>();
   try {
@@ -500,13 +507,12 @@ function extractCharPrs(headObj: any): Map<number, CharPrInfo> {
       if (cp?.["hh:italic"]?.[0] != null) info.i = true;
 
       // underline
-      const ulAttr = cp?.["hh:underline"]?.[0]?._attr;
-      if (ulAttr?.type && ulAttr.type !== "NONE") info.u = true;
+      const ulAttr = (cp?.["hh:underline"]?.[0] ?? cp?.["hh:UNDERLINE"]?.[0])?._attr;
+      if (decorationEnabled(ulAttr?.type ?? ulAttr?.Type)) info.u = true;
 
       // strikeout — shape="3D" is default "no strikeout" in real HWPX; only SOLID/etc means active
-      const stAttr = cp?.["hh:strikeout"]?.[0]?._attr;
-      if (stAttr?.shape && stAttr.shape !== "NONE" && stAttr.shape !== "3D")
-        info.s = true;
+      const stAttr = (cp?.["hh:strikeout"]?.[0] ?? cp?.["hh:STRIKEOUT"]?.[0])?._attr;
+      if (decorationEnabled(stAttr?.shape ?? stAttr?.Shape, true)) info.s = true;
 
       // font name — resolve from fontRef.hangul → fontfaces
       const fontRefAttr =
@@ -1051,8 +1057,8 @@ function resolveCharPr(run: any, ctx: DecCtx): TextProps {
   return {
     b: bVal === "1" || bVal === "true" || bVal === "True" || undefined,
     i: iVal === "1" || iVal === "true" || iVal === "True" || undefined,
-    u: uVal && uVal !== "NONE" ? true : undefined,
-    s: sVal && sVal !== "NONE" && sVal !== "3D" ? true : undefined,
+    u: decorationEnabled(uVal),
+    s: decorationEnabled(sVal, true),
     font: fontName ? safeFont(fontName) : undefined,
     pt: heightVal ? Metric.hHeightToPt(Number(heightVal)) : undefined,
     color: normalizeHwpxTextColor(ca.TextColor ?? ca.textColor),

@@ -305,13 +305,22 @@ function parseCharShape(d: Uint8Array): HwpCharShape {
   // shadow=11..12, superscript=15, subscript=16, strikeout=18..20,
   // emphasis=21..24, font-space=25, strikeout-shape=26..29, kerning=30.
 
+  const underlineType = (attr >>> 2) & 3;
+  const underlineShape = (attr >>> 4) & 0xf;
+  // Legacy underline type 2 is line-through, not a bottom underline. Hancom's
+  // CHAR_SHAPE reader migrates it to strikeout and copies the underline shape.
+  // Shape 15 is the non-drawing sentinel found in ordinary text (e.g.
+  // 0x3c0400f8); an enabled type bit alone does not make a visible line.
+  const strikeoutShape = underlineType === 2 ? underlineShape : (attr >>> 26) & 0xf;
+  const strikeoutEnabled = underlineType === 2 || ((attr >>> 18) & 0x7) !== 0;
+
   return {
     faceIds,
     height: (height > 0 && height < 100000) ? height : 1000,
     italic:      (attr & 1) !== 0,
     bold:        ((attr >> 1) & 1) !== 0,
-    underline:   ((attr >>> 2) & 3) !== 0,
-    strikeout:   ((attr >>> 18) & 0x7) !== 0,
+    underline:   underlineType === 1 || underlineType === 3,
+    strikeout:   strikeoutEnabled && strikeoutShape !== 15,
     superscript: (attr & (1 << 15)) !== 0,
     subscript:   (attr & (1 << 16)) !== 0,
     textColor:   d.length >= 56 ? colorRef(d, 52) : '000000',

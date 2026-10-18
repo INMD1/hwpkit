@@ -1434,6 +1434,11 @@ function buildFontIdMap(headObj) {
   }
   return fontMap;
 }
+function decorationEnabled(raw, strikeout = false) {
+  if (raw === void 0 || raw === null) return void 0;
+  const value2 = String(raw).trim().toUpperCase();
+  return !["", "0", "FALSE", "OFF", "NONE", ...strikeout ? ["3D"] : []].includes(value2);
+}
 function extractCharPrs(headObj) {
   const map = /* @__PURE__ */ new Map();
   try {
@@ -1453,11 +1458,10 @@ function extractCharPrs(headObj) {
       if (attr.textColor) info.color = normalizeHwpxTextColor(attr.textColor);
       if (cp?.["hh:bold"]?.[0] != null) info.b = true;
       if (cp?.["hh:italic"]?.[0] != null) info.i = true;
-      const ulAttr = cp?.["hh:underline"]?.[0]?._attr;
-      if (ulAttr?.type && ulAttr.type !== "NONE") info.u = true;
-      const stAttr = cp?.["hh:strikeout"]?.[0]?._attr;
-      if (stAttr?.shape && stAttr.shape !== "NONE" && stAttr.shape !== "3D")
-        info.s = true;
+      const ulAttr = (cp?.["hh:underline"]?.[0] ?? cp?.["hh:UNDERLINE"]?.[0])?._attr;
+      if (decorationEnabled(ulAttr?.type ?? ulAttr?.Type)) info.u = true;
+      const stAttr = (cp?.["hh:strikeout"]?.[0] ?? cp?.["hh:STRIKEOUT"]?.[0])?._attr;
+      if (decorationEnabled(stAttr?.shape ?? stAttr?.Shape, true)) info.s = true;
       const fontRefAttr = cp?.["hh:fontRef"]?.[0]?._attr ?? cp?.["hh:FONTREF"]?.[0]?._attr;
       if (fontRefAttr) {
         const faces = {};
@@ -1863,8 +1867,8 @@ function resolveCharPr(run, ctx) {
   return {
     b: bVal === "1" || bVal === "true" || bVal === "True" || void 0,
     i: iVal === "1" || iVal === "true" || iVal === "True" || void 0,
-    u: uVal && uVal !== "NONE" ? true : void 0,
-    s: sVal && sVal !== "NONE" && sVal !== "3D" ? true : void 0,
+    u: decorationEnabled(uVal),
+    s: decorationEnabled(sVal, true),
     font: fontName ? safeFont(fontName) : void 0,
     pt: heightVal ? Metric.hHeightToPt(Number(heightVal)) : void 0,
     color: normalizeHwpxTextColor(ca.TextColor ?? ca.textColor),
@@ -2336,13 +2340,17 @@ function parseCharShape(d) {
   for (let i = 0; i < 7; i++) faceIds.push(d.length >= (i + 1) * 2 ? BinaryKit.readU16LE(d, i * 2) : 0);
   const height = d.length >= 46 ? BinaryKit.readU32LE(d, 42) : 1e3;
   const attr = d.length >= 50 ? BinaryKit.readU32LE(d, 46) : 0;
+  const underlineType = attr >>> 2 & 3;
+  const underlineShape = attr >>> 4 & 15;
+  const strikeoutShape = underlineType === 2 ? underlineShape : attr >>> 26 & 15;
+  const strikeoutEnabled = underlineType === 2 || (attr >>> 18 & 7) !== 0;
   return {
     faceIds,
     height: height > 0 && height < 1e5 ? height : 1e3,
     italic: (attr & 1) !== 0,
     bold: (attr >> 1 & 1) !== 0,
-    underline: (attr >>> 2 & 3) !== 0,
-    strikeout: (attr >>> 18 & 7) !== 0,
+    underline: underlineType === 1 || underlineType === 3,
+    strikeout: strikeoutEnabled && strikeoutShape !== 15,
     superscript: (attr & 1 << 15) !== 0,
     subscript: (attr & 1 << 16) !== 0,
     textColor: d.length >= 56 ? colorRef(d, 52) : "000000"
@@ -7788,7 +7796,7 @@ function encodeTextProperties(p) {
   const rPr = [];
   if (p.b !== void 0) rPr.push(p.b ? "<w:b/>" : '<w:b w:val="0"/>');
   if (p.i !== void 0) rPr.push(p.i ? "<w:i/>" : '<w:i w:val="0"/>');
-  if (p.u) rPr.push('<w:u w:val="single"/>');
+  if (p.u !== void 0) rPr.push(p.u ? '<w:u w:val="single"/>' : '<w:u w:val="none"/>');
   if (p.s !== void 0) rPr.push(p.s ? "<w:strike/>" : '<w:strike w:val="0"/>');
   if (p.sup) rPr.push('<w:vertAlign w:val="superscript"/>');
   if (p.sub) rPr.push('<w:vertAlign w:val="subscript"/>');

@@ -955,7 +955,7 @@ function encodeTextProperties(p: TextProps): string[] {
   const rPr: string[] = [];
   if (p.b !== undefined) rPr.push(p.b ? "<w:b/>" : '<w:b w:val="0"/>');
   if (p.i !== undefined) rPr.push(p.i ? "<w:i/>" : '<w:i w:val="0"/>');
-  if (p.u) rPr.push('<w:u w:val="single"/>');
+  if (p.u !== undefined) rPr.push(p.u ? '<w:u w:val="single"/>' : '<w:u w:val="none"/>');
   if (p.s !== undefined) rPr.push(p.s ? "<w:strike/>" : '<w:strike w:val="0"/>');
   if (p.sup) rPr.push('<w:vertAlign w:val="superscript"/>');
   if (p.sub) rPr.push('<w:vertAlign w:val="subscript"/>');

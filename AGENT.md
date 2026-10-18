@@ -24,6 +24,23 @@
 
 후속 수정마다 원인·관련 파일·명세 조항·검증 결과·남은 한계를 간결하게 갱신한다.
 
+## 2026-10-18 HWP/HWPX→DOCX 불필요한 밑줄·취소선 수정
+
+- 사용자 원본 입찰공고 HWP, SHA256 `228b8272637dd2ed89a3cad7472570ba4acf45231cc9b3d6dce9df80d7d0416d`.
+  상세·원시 감사·전후 렌더: `docs/decoration-fix-2026-10-18/`.
+- CHAR_SHAPE `0x3c0400f8/fa` 69개를 밑줄+취소선으로 오판. 구형 underline type2는
+  line-through로 이관해 읽고 선모양15 비표시를 적용. 실제 밑줄1/3 및 취소선은 보존.
+  이전 REA MCP sub_64f5f0 증거 재사용·retained-rea-evidence.json 보존, 새 세션 실행 아님.
+- HWPX 인라인/헤더의 0/false/off/none 및 대소문자 정규화, 기존 strikeout3D OFF 유지.
+  DOCX 인코더는 명시적 underline false를 w:u none으로 출력.
+- 사용자 기존 output(2).docx의 밑줄/취소선 각239→0, XML텍스트4745자 전후동일.
+  대응3701자 진하게/기울임 불일치0. ESM/CJS 실제 원본 변환 및 네이티브 HWPX도 확인.
+  다운로드 `입찰공고서-밑줄취소선수정.docx`. 원본·이전파일 보존.
+- 회귀28개 포함 전체222 통과/선택LO1 생략, 타입·라이브러리·playground 빌드, dist 갱신.
+  전후DOCX PDF10쪽, 각쪽 공백제외추출텍스트동일, 첫쪽/끝쪽 화면 확인.
+- 한계: 원본의 기존17자 미대응·생성HWPX경유 목록/필드45자추가는 별도. 이번 장식 수정은
+  기존직접출력 텍스트를 바꾸지 않음. 전체배치/장식선 세부모양 일치 인증은 아님.
+
 ## 2026-10-18 Node 공개 API 출력 확인
 
 - `tools/verify-code-output.mjs SOURCE.docx OUTPUT_DIRECTORY`: dist 공개 exports의 ESM/CJS를
