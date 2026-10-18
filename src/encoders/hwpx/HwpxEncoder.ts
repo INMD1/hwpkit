@@ -36,6 +36,13 @@ import { Metric, safeFontToKr } from "../../safety/StyleBridge";
 import { ArchiveKit } from "../../toolkit/ArchiveKit";
 import { TextKit } from "../../toolkit/TextKit";
 import { fitColumnWidths } from "../../toolkit/TableGeometry";
+import {
+  HANCOM_LINE_WIDTHS,
+  imgWrapToHwpxTextWrap,
+  nearestLineWidthIndex,
+  pageNumFormatToHwpx,
+  strokeKindToHwpxLineType,
+} from "../../toolkit/HancomEnums";
 import { registry } from "../../pipeline/registry";
 import { HWPX_MIME_TYPE } from "./constants";
 
@@ -107,26 +114,11 @@ class LangFontBank {
     return id;
   }
 
-  /** 폰트 이름 → 한글 폰트 여부 판별 (ANYTOHWP 방식) */
-  private isKorean(face: string): boolean {
-    return (
-      /[\uAC00-\uD7A3\u3131-\u318E]/.test(face) ||
-      ["맑은", "나눔", "굴림", "돋움", "바탕", "함초롬", "한컴", "HY"].some(
-        (k) => face.includes(k),
-      )
-    );
-  }
-
-  /** Register a face in every language bank and return bank-local IDs. */
-  registerFont(rawFace: string): Record<LangGroup, number> {
-    const face = safeFontToKr(rawFace) || "함초롬바탕";
-    const isKor = this.isKorean(face);
+  registerFont(rawFace: string, faces?: TextProps['fontFaces']): Record<LangGroup, number> {
     const ids = {} as Record<LangGroup, number>;
     for (const group of LANG_GROUPS) {
-      const useFace = group === "LATIN"
-        ? (isKor ? "함초롬바탕" : face)
-        : (isKor ? face : "함초롬바탕");
-      ids[group] = this.register(group, useFace);
+      const face = faces?.[group.toLowerCase() as keyof NonNullable<TextProps['fontFaces']>] ?? rawFace;
+      ids[group] = this.register(group, safeFontToKr(face));
     }
     return ids;
   }
@@ -161,39 +153,11 @@ class LangFontBank {
 // ─── ANYTOHWP 영감: BorderFill 레지스트리 ───────────────────
 // 하드코딩 "1" 제거 — 모든 셀/표의 실제 테두리를 추적
 
-const KIND_MAP: Record<string, string> = {
-  solid: "SOLID",
-  dash: "DASH",
-  dot: "DOT",
-  double: "DOUBLE",
-  none: "NONE",
-  dash_dot: "DASH_DOT",
-  dash_dot_dot: "DASH_DOT_DOT",
-};
-
 /**
- * 테두리 선 굵기 mm 값을 한글 표준 규격 리스트 중 가장 가까운 값으로 매핑(양자화)합니다.
+ * 테두리 선 굵기를 한컴 굵기 이름으로 양자화합니다("1 mm"가 아니라 "1.0 mm").
  */
 function quantizeBorderWidth(pt: number): string {
-  const mm = pt * 0.3528;
-  const standardWidths = [0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
-  let closest = standardWidths[0];
-  let minDiff = Math.abs(mm - closest);
-  for (let i = 1; i < standardWidths.length; i++) {
-    const diff = Math.abs(mm - standardWidths[i]);
-    if (diff < minDiff) {
-      minDiff = diff;
-      closest = standardWidths[i];
-    }
-  }
-  let str = closest.toFixed(2);
-  if (str.endsWith("0")) {
-    str = str.slice(0, -1);
-  }
-  if (str.endsWith(".0")) {
-    str = str.slice(0, -2);
-  }
-  return `${str} mm`;
+  return HANCOM_LINE_WIDTHS[nearestLineWidthIndex(pt)];
 }
 
 class BorderFillBank {
@@ -212,7 +176,7 @@ class BorderFillBank {
 
   private _strokeXml(tag: string, s?: Stroke): string {
     const type =
-      s && s.kind !== "none" ? (KIND_MAP[s.kind] ?? "SOLID") : "NONE";
+      s && s.kind !== "none" ? strokeKindToHwpxLineType(s.kind) : "NONE";
     const w =
       s && s.kind !== "none" ? quantizeBorderWidth(s.pt) : "0.12 mm";
     const c = s
@@ -409,7 +373,7 @@ interface BinEntry {
 }
 
 function charPrKey(p: TextProps): string {
-  return `${p.b ? 1 : 0}|${p.i ? 1 : 0}|${p.u ? 1 : 0}|${p.s ? 1 : 0}|${p.pt ?? 10}|${p.color ?? "000000"}|${p.font ?? ""}|${p.bg ?? ""}`;
+  return `${p.b ? 1 : 0}|${p.i ? 1 : 0}|${p.u ? 1 : 0}|${p.s ? 1 : 0}|${p.pt ?? 10}|${p.color ?? "000000"}|${p.font ?? ""}|${JSON.stringify(LANG_GROUPS.map(g => p.fontFaces?.[g.toLowerCase() as keyof NonNullable<TextProps["fontFaces"]>]))}|${p.bg ?? ""}`;
 }
 
 /** paraPr의 배율 저장값을 linesegarray가 사용하는 물리 HWPUNIT로 환산한다. */
@@ -450,7 +414,7 @@ function registerCharPr(props: TextProps, ctx: HwpxCtx): number {
   if (existing !== undefined) return existing;
 
   const rawFont = props.font ?? "함초롬바탕";
-  const fontIds = ctx.fontBank.registerFont(rawFont);
+  const fontIds = ctx.fontBank.registerFont(rawFont, props.fontFaces);
   const id = ctx.charPrs.length;
 
   ctx.charPrs.push({
@@ -1336,6 +1300,7 @@ function buildSecPrXml(dims: PageDims): string {
 
 interface LinesegLayout {
   textHeight?: number;
+  baseline?: number;
   firstHorzPos?: number;
   restHorzPos?: number;
   rightMargin?: number;
@@ -1358,10 +1323,10 @@ function buildLinesegarray(
     lineHeightHwp ?? Math.round((fontSize * Math.max(100, lineSpacingPct)) / 100),
   );
   const spacing = Math.max(0, lineAdvance - textHeight);
-  const baseline = Math.round(textHeight * 0.85);
-  const firstHorzPos = Math.max(0, layout.firstHorzPos ?? 0);
-  const restHorzPos = Math.max(0, layout.restHorzPos ?? firstHorzPos);
-  const rightMargin = Math.max(0, layout.rightMargin ?? 0);
+  const baseline = layout.baseline ?? Math.round(fontSize * 0.85);
+  const firstHorzPos = layout.firstHorzPos ?? 0;
+  const restHorzPos = layout.restHorzPos ?? firstHorzPos;
+  const rightMargin = layout.rightMargin ?? 0;
   const lineHorzPos = (index: number) => index === 0 ? firstHorzPos : restHorzPos;
   const lineHorzSize = (index: number) =>
     Math.max(100, horzSize - lineHorzPos(index) - rightMargin);
@@ -1484,7 +1449,7 @@ function paraHasPageBreak(para: ParaNode): boolean {
 }
 
 function fontSizeForPara(para: ParaNode, ctx: HwpxCtx): number {
-  let maxSize = 1000; // 기본 10pt
+  let maxSize = 0; // Use 10pt only when no run specifies a size.
   const visit = (kids: any[]) => {
     for (const kid of kids ?? []) {
       if (kid.tag === "span") {
@@ -1498,7 +1463,7 @@ function fontSizeForPara(para: ParaNode, ctx: HwpxCtx): number {
     }
   };
   visit(para.kids as any[]);
-  return maxSize;
+  return maxSize || 1000;
 }
 
 function inlineObjectHeightForPara(para: ParaNode, ctx: HwpxCtx): number {
@@ -1577,16 +1542,8 @@ function encodeParaPositioned(
   const paraText = extractParaText(para);
   const paraStart =
     vertPos + Math.max(0, paraShapeHwpToLayoutHwp(paraPr?.prevHwp ?? 0));
-  const firstHorzPos = Math.max(
-    0,
-    paraShapeHwpToLayoutHwp(
-      (paraPr?.leftHwp ?? 0) + Math.max(0, paraPr?.intentHwp ?? 0),
-    ),
-  );
-  const restHorzPos = Math.max(
-    0,
-    paraShapeHwpToLayoutHwp((paraPr?.leftHwp ?? 0) - Math.min(0, paraPr?.intentHwp ?? 0)),
-  );
+  const firstHorzPos = Metric.ptToHwp((para.props.indentPt ?? 0) + (para.props.firstLineIndentPt ?? 0));
+  const restHorzPos = Metric.ptToHwp(para.props.indentPt ?? 0);
   const { xml: linesegXml, totalHeight } = buildLinesegarray(
     paraText,
     paraStart,
@@ -1596,12 +1553,10 @@ function encodeParaPositioned(
     effectiveLineHeight,
     {
       textHeight,
+      baseline: Math.max(Math.round(fontSize * 0.85), inlineObjectHeightForPara(para, ctx)),
       firstHorzPos,
       restHorzPos,
-      rightMargin: Math.max(
-        0,
-        paraShapeHwpToLayoutHwp(paraPr?.rightHwp ?? 0),
-      ),
+      rightMargin: Metric.ptToHwp(para.props.indentRightPt ?? 0),
       indentFirst: (paraPr?.intentHwp ?? 0) !== 0,
       pageFirst,
     },
@@ -1793,9 +1748,8 @@ function encodeRunInner(span: SpanNode): string {
     } else if (kid.tag === "br") {
       xml += `<hp:t><hp:lineBreak/></hp:t>`;
     } else if (kid.tag === "pagenum") {
-      const fmt = (kid as any).format === "roman" ? "ROMAN_LOWER" 
-                : (kid as any).format === "romanCaps" ? "ROMAN_UPPER" : "DIGIT";
-      const numType = (kid as any).format === "total" ? "TOTAL_PAGE" : "PAGE";
+      const fmt = pageNumFormatToHwpx(kid.format);
+      const numType = kid.format === "total" ? "TOTAL_PAGE" : "PAGE";
       xml +=
         `<hp:ctrl><hp:autoNum num="1" numType="${numType}">` +
         `<hp:autoNumFormat type="${fmt}" userChar="" prefixChar="" suffixChar="" supscript="0"/>` +
@@ -1836,15 +1790,7 @@ function encodeLinkInner(link: LinkNode, ctx: HwpxCtx): string {
 
 // ─── 이미지 인코딩 (ANYTOHWP 영감: 픽셀 치수 추출) ──────────
 
-const WRAP_MAP: Record<string, string> = {
-  inline: "TOP_AND_BOTTOM",
-  square: "SQUARE",
-  tight: "BOTH_SIDES",
-  through: "BOTH_SIDES",
-  none: "FRONT_TEXT",
-  behind: "BEHIND_TEXT",
-  front: "FRONT_TEXT",
-};
+// textWrap은 HancomEnums.imgWrapToHwpxTextWrap을 쓴다(한컴에는 4종뿐, tight/through 없음).
 const FLOW_MAP: Record<string, string> = {
   inline: "BOTH_SIDES",
   square: "LARGEST_ONLY",
@@ -1899,11 +1845,12 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
   const rotationCenterY = Math.round(hHwp / 2);
 
   const layout = img.layout;
-  const isInline = !layout || layout.wrap === "inline";
-  const textWrap = layout ? (WRAP_MAP[layout.wrap] ?? "SQUARE") : "SQUARE";
   const textFlow = layout
     ? (FLOW_MAP[layout.wrap] ?? "BOTH_SIDES")
     : "BOTH_SIDES";
+  const placement = buildObjectLayoutAttrs(layout, "LEFT", 0);
+  // 그림의 wrapNone(DOCX 떠 있는 그림)은 글 앞으로 둔다.
+  const textWrap = imgWrapToHwpxTextWrap(layout?.wrap ?? "inline");
   const zOrder = ctx.nextZOrder++;
 
   return (
@@ -1929,10 +1876,8 @@ function encodeImage(img: ImgNode, ctx: HwpxCtx): string {
     `<hc:img binaryItemIDRef="${binId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/>` +
     `<hp:effects/>` +
     `<hp:sz width="${wHwp}" widthRelTo="ABSOLUTE" height="${hHwp}" heightRelTo="ABSOLUTE" protect="0"/>` +
-    `<hp:pos treatAsChar="${isInline ? 1 : 0}" affectLSpacing="0" flowWithText="1" ` +
-    `allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" ` +
-    `vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>` +
-    `<hp:outMargin left="0" right="0" top="0" bottom="0"/>` +
+    placement.posXml +
+    placement.outMarginXml +
     `</hp:pic>`
   );
 }
@@ -1982,32 +1927,31 @@ function encodeGridPositioned(
   return { xml, nextVertPos: vertPos + totalHeight, hasPageBreak: false };
 }
 
-function buildGridLayoutAttrs(
+/**
+ * hp:tbl/hp:pic 공통 배치 속성. 한컴 값만 쓴다:
+ * textWrap SQUARE/TOP_AND_BOTTOM/BEHIND_TEXT/IN_FRONT_OF_TEXT,
+ * horzRelTo PAPER/PAGE/COLUMN/PARA, vertRelTo PAPER/PAGE/PARA (MARGIN/LINE 없음).
+ */
+function buildObjectLayoutAttrs(
   layout: ImgLayout | undefined,
   fallbackHorzAlign: string,
+  defaultDistHwp = 138,
 ): { textWrap: string; zOrder: number; noAdjust: string; posXml: string; outMarginXml: string } {
   const floats = layout !== undefined && layout.wrap !== "inline";
-  const textWrapMap: Record<string, string> = {
-    inline: "TOP_AND_BOTTOM",
-    topAndBottom: "TOP_AND_BOTTOM",
-    square: "SQUARE",
-    tight: "BOTH_SIDES",
-    through: "BOTH_SIDES",
-    none: "TOP_AND_BOTTOM",
-    behind: "BEHIND_TEXT",
-    front: "FRONT_TEXT",
-  };
+  // 표의 wrapNone(DOCX 떠 있는 표)은 기존처럼 자리 차지로 둔다.
+  const textWrap =
+    layout?.wrap === "none" ? "TOP_AND_BOTTOM" : imgWrapToHwpxTextWrap(layout?.wrap ?? "inline");
   const horzRelMap: Record<string, string> = {
     para: "PARA",
-    margin: "MARGIN",
-    page: "PAGE",
+    margin: "PAGE",
+    page: "PAPER",
     column: "COLUMN",
   };
   const vertRelMap: Record<string, string> = {
     para: "PARA",
-    margin: "MARGIN",
-    page: "PAGE",
-    line: "LINE",
+    margin: "PAGE",
+    page: "PAPER",
+    line: "PARA",
   };
   const horzAlignMap: Record<string, string> = {
     left: "LEFT",
@@ -2041,13 +1985,13 @@ function buildGridLayoutAttrs(
     `vertOffset="${vertOffset}" horzOffset="${horzOffset}"/>`;
 
   const dist = (value: number | undefined) =>
-    value != null ? Math.max(0, Metric.ptToHwp(value)) : 138;
+    value != null ? Math.max(0, Metric.ptToHwp(value)) : defaultDistHwp;
   const outMarginXml =
     `<hp:outMargin left="${dist(layout?.distL)}" right="${dist(layout?.distR)}" ` +
     `top="${dist(layout?.distT)}" bottom="${dist(layout?.distB)}"/>`;
 
   return {
-    textWrap: textWrapMap[layout?.wrap ?? "inline"] ?? "TOP_AND_BOTTOM",
+    textWrap,
     zOrder: Math.round(layout?.zOrder ?? 0),
     noAdjust: floats ? "1" : "0",
     posXml,
@@ -2230,7 +2174,7 @@ function buildGridXml(
     left: 'LEFT', right: 'RIGHT', center: 'CENTER', justify: 'JUSTIFY',
   };
   const horzAlign = alignMap[grid.props.align ?? 'left'] ?? 'LEFT';
-  const layoutAttrs = buildGridLayoutAttrs(grid.props.layout, horzAlign);
+  const layoutAttrs = buildObjectLayoutAttrs(grid.props.layout, horzAlign);
 
   const repeatHeader = grid.props.headerRow ? 1 : 0;
   const xml =

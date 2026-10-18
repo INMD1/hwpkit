@@ -11,6 +11,7 @@ import { Metric, safeHex, safeFont } from '../../safety/StyleBridge';
 import { registry } from '../../pipeline/registry';
 import { A4 } from '../../model/doc-props';
 import { inferColumnWidths } from '../../toolkit/TableGeometry';
+import { lineTypeToStrokeKind, textWrapCodeToImgWrap } from '../../toolkit/HancomEnums';
 import pako from 'pako';
 
 /* ═══════════════════════════════════════════════════════════════
@@ -115,6 +116,7 @@ interface HwpBorderFill {
 
 interface DocInfo {
   faceNames: string[];
+  fontBanks: string[][];
   charShapes: HwpCharShape[];
   paraShapes: HwpParaShape[];
   borderFills: HwpBorderFill[];
@@ -189,6 +191,7 @@ function parseDocInfo(data: Uint8Array, compressed: boolean): DocInfo {
   const recs = parseRecords(raw);
   const info: DocInfo = {
     faceNames: [],
+    fontBanks: [],
     charShapes: [],
     paraShapes: [],
     borderFills: [],
@@ -207,6 +210,17 @@ function parseDocInfo(data: Uint8Array, compressed: boolean): DocInfo {
       if (r.tag === TAG_NUMBERING)   info.numberings.push(parseNumbering(r.data));
       if (r.tag === TAG_BULLET)      info.bullets.push(parseBullet(r.data));
     } catch { /* skip malformed record */ }
+  }
+  const mapping = recs.find(r => r.tag === 17)?.data;
+  if (mapping && mapping.length >= 32) {
+    let start = 0;
+    for (let lang = 0; lang < 7; lang++) {
+      const count = BinaryKit.readU32LE(mapping, 4 + lang * 4);
+      info.fontBanks.push(info.faceNames.slice(start, start + count));
+      start += count;
+    }
+  } else {
+    info.fontBanks = Array.from({ length: 7 }, () => info.faceNames);
   }
   return info;
 }
@@ -276,12 +290,9 @@ function parseBullet(d: Uint8Array): HwpBullet {
     28       7    relSize[7]
     35       7    offset[7]
     42       4    height      (UINT32, HWP-units 100 = 1pt)
-    46       4    attr/textColor
-
-    Hancom-authored HWP files commonly store text-color bytes at offset 46,
-    while hwpkit-authored files store the compact style bitfield there. Keep
-    bold/italic compatibility, but only accept underline/strike from unambiguous
-    compact flags so color bytes do not become bogus decorations. */
+    46       4    attributes
+    50       2    shadow offset
+    52       4    textColor */
 
 function parseCharShape(d: Uint8Array): HwpCharShape {
   const faceIds: number[] = [];
@@ -290,24 +301,19 @@ function parseCharShape(d: Uint8Array): HwpCharShape {
   const height = d.length >= 46 ? BinaryKit.readU32LE(d, 42) : 1000;
   const attr   = d.length >= 50 ? BinaryKit.readU32LE(d, 46) : 0;
 
-  // attr bit layout (HWP 5.0 spec Table 35):
-  //  0: italic, 1: bold, 2-4: underline type(3), 5-8: underline shape(4),
-  //  9-11: outline(3), 12-13: shadow(2), 14: emboss, 15: engrave,
-  //  16-17: super/sub(2, 0=none,1=super,2=sub), 18-20: strikeout type(3),
-  //  21-24: strikeout shape(4), 25: annotLine, 26-28: annotLine type,
-  //  29: useFontSpace, 30: kerning
-  const compactStyleFlags = (attr & 0xFF000000) === 0;
-  const suType  = (attr >> 16) & 0x3;   // 2 bits at 16-17 (0=none,1=super,2=sub)
+  // HWP 5.0 table 35: italic=0, bold=1, underline=2..3, outline=8..10,
+  // shadow=11..12, superscript=15, subscript=16, strikeout=18..20,
+  // emphasis=21..24, font-space=25, strikeout-shape=26..29, kerning=30.
 
   return {
     faceIds,
     height: (height > 0 && height < 100000) ? height : 1000,
     italic:      (attr & 1) !== 0,
     bold:        ((attr >> 1) & 1) !== 0,
-    underline:   compactStyleFlags && (attr & (1 << 2)) !== 0,
-    strikeout:   compactStyleFlags && ((attr >> 18) & 0x7) !== 0,
-    superscript: suType === 1,
-    subscript:   suType === 2,
+    underline:   ((attr >>> 2) & 3) !== 0,
+    strikeout:   ((attr >>> 18) & 0x7) !== 0,
+    superscript: (attr & (1 << 15)) !== 0,
+    subscript:   (attr & (1 << 16)) !== 0,
     textColor:   d.length >= 56 ? colorRef(d, 52) : '000000',
   };
 }
@@ -395,7 +401,7 @@ function parseParaShape(d: Uint8Array): HwpParaShape {
     [36:4] faceColor (bgColor for solid fill)                        */
 
 const BORDER_W_PT = [0.28, 0.34, 0.43, 0.57, 0.71, 0.85, 1.13, 1.42, 1.70, 1.98, 2.84, 4.25, 5.67, 8.50, 11.34, 14.17];
-const BORDER_KIND: Record<number, StrokeKind> = { 0:'none',1:'solid',2:'dash',3:'dot',4:'dash',5:'dash',6:'dash',7:'double',8:'double',9:'double',10:'none' };
+// 선 종류 값은 HancomEnums.HANCOM_LINE_TYPES 인덱스와 같다(2=긴 점선, 3=점선, 8=이중선).
 
 function parseBorderFill(d: Uint8Array): HwpBorderFill {
   // HWP 5 BorderFill:
@@ -451,14 +457,13 @@ function parseObjectLayout(data: Uint8Array): ImgLayout | undefined {
   const wrapCode = (flags >>> 21) & 0x7;
 
   const vertRelTo: ImgLayout['vertRelTo'] =
-    vertRelCode === 2 ? 'para' : 'page';
+    vertRelCode === 2 ? 'para' : vertRelCode === 1 ? 'margin' : 'page';
   const horzRelTo: ImgLayout['horzRelTo'] =
-    horzRelCode === 2 ? 'column' : horzRelCode === 3 ? 'para' : 'page';
+    horzRelCode === 2 ? 'column' : horzRelCode === 3 ? 'para' : horzRelCode === 1 ? 'margin' : 'page';
   const vertAlign = (['top', 'center', 'bottom'] as const)[vertAlignCode];
   const horzAlign = (['left', 'center', 'right'] as const)[horzAlignCode];
-  const wrap = (
-    ['square', 'tight', 'through', 'topAndBottom', 'behind', 'front'] as const
-  )[wrapCode] ?? 'square';
+  // 0=어울림, 1=자리 차지, 2=글 뒤로, 3=글 앞으로 (HancomEnums.HANCOM_TEXT_WRAPS)
+  const wrap = textWrapCodeToImgWrap(wrapCode);
 
   // The binary layout stores vertical offset first and horizontal offset next.
   const rawY = i32(data, 8);
@@ -469,8 +474,8 @@ function parseObjectLayout(data: Uint8Array): ImgLayout | undefined {
     vertRelTo,
     horzAlign,
     vertAlign,
-    xPt: rawX !== 0 ? Metric.hwpToPt(rawX) : undefined,
-    yPt: rawY !== 0 ? Metric.hwpToPt(rawY) : undefined,
+    xPt: horzAlignCode === 0 || rawX !== 0 ? Metric.hwpToPt(rawX) : undefined,
+    yPt: vertAlignCode === 0 || rawY !== 0 ? Metric.hwpToPt(rawY) : undefined,
     behindDoc: wrap === 'behind' || undefined,
     zOrder: Math.max(0, i32(data, 24)),
   };
@@ -639,47 +644,7 @@ function parseParagraphGroup(
   {
     const paraContent: Array<SpanNode | GridNode | PageNumNode> = [];
 
-    // P9: atno 컨트롤 위치 수집 (pos 기준 정렬)
-    const atnoCtrls: { pos: number; type: number }[] = [];
-    if (text && text.controls.length > 0) {
-      for (let ci = 0; ci < text.controls.length; ci++) {
-        const ch = ctrlHeaders[ci];
-        if (ch && ch.ctrlId === CTRL_ATNO)
-          atnoCtrls.push({ pos: text.controls[ci].pos, type: ch.atnoType ?? 0 });
-      }
-      atnoCtrls.sort((a, b) => a.pos - b.pos);
-    }
-
-    // P9: 텍스트 chars를 atno 위치 기준으로 분할하여 PageNumNode 삽입
-    if (text && text.chars.length > 0) {
-      if (atnoCtrls.length > 0) {
-        let k = 0;
-        for (const ac of atnoCtrls) {
-          const seg: ParsedChar[] = [];
-          while (k < text.chars.length && text.chars[k].pos < ac.pos) seg.push(text.chars[k++]);
-          if (seg.length > 0) paraContent.push(...resolveCharShapes(seg, csPairs, di));
-          paraContent.push(buildPageNum(ac.type === 0 ? 'decimal' : 'total'));
-        }
-        const rest = text.chars.slice(k);
-        if (rest.length > 0) paraContent.push(...resolveCharShapes(rest, csPairs, di));
-      } else {
-        paraContent.push(...resolveCharShapes(text.chars, csPairs, di));
-      }
-    } else if (atnoCtrls.length > 0) {
-      for (const ac of atnoCtrls) paraContent.push(buildPageNum(ac.type === 0 ? 'decimal' : 'total'));
-    }
-
-    // Image placeholder spans: only for actual image controls.
-    // Non-image controls (footnotes, TOC entries, etc.) are silently skipped.
-    if (text && text.controls.length > 0) {
-      for (let ci = 0; ci < text.controls.length; ci++) {
-        const ch = ctrlHeaders[ci];
-        if (!ch) continue; // anchor-only ctrl (gso is sibling, not inline)
-        const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_PIC || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
-        if (!isImg) continue; // skip footnotes, TOC, page num, etc.
-        paraContent.push(buildSpan(`__EXT_${ch.imgId}__`));
-      }
-    }
+    if (text) paraContent.push(...resolveParagraphInlines(text, csPairs, ctrlHeaders, di));
 
     const leadingExplicitBreak = firstBodyParagraph && (divideSort & 4) !== 0 &&
       !ps?.pageBreakBefore && grids.length === 0 && paraContent.length > 0;
@@ -807,6 +772,28 @@ function parseCharShapePairs(d: Uint8Array): [number, number][] {
 
 /* ── Char-shape → SpanNode resolution ───────────────────────── */
 
+/** Extended controls stay at their original UTF-16 position among text runs. */
+function resolveParagraphInlines(
+  text: ParaTextResult, pairs: [number, number][],
+  headers: { ctrlId: number; imgId: number; atnoType?: number }[], di: DocInfo,
+): (SpanNode | PageNumNode)[] {
+  const out: (SpanNode | PageNumNode)[] = [];
+  let index = 0;
+  for (let ci = 0; ci < text.controls.length; ci++) {
+    const header = headers[ci];
+    if (!header) continue;
+    const isImage = [CTRL_IMAGE, CTRL_PIC, CTRL_FIG, CTRL_OBJ, CTRL_GSO].includes(header.ctrlId);
+    if (!isImage && header.ctrlId !== CTRL_ATNO) continue;
+    const chars: ParsedChar[] = [];
+    while (index < text.chars.length && text.chars[index].pos < text.controls[ci].pos)
+      chars.push(text.chars[index++]);
+    if (chars.length) out.push(...resolveCharShapes(chars, pairs, di));
+    out.push(isImage ? buildSpan(`__EXT_${header.imgId}__`) : buildPageNum(header.atnoType === 0 ? 'decimal' : 'total'));
+  }
+  if (index < text.chars.length) out.push(...resolveCharShapes(text.chars.slice(index), pairs, di));
+  return out;
+}
+
 function resolveCharShapes(chars: ParsedChar[], pairs: [number, number][], di: DocInfo): SpanNode[] {
   const defaultId = pairs.length > 0 ? pairs[0][1] : 0;
   // Paragraph terminators still carry a character shape: it controls blank-line height.
@@ -836,8 +823,14 @@ function styledSpans(text: string, shapeId: number, di: DocInfo): SpanNode[] {
   if (!cs) return [buildSpan(text)];
 
   const props: TextProps = {};
-  const fid = cs.faceIds[0] ?? 0;
-  if (fid < di.faceNames.length && di.faceNames[fid]) props.font = safeFont(di.faceNames[fid]);
+  const scripts = ['hangul', 'latin', 'hanja', 'japanese', 'other', 'symbol', 'user'] as const;
+  const faces: NonNullable<TextProps['fontFaces']> = {};
+  for (let lang = 0; lang < scripts.length; lang++) {
+    const face = di.fontBanks[lang]?.[cs.faceIds[lang] ?? 0];
+    if (face) faces[scripts[lang]] = safeFont(face);
+  }
+  props.font = faces.hangul;
+  if (Object.keys(faces).length) props.fontFaces = faces;
   if (cs.height > 0) props.pt = Metric.hwpToPt(cs.height);
   if (cs.bold)        props.b = true;
   if (cs.italic)      props.i = true;
@@ -849,45 +842,11 @@ function styledSpans(text: string, shapeId: number, di: DocInfo): SpanNode[] {
   const hex = safeHex(cs.textColor);
   if (hex && hex !== '000000') props.color = hex;
 
-  return splitLeadingSymbolRuns(text, props, di);
-}
-
-function splitLeadingSymbolRuns(text: string, props: TextProps, di: DocInfo): SpanNode[] {
-  if (!text) return [buildSpan(text, props)];
-
-  const symbolFont = firstAvailableFont(di, ['한양신명조', 'HY신명조']) ?? props.font;
-  const leadFont = firstAvailableFont(di, ['HCI Poppy']) ?? symbolFont;
-  const out: SpanNode[] = [];
-  let rest = text;
-
-  const lead = rest.match(/^(\s+)([◦→])/);
-  if (lead?.[1]) {
-    out.push(buildSpan(lead[1], { ...props, b: false, font: leadFont }));
-    rest = rest.slice(lead[1].length);
-  }
-
-  const marker = rest.match(/^([□◦→])(\s*)/);
-  if (marker) {
-    out.push(buildSpan(marker[1], { ...props, font: symbolFont }));
-    if (marker[2] && marker[1] !== '□')
-      out.push(buildSpan(marker[2], { ...props, b: false, font: leadFont }));
-    rest = rest.slice(marker[0].length);
-    if (marker[2] && marker[1] === '□') rest = `${marker[2]}${rest}`;
-    if (!marker[2] && rest && (marker[1] === '◦' || marker[1] === '→')) {
-      rest = ` ${rest}`;
-    }
-  }
-
-  if (rest) appendLatinAwareSpans(out, rest, props, leadFont);
-  return out.length ? out : [buildSpan(text, props)];
+  return [buildSpan(text, props)];
 }
 
 function firstAvailableFont(di: DocInfo, names: string[]): string | undefined {
   return names.find(name => di.faceNames.includes(name));
-}
-
-function appendLatinAwareSpans(out: SpanNode[], text: string, props: TextProps, _latinFont?: string): void {
-  out.push(buildSpan(text, props));
 }
 
 /* ── Table control parsing ──────────────────────────────────── */
@@ -1196,18 +1155,9 @@ function parseCellRec(
             }
             else j++;
           }
-          const paraContent: (SpanNode | ContentNode)[] = [];
-          if (txt && txt.chars.length > 0) paraContent.push(...resolveCharShapes(txt.chars, csp, di));
-          if (txt && txt.controls.length > 0) {
-            for (let ci = 0; ci < txt.controls.length; ci++) {
-              const ch = ctrlHdrs[ci];
-              if (!ch) continue;
-              const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_PIC || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
-              if (!isImg) continue;
-              paraContent.push(buildSpan(`__EXT_${ch.imgId}__`));
-            }
-          }
-          const kids = paraContent.length > 0 ? paraContent as any : [buildSpan('')];
+          const paraContent: (SpanNode | ContentNode | PageNumNode)[] = [];
+          if (txt) paraContent.push(...resolveParagraphInlines(txt, csp, ctrlHdrs, di));
+          const kids = paraContent.length > 0 ? paraContent as any : resolveCharShapes([], csp, di);
           // P6: innerGrids 먼저, 앵커 문단 나중 (P5와 동일한 순서)
           const hasPageBreakBefore = (cellDivide & 4) !== 0;
           const isPageBreakOnlyPara = hasPageBreakBefore && paraContent.length === 0 && innerGrids.length === 0;
@@ -1313,7 +1263,7 @@ function colorRef(d: Uint8Array, o: number): string {
 }
 
 function toStroke(b: { type: number; widthPt: number; color: string }): Stroke {
-  return { kind: BORDER_KIND[b.type] ?? 'solid', pt: b.widthPt, color: b.color };
+  return { kind: lineTypeToStrokeKind(b.type), pt: b.widthPt, color: b.color };
 }
 
 // Apply borderFill to CellProps. Preserve explicit NONE so DOCX tcBorders can
@@ -1332,8 +1282,7 @@ function strokeFromBF(bfId: number, di: DocInfo): Stroke | undefined {
   if (bfId <= 0 || bfId > di.borderFills.length) return undefined;
   const bf = di.borderFills[bfId - 1];
   if (!bf.borders.length) return undefined;
-  const b = bf.borders[0];
-  return { kind: BORDER_KIND[b.type] ?? 'solid', pt: b.widthPt, color: b.color };
+  return toStroke(bf.borders[0]);
 }
 
 function headingFromStyle(style?: HwpStyle): Heading | undefined {
@@ -1428,6 +1377,7 @@ export class HwpScanner implements Decoder {
       const diRaw = streams.get('DocInfo');
       let di: DocInfo = {
         faceNames: [],
+    fontBanks: [],
         charShapes: [],
         paraShapes: [],
         borderFills: [],

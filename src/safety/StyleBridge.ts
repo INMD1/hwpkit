@@ -1,4 +1,5 @@
 import type { Align, StrokeKind, Stroke } from '../model/doc-props';
+import { hwpxLineTypeToStrokeKind } from '../toolkit/HancomEnums';
 
 // ─── 단위 변환 ─────────────────────────────────────────────
 export const Metric = {
@@ -54,15 +55,9 @@ export function safeAlign(raw?: string): Align {
 }
 
 // ─── 테두리 정규화 ─────────────────────────────────────────
-const HWPX_STROKE: Record<string, StrokeKind> = {
-  SOLID: "solid",
-  NONE: "none",
-  DASH: "dash",
-  DOT: "dot",
+// 한컴 이름은 HancomEnums 표를 따른다. 아래는 이전 hwpkit 출력 호환용 이름이다.
+const LEGACY_HWPX_STROKE: Record<string, StrokeKind> = {
   DOUBLE: "double",
-  LONG_DASH: "dash",
-  DASH_DOT: "dashDot",
-  DASH_DOT_DOT: "dashDotDot",
   THICK_THIN: "double",
   THIN_THICK: "double",
   TRIPLE: "double",
@@ -87,7 +82,7 @@ const DOCX_STROKE: Record<string, StrokeKind> = {
 
 export function safeStrokeHwpx(type?: string, w?: number, c?: string): Stroke {
   return {
-    kind: HWPX_STROKE[type ?? ''] ?? 'solid',
+    kind: hwpxLineTypeToStrokeKind(type) ?? LEGACY_HWPX_STROKE[type ?? ''] ?? 'solid',
     pt: w != null ? Metric.hwpToPt(w) : 0.5,
     color: safeHex(c) ?? '000000',
   };

@@ -30,6 +30,8 @@ interface TextProps {
     sup?: boolean;
     sub?: boolean;
     font?: string;
+    /** Script-specific faces; IDs in Hancom font banks are local to each script. */
+    fontFaces?: Partial<Record<'hangul' | 'latin' | 'hanja' | 'japanese' | 'other' | 'symbol' | 'user', string>>;
     pt?: number;
     color?: string;
     bg?: string;

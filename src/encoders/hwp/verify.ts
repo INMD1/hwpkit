@@ -212,6 +212,42 @@ function directChildren(records: HwpRecord[], parentIndex: number): HwpRecord[] 
   return children;
 }
 
+function verifyTableGeometry(records: HwpRecord[], index: number, errors: string[]): void {
+  const table = records[index];
+  if (table.data.length < 8) return;
+  const rowCount = readU16(table.data, 4);
+  const colCount = readU16(table.data, 6);
+  const label = `TABLE at offset ${table.offset}`;
+  if (!rowCount || !colCount) {
+    errors.push(`${label} must have at least one row and column`);
+    return;
+  }
+  const rows: [number, number][][] = Array.from({ length: rowCount }, () => []);
+  const starts = new Array(rowCount).fill(0);
+  for (let i = index + 1; i < records.length && records[i].level >= table.level; i++) {
+    const cell = records[i];
+    if (cell.tag !== TAG_LIST_HEADER || cell.level !== table.level || cell.data.length !== CELL_LIST_HEADER_SIZE) continue;
+    const col = readU16(cell.data, 8), row = readU16(cell.data, 10);
+    const cs = readU16(cell.data, 12), rs = readU16(cell.data, 14);
+    if (!cs || !rs || row + rs > rowCount || col + cs > colCount) {
+      errors.push(`${label} has an out-of-bounds cell at row ${row}, column ${col}`);
+      continue;
+    }
+    starts[row]++;
+    for (let r = row; r < row + rs; r++) rows[r].push([col, col + cs]);
+  }
+  rows.forEach((intervals, row) => {
+    let end = 0;
+    for (const [start, next] of intervals.sort((a, b) => a[0] - b[0])) {
+      if (start !== end) errors.push(`${label} has a cell gap or overlap in row ${row}, column ${end}`);
+      end = next;
+    }
+    if (end !== colCount) errors.push(`${label} has an uncovered cell in row ${row}, column ${end}`);
+    if (table.data.length >= 20 + row * 2 && readU16(table.data, 18 + row * 2) !== starts[row])
+      errors.push(`${label} row ${row} cell count does not match LIST_HEADER records`);
+  });
+}
+
 /**
  * Validate every cross-record reference in raw, uncompressed DocInfo/Section0.
  * The encoder calls this before deflate so it never emits a silently broken HWP.
@@ -368,7 +404,15 @@ export function verifyHwpRecordStreams(
       }
       textBytes += record.data.length;
     }
-    if (nChars !== textBytes / 2) {
+    // For an empty paragraph the lone CR is implicit: Hancom skips PARA_TEXT
+    // and expects PARA_CHAR_SHAPE directly after PARA_HEADER.
+    if (nChars === 0) {
+      errors.push(`${label} declares zero characters; the implicit paragraph terminator is required`);
+    } else if (nChars === 1) {
+      if (paraTexts.length !== 0) {
+        errors.push(`${label} with nChars 1 must omit PARA_TEXT (the paragraph terminator is implicit)`);
+      }
+    } else if (nChars !== textBytes / 2) {
       errors.push(
         `${label} declares nChars ${nChars}, but direct PARA_TEXT payloads contain ${textBytes / 2} UTF-16 code unit(s)`,
       );
@@ -420,7 +464,7 @@ export function verifyHwpRecordStreams(
     }
   }
 
-  for (const record of bodyRecords) {
+  for (const [index, record] of bodyRecords.entries()) {
     let borderFillId: number | undefined;
     if (record.tag === TAG_PAGE_BORDER_FILL) {
       if (record.data.length < 14) {
@@ -436,6 +480,7 @@ export function verifyHwpRecordStreams(
     ) {
       borderFillId = readU16(record.data, 32);
     } else if (record.tag === TAG_TABLE) {
+      verifyTableGeometry(bodyRecords, index, errors);
       if (record.data.length < 6) {
         errors.push(
           `TABLE at offset ${record.offset} is ${record.data.length} bytes, expected at least 6`,
