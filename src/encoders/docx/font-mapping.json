@@ -1,0 +1,39 @@
+{
+  "함초롬바탕": {
+    "nearest": "바탕",
+    "candidates": [
+      { "name": "바탕", "distance": 0 },
+      { "name": "Noto Serif CJK KR", "distance": 1 },
+      { "name": "Noto Serif KR", "distance": 1 }
+    ]
+  },
+  "함초롬돋움": {
+    "nearest": "맑은 고딕",
+    "candidates": [
+      { "name": "맑은 고딕", "distance": 0 },
+      { "name": "Noto Sans CJK KR", "distance": 1 },
+      { "name": "Noto Sans KR", "distance": 1 }
+    ]
+  },
+  "한양신명조": {
+    "nearest": "바탕",
+    "candidates": [
+      { "name": "바탕", "distance": 0 },
+      { "name": "Noto Serif CJK KR", "distance": 1 }
+    ]
+  },
+  "HY신명조": {
+    "nearest": "바탕",
+    "candidates": [
+      { "name": "바탕", "distance": 0 },
+      { "name": "Noto Serif CJK KR", "distance": 1 }
+    ]
+  },
+  "휴먼명조": {
+    "nearest": "바탕",
+    "candidates": [
+      { "name": "바탕", "distance": 0 },
+      { "name": "Noto Serif CJK KR", "distance": 1 }
+    ]
+  }
+}
