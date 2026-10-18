@@ -70,6 +70,7 @@ interface CharPrInfo {
   pt?: number;
   color?: string;
   font?: string;
+  fontFaces?: TextProps['fontFaces'];
   bg?: string;
 }
 
@@ -420,8 +421,8 @@ function extractBorderFills(headObj: any): Map<number, BorderFillInfo> {
   return map;
 }
 
-function buildFontIdMap(headObj: any): Map<number, string> {
-  const fontMap = new Map<number, string>();
+function buildFontIdMap(headObj: any): Map<string, string> {
+  const fontMap = new Map<string, string>();
   try {
     const root =
       headObj?.["hh:head"]?.[0] ??
@@ -441,14 +442,14 @@ function buildFontIdMap(headObj: any): Map<number, string> {
     // Try each fontface group (HANGUL, LATIN, etc.) — use the first group that has entries
     const ffGroups = getTag(fontfaces, "hh:fontface", "hh:FONTFACE");
     for (const ff of ffGroups) {
+      const lang = String(ff?._attr?.lang ?? "HANGUL").toLowerCase();
       const fonts = getTag(ff, "hh:font", "hh:FONT");
       for (const font of fonts) {
         const fa = font?._attr ?? {};
         const fid = Number(fa.id ?? -1);
         const name = fa.face ?? fa.name ?? fa.Face ?? "";
-        if (fid >= 0 && name && !fontMap.has(fid)) fontMap.set(fid, name);
+        if (fid >= 0 && name) fontMap.set(`${lang}:${fid}`, name);
       }
-      if (fontMap.size > 0) break; // use first group (usually HANGUL)
     }
   } catch {
     /* non-fatal */
@@ -511,11 +512,14 @@ function extractCharPrs(headObj: any): Map<number, CharPrInfo> {
       const fontRefAttr =
         cp?.["hh:fontRef"]?.[0]?._attr ?? cp?.["hh:FONTREF"]?.[0]?._attr;
       if (fontRefAttr) {
-        const fid = Number(
-          fontRefAttr.hangul ?? fontRefAttr.latin ?? fontRefAttr.Hangul ?? 0,
-        );
-        const name = fontIdMap.get(fid);
-        if (name) info.font = safeFont(name);
+        const faces: NonNullable<TextProps['fontFaces']> = {};
+        for (const lang of ['hangul', 'latin', 'hanja', 'japanese', 'other', 'symbol', 'user'] as const) {
+          const fid = fontRefAttr[lang];
+          const name = fid === undefined ? undefined : fontIdMap.get(`${lang}:${fid}`);
+          if (name) faces[lang] = safeFont(name);
+        }
+        info.font = faces.hangul ?? faces.latin;
+        if (Object.keys(faces).length) info.fontFaces = faces;
       }
 
       map.set(id, info);
@@ -1023,6 +1027,7 @@ function resolveCharPr(run: any, ctx: DecCtx): TextProps {
       pt: def.pt,
       color: def.color,
       font: def.font,
+      fontFaces: def.fontFaces,
       bg: def.bg,
     };
   }
@@ -1157,14 +1162,14 @@ function extractHwpxObjectLayout(posAttr: any, textWrap: string): ImgLayout {
   const horzRelToMap: Record<string, ImgHorzRelTo> = {
     PARA: "para",
     MARGIN: "margin",
-    PAGE: "page",
+    PAGE: "margin",
     PAPER: "page",
     COLUMN: "column",
   };
   const vertRelToMap: Record<string, ImgVertRelTo> = {
     PARA: "para",
     MARGIN: "margin",
-    PAGE: "page",
+    PAGE: "margin",
     PAPER: "page",
     LINE: "line",
   };
@@ -1188,8 +1193,8 @@ function extractHwpxObjectLayout(posAttr: any, textWrap: string): ImgLayout {
   // 오프셋
   const horzOffset = Number(posAttr.horzOffset ?? 0);
   const vertOffset = Number(posAttr.vertOffset ?? 0);
-  const xPt = horzOffset !== 0 ? Metric.hwpToPt(horzOffset) : undefined;
-  const yPt = vertOffset !== 0 ? Metric.hwpToPt(vertOffset) : undefined;
+  const xPt = horzAlign === "left" || horzOffset !== 0 ? Metric.hwpToPt(horzOffset) : undefined;
+  const yPt = vertAlign === "top" || vertOffset !== 0 ? Metric.hwpToPt(vertOffset) : undefined;
 
   return { wrap, horzAlign, vertAlign, horzRelTo, vertRelTo, xPt, yPt };
 }

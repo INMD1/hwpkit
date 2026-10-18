@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig, normalizePath } from 'vite';
 import { resolve } from 'path';
 import { createLibreOfficeDocConverter } from '../src/node';
 
@@ -8,6 +8,17 @@ export default defineConfig({
   root: resolve(__dirname),
   publicDir: resolve(__dirname, 'public'),
   plugins: [{
+    // Codecs register instances as module side effects. Replacing one module
+    // can leave consumers holding the previous registry/converter instances.
+    name: 'reload-library-codecs',
+    handleHotUpdate({ file, server }) {
+      const sourceRoot = normalizePath(resolve(__dirname, '../src')) + '/';
+      if (normalizePath(file).startsWith(sourceRoot) && !file.endsWith('.test.ts')) {
+        server.ws.send({ type: 'full-reload' });
+        return [];
+      }
+    },
+  }, {
     name: 'local-legacy-doc',
     configureServer(server) {
       server.middlewares.use('/api/doc-to-docx', async (req, res) => {

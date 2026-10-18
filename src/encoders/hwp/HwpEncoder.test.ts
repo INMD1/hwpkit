@@ -478,7 +478,7 @@ describe("demo.docx HWP reference integrity regression", () => {
     ).toBeGreaterThan(0);
   });
 
-  it("writes all 343 PARA_HEADER records, including table-cell paragraphs", () => {
-    expect(verification.stats.paragraphCount).toBe(343);
+  it("writes 340 paragraphs, retaining image anchors and the calendar's missing cell", () => {
+    expect(verification.stats.paragraphCount).toBe(340);
   });
 });

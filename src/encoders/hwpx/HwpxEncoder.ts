@@ -114,26 +114,11 @@ class LangFontBank {
     return id;
   }
 
-  /** 폰트 이름 → 한글 폰트 여부 판별 (ANYTOHWP 방식) */
-  private isKorean(face: string): boolean {
-    return (
-      /[\uAC00-\uD7A3\u3131-\u318E]/.test(face) ||
-      ["맑은", "나눔", "굴림", "돋움", "바탕", "함초롬", "한컴", "HY"].some(
-        (k) => face.includes(k),
-      )
-    );
-  }
-
-  /** Register a face in every language bank and return bank-local IDs. */
-  registerFont(rawFace: string): Record<LangGroup, number> {
-    const face = safeFontToKr(rawFace) || "함초롬바탕";
-    const isKor = this.isKorean(face);
+  registerFont(rawFace: string, faces?: TextProps['fontFaces']): Record<LangGroup, number> {
     const ids = {} as Record<LangGroup, number>;
     for (const group of LANG_GROUPS) {
-      const useFace = group === "LATIN"
-        ? (isKor ? "함초롬바탕" : face)
-        : (isKor ? face : "함초롬바탕");
-      ids[group] = this.register(group, useFace);
+      const face = faces?.[group.toLowerCase() as keyof NonNullable<TextProps['fontFaces']>] ?? rawFace;
+      ids[group] = this.register(group, safeFontToKr(face));
     }
     return ids;
   }
@@ -388,7 +373,7 @@ interface BinEntry {
 }
 
 function charPrKey(p: TextProps): string {
-  return `${p.b ? 1 : 0}|${p.i ? 1 : 0}|${p.u ? 1 : 0}|${p.s ? 1 : 0}|${p.pt ?? 10}|${p.color ?? "000000"}|${p.font ?? ""}|${p.bg ?? ""}`;
+  return `${p.b ? 1 : 0}|${p.i ? 1 : 0}|${p.u ? 1 : 0}|${p.s ? 1 : 0}|${p.pt ?? 10}|${p.color ?? "000000"}|${p.font ?? ""}|${JSON.stringify(LANG_GROUPS.map(g => p.fontFaces?.[g.toLowerCase() as keyof NonNullable<TextProps["fontFaces"]>]))}|${p.bg ?? ""}`;
 }
 
 /** paraPr의 배율 저장값을 linesegarray가 사용하는 물리 HWPUNIT로 환산한다. */
@@ -429,7 +414,7 @@ function registerCharPr(props: TextProps, ctx: HwpxCtx): number {
   if (existing !== undefined) return existing;
 
   const rawFont = props.font ?? "함초롬바탕";
-  const fontIds = ctx.fontBank.registerFont(rawFont);
+  const fontIds = ctx.fontBank.registerFont(rawFont, props.fontFaces);
   const id = ctx.charPrs.length;
 
   ctx.charPrs.push({
@@ -1315,6 +1300,7 @@ function buildSecPrXml(dims: PageDims): string {
 
 interface LinesegLayout {
   textHeight?: number;
+  baseline?: number;
   firstHorzPos?: number;
   restHorzPos?: number;
   rightMargin?: number;
@@ -1337,10 +1323,10 @@ function buildLinesegarray(
     lineHeightHwp ?? Math.round((fontSize * Math.max(100, lineSpacingPct)) / 100),
   );
   const spacing = Math.max(0, lineAdvance - textHeight);
-  const baseline = Math.round(textHeight * 0.85);
-  const firstHorzPos = Math.max(0, layout.firstHorzPos ?? 0);
-  const restHorzPos = Math.max(0, layout.restHorzPos ?? firstHorzPos);
-  const rightMargin = Math.max(0, layout.rightMargin ?? 0);
+  const baseline = layout.baseline ?? Math.round(fontSize * 0.85);
+  const firstHorzPos = layout.firstHorzPos ?? 0;
+  const restHorzPos = layout.restHorzPos ?? firstHorzPos;
+  const rightMargin = layout.rightMargin ?? 0;
   const lineHorzPos = (index: number) => index === 0 ? firstHorzPos : restHorzPos;
   const lineHorzSize = (index: number) =>
     Math.max(100, horzSize - lineHorzPos(index) - rightMargin);
@@ -1463,7 +1449,7 @@ function paraHasPageBreak(para: ParaNode): boolean {
 }
 
 function fontSizeForPara(para: ParaNode, ctx: HwpxCtx): number {
-  let maxSize = 1000; // 기본 10pt
+  let maxSize = 0; // Use 10pt only when no run specifies a size.
   const visit = (kids: any[]) => {
     for (const kid of kids ?? []) {
       if (kid.tag === "span") {
@@ -1477,7 +1463,7 @@ function fontSizeForPara(para: ParaNode, ctx: HwpxCtx): number {
     }
   };
   visit(para.kids as any[]);
-  return maxSize;
+  return maxSize || 1000;
 }
 
 function inlineObjectHeightForPara(para: ParaNode, ctx: HwpxCtx): number {
@@ -1556,16 +1542,8 @@ function encodeParaPositioned(
   const paraText = extractParaText(para);
   const paraStart =
     vertPos + Math.max(0, paraShapeHwpToLayoutHwp(paraPr?.prevHwp ?? 0));
-  const firstHorzPos = Math.max(
-    0,
-    paraShapeHwpToLayoutHwp(
-      (paraPr?.leftHwp ?? 0) + Math.max(0, paraPr?.intentHwp ?? 0),
-    ),
-  );
-  const restHorzPos = Math.max(
-    0,
-    paraShapeHwpToLayoutHwp((paraPr?.leftHwp ?? 0) - Math.min(0, paraPr?.intentHwp ?? 0)),
-  );
+  const firstHorzPos = Metric.ptToHwp((para.props.indentPt ?? 0) + (para.props.firstLineIndentPt ?? 0));
+  const restHorzPos = Metric.ptToHwp(para.props.indentPt ?? 0);
   const { xml: linesegXml, totalHeight } = buildLinesegarray(
     paraText,
     paraStart,
@@ -1575,12 +1553,10 @@ function encodeParaPositioned(
     effectiveLineHeight,
     {
       textHeight,
+      baseline: Math.max(Math.round(fontSize * 0.85), inlineObjectHeightForPara(para, ctx)),
       firstHorzPos,
       restHorzPos,
-      rightMargin: Math.max(
-        0,
-        paraShapeHwpToLayoutHwp(paraPr?.rightHwp ?? 0),
-      ),
+      rightMargin: Metric.ptToHwp(para.props.indentRightPt ?? 0),
       indentFirst: (paraPr?.intentHwp ?? 0) !== 0,
       pageFirst,
     },
@@ -1968,13 +1944,13 @@ function buildObjectLayoutAttrs(
   const horzRelMap: Record<string, string> = {
     para: "PARA",
     margin: "PAGE",
-    page: "PAGE",
+    page: "PAPER",
     column: "COLUMN",
   };
   const vertRelMap: Record<string, string> = {
     para: "PARA",
     margin: "PAGE",
-    page: "PAGE",
+    page: "PAPER",
     line: "PARA",
   };
   const horzAlignMap: Record<string, string> = {

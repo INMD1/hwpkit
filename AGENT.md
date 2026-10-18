@@ -24,6 +24,93 @@
 
 후속 수정마다 원인·관련 파일·명세 조항·검증 결과·남은 한계를 간결하게 갱신한다.
 
+## 2026-10-18 Node 공개 API 출력 확인
+
+- `tools/verify-code-output.mjs SOURCE.docx OUTPUT_DIRECTORY`: dist 공개 exports의 ESM/CJS를
+  실제 실행, Buffer 명시/자동 및 async Blob 변환, 출력 자동 감지 재열기까지 확인.
+- 사용자 DOCX→HWP/HWPX 4개 + 코드 직접 작성 모델4개 저장. 텍스트/글자별강조/구역/
+  용지·여백/이미지크기·바이트·기준위치 모두 통과. 모델은 한글·영문 언어별폰트/11pt/
+  강조OFF/그림/표 포함. 독립Python 감사도 원본7045자·모델51자 동일, 강조 불일치0.
+- 원시 HWP/HWPX: 20mm 본문여백, 차트322.8×162.2pt/사진481.9×321.35pt 및
+  inline/column-center/para-top, 첫줄 -21.6pt/18pt 확인. 실제 파일은 다운로드의
+  `hwpkit-code-check-20261018/`. 보고서 `docs/code-output-check-2026-10-18/`.
+- 새 발견/한계: Node 차트 라벨은 내장 bitmap 글꼴이어서 브라우저/원본과 모양이 다름.
+  차트PNG·한글라벨 경고 제약 유지. 본문폰트와는 별개. 한컴 전체페이지 외관 미검증.
+- 런타임 소스 변경 없음. 전체194 통과/선택LO1 생략, 타입 검사 통과.
+
+## 2026-10-18 사용자 DOCX 차트·첫 줄·본문 여백 후속 수정
+
+- 같은 사용자 원본, 상세: `docs/font-image-fidelity-2026-10-18/docx-layout-followup.md`.
+- 빈 PNG+떠 있는 개체로 처리하던 DrawingML 차트를 캐시 데이터로 PNG 렌더링하고
+  원래 inline/anchor를 보존. `toolkit/ChartRaster.ts`, DOCX 디코더 비동기 사전 준비 추가.
+  2D 막대/열·일반 선 지원. 편집 가능한 차트는 아니며 복합/3D 등은 경고·대체 개체.
+- HWP cached line horzpos=0, HWPX 음수 clamp 제거. 첫 줄/본문/오른쪽 들여쓰기와
+  실제 줄 폭 반영. numbering.xml 수준 들여쓰기, 직접 0, numFmt=none/numId=0 수정.
+- 그림 높이 자체에 줄 간격 비율을 곱하지 않고 글꼴의 추가 간격만 더함. 기준선 하단 반영.
+  빈 문단 기호 크기를 상속하고 10pt보다 작은 명시 크기 보존.
+- 원시 HWP/HWPX 독립 감사: 차트 32280×16220, 사진 48190×32135 HWPUNIT,
+  JPEG 원본 동일. 상하좌우 본문 가장자리 5670(약20mm). 기존 머리말 영역 분할 의미 유지.
+- Chrome에서 새 `file-sample_1MB-배치수정.hwp/.hwpx` 저장. 7045자 내용 동일·강조 불일치0.
+  기존 HWPX 추가7자는 목록이 아니라 빈 차트의 `[차트: 차트]` 대체 텍스트였고 이제 제거됨.
+- 새 회귀13개, 최종194 통과/선택LO1 생략. 타입·라이브러리·playground 빌드, dist 재생성.
+  번들LO는 HWP5/HWPX 렌더러가 없어 전체 페이지 PDF 외관 검증은 하지 못함.
+  임시 브라우저 검사 소스/원본 복사본 제거. 사진/차트/줄의 정밀 외관 인증은 아님.
+
+## 2026-10-18 DOCX 일반 글자에 진하게/기울임이 추가되는 후속 확인
+
+- 사용자 원본: `/home/leehojun/다운로드/file-sample_1MB.docx`, SHA-256
+  `27cd24f7f6e1e86449c1efc75c103acbb717733be5a36377cceb59e77be9d97c`.
+- 다운로드의 output (2).hwp / output (1).hwpx에 원본과 다른 강조가 실제로 있었다.
+  원본 `w:b/w:i val="false"` 48개씩. 공백 제외 7,045자 독립 비교에서 원본에 없는
+  진하게 6,461자·기울임 6,534자 추가. 최신 src/dist 직접 변환은 두 항목 모두 0.
+- 실제 Chrome의 DocRoot 검사도 구버전 b=true/i=true를 표시. 새로 로드한 같은 서버의
+  변환기로 원본을 읽어 새 HWP/HWPX를 브라우저에서 저장하고, 실제 레코드로 0건 확인.
+  일반/진하게/기울임/다시 일반 4문구×3단계 12개도 UI에서 확인했다.
+- Vite의 변환기 등록 부수효과가 남지 않도록 src 변경 시 전체 페이지 갱신을 명시했다.
+  테스트 파일 변경은 제외. 기존 수정된 OFF 처리와 나머지 라이브러리 변경은 보존.
+- 회귀 8개 추가(미지정/0/false/off × HWP/HWPX). 원본에 없는 강조를 금지하면서
+  원래 bold-only/italic-only는 보존. 원시 CHAR_SHAPE/HWPX charPr도 검사한다.
+- 독립 감사 도구 `tools/audit-text-emphasis.py SOURCE.docx OUTPUT.hwp OUTPUT.hwpx`.
+  근거/한계: `docs/font-image-fidelity-2026-10-18/docx-emphasis-followup.md` 및 비교 JSON.
+- 최종 181 통과/선택적 LO 1 생략, 타입·라이브러리·playground 빌드 통과.
+  새 수정본은 다운로드의 `file-sample_1MB-서식수정.hwp/.hwpx`. 원본/기존 출력 보존.
+  HWPX에 기존 목록 표시 문자 7개가 더 있으므로 전체 텍스트 무손실 인증은 아니다.
+
+## 2026-10-18 REA MCP·글꼴/그림 위치 수정
+
+- 근거·전후 화면·선택 전체 Evidence: `docs/font-image-fidelity-2026-10-18/`.
+- REA 6.5.0 MCP/Hopper로 같은 libCoreEngine.so의 sub_64f5f0(CHAR_SHAPE),
+  sub_64fe20(FACE_NAME), sub_6541e0(문단 내 확장 제어)를 확인. 기본 준비 제한 초과 후
+  별도 서버 환경변수 REA_HOPPER_STARTUP_TIMEOUT_MS=600000으로 성공, 앱 설정 변경 없음.
+- HWP/HWPX의 언어별 글꼴 강제 대체 제거. 모델 `fontFaces` 추가, 언어별 로컬 ID 조회 및
+  DOCX ascii/hAnsi/eastAsia 보존. DOCX 기본 글자 속성·부모 서식 상속과 직접 OFF 값 수정.
+- HWP 기호의 폰트/굵기/공백 추측 변경 제거. 표35에 맞게 밑줄 2–3, 첨자 15/16비트 수정.
+  kerning 등 상위 속성 비트로 밑줄/취소선을 버리지 않음. 음영도 문자 모양 키에 반영.
+- HWP 본문·셀 그림을 원래 문단의 글자 위치에 출력/복원. 셀 문단 수와 높이도 반영.
+  page=PAPER, margin=PAGE 구분 및 0/음수 좌표 보존(HWP/HWPX). 불필요한 그림 문단
+  제거로 demo 출력 344→340문단. 기존 빈 문단/빠진 셀 보충 수정은 보존.
+- 검증: 새 회귀 14개 포함 173 통과/선택적 LO 1 생략. 타입·라이브러리·playground 빌드,
+  dist 재생성. 실제 한컴 HWP/HWPX/DOCX 서식 fixture + demo HWP 열기·5초 유지;
+  전후 화면에서 본문/셀 그림의 글자 사이 위치와 종이 기준 좌표 확인.
+  재현 생성기: `node tools/create-font-image-fixture.mjs OUTPUT_DIRECTORY`.
+- 한계: 특정 사용자 원본 미지정, 237개 전체 외관 인증 아님. 회전/자르기/복잡한 겹침,
+  정밀 줄바꿈 및 없는 글꼴 대체는 미완료. 기존 문서는 재생성 필요.
+
+## 2026-10-17 REA MCP·실제 한컴 HWP 열기 수정
+
+- 보고서: `docs/hwp-opening-audit-2026-10-17.md`, 전체 선택 Evidence·실행 결과는 같은 날짜의 `hwp-opening-rea-*.json`.
+- 제공된 hoffice-build의 libCoreEngine.so를 REA 6.5.0 MCP/Hopper로 분석하고 Xvfb에서 실제 실행.
+  sub_6547a0은 nChars=1의 CR을 내부 생성하고 바로 태그 68을 읽는다. 빈 문단에 태그 67을
+  추가하던 HwpEncoder 때문에 ReadRecord 예외/손상 파일 오류 발생. 빈 PARA_TEXT 생략 및 verifier 수정.
+- 표 셀의 빈 문단도 CHAR_SHAPE를 보존. 본문·셀·중첩 셀의 빈 줄/24pt 및 잘못된 태그 회귀 검사.
+- demo.docx 달력 첫 행이 14열 중 13열만 덮어 한컴 sub_5519f0(+0x551c53)에서 null 셀 참조로 충돌.
+  셀 주소 계산에 세로 병합 점유 반영, 빠진 칸은 빈 셀 보충, 완전히 덮인 행은 셀 시작 수 0.
+  verifier에 표 범위/겹침/빈 칸/행별 셀 수 검사를 추가. 입력 모델 불변. 달력 보충으로 343→344문단.
+- 검증: Vitest 159 통과/선택적 LibreOffice 1 생략, 타입·라이브러리·playground 빌드 통과, dist 재생성.
+  fixture 출력 11개 + 빈 셀/중첩 표/2구역·세로 병합·행 전체 병합 3개 모두 실제 한컴 열기 후 5초 유지.
+  전체 demo는 화면 표시 후 1분 이상 유지. 재현 도구 `tools/check-hancom-open.py`는 제목만 보고 성공 처리하지 않는다.
+- 한계: 초기 배치 확인이며 전체 외관·다른 한컴 버전·237개 코퍼스 전수 검증은 아님. 기존 생성 파일은 재생성 필요.
+
 ## 2026-09-05 실제 데이터셋 점검
 
 - 보고서: `docs/dataset-audit-2026-09-05.md`. 원본 237개/한컴 DOCX로 전후 검증.

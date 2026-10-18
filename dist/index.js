@@ -936,11 +936,11 @@ function fitColumnWidths(source, columnCount, maxTotal, minWidth = 1) {
   const limit = Math.max(n, Math.floor(Number.isFinite(maxTotal) ? maxTotal : n));
   const floorWidth = Math.max(1, Math.min(Math.floor(minWidth), Math.floor(limit / n)));
   const values = Array.from({ length: n }, (_, index) => {
-    const value = Number(source[index]);
-    return Number.isFinite(value) && value > 0 ? value : 0;
+    const value2 = Number(source[index]);
+    return Number.isFinite(value2) && value2 > 0 ? value2 : 0;
   });
-  const knownTotal = values.reduce((sum, value) => sum + value, 0);
-  const missing = values.reduce((count, value) => count + (value <= 0 ? 1 : 0), 0);
+  const knownTotal = values.reduce((sum, value2) => sum + value2, 0);
+  const missing = values.reduce((count, value2) => count + (value2 <= 0 ? 1 : 0), 0);
   if (missing === n) {
     values.fill(limit / n);
   } else if (missing > 0) {
@@ -949,7 +949,7 @@ function fitColumnWidths(source, columnCount, maxTotal, minWidth = 1) {
     const fill = remaining2 > 0 ? remaining2 / missing : knownAverage;
     for (let i = 0; i < n; i++) if (values[i] <= 0) values[i] = Math.max(1, fill);
   }
-  const rawTotal = values.reduce((sum, value) => sum + value, 0);
+  const rawTotal = values.reduce((sum, value2) => sum + value2, 0);
   const target = Math.max(
     floorWidth * n,
     Math.min(limit, Math.round(rawTotal > 0 ? rawTotal : limit))
@@ -973,8 +973,8 @@ function fitColumnWidths(source, columnCount, maxTotal, minWidth = 1) {
     }
   }
   const result = exact.map(Math.floor);
-  let residual = target - result.reduce((sum, value) => sum + value, 0);
-  const order = exact.map((value, index) => ({ index, fraction: value - Math.floor(value) })).sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+  let residual = target - result.reduce((sum, value2) => sum + value2, 0);
+  const order = exact.map((value2, index) => ({ index, fraction: value2 - Math.floor(value2) })).sort((a, b) => b.fraction - a.fraction || a.index - b.index);
   for (let i = 0; residual > 0; i++, residual--) {
     result[order[i % order.length].index]++;
   }
@@ -1032,7 +1032,7 @@ function inferColumnWidths(columnCount, observations) {
   const solved = solveLinearSystem(matrix, rhs);
   const minWidth = Math.max(1e-4, totalHint * 1e-8);
   const widths = (solved ?? prior).map(
-    (value, col) => Number.isFinite(value) && value > minWidth ? value : Math.max(minWidth, prior[col])
+    (value2, col) => Number.isFinite(value2) && value2 > minWidth ? value2 : Math.max(minWidth, prior[col])
   );
   for (let pass = 0; pass < 80; pass++) {
     let maxRelativeResidual = 0;
@@ -1047,7 +1047,7 @@ function inferColumnWidths(columnCount, observations) {
         Math.abs(residual) / Math.max(1, item.width)
       );
       if (Math.abs(residual) <= 1e-9) continue;
-      const adjustable = widths.slice(item.start, item.start + item.span).reduce((sum, value) => sum + Math.max(minWidth, value), 0);
+      const adjustable = widths.slice(item.start, item.start + item.span).reduce((sum, value2) => sum + Math.max(minWidth, value2), 0);
       for (let col = item.start; col < item.start + item.span; col++) {
         const share = Math.max(minWidth, widths[col]) / adjustable;
         widths[col] = Math.max(minWidth, widths[col] + residual * share);
@@ -1421,14 +1421,14 @@ function buildFontIdMap(headObj) {
     if (!fontfaces) return fontMap;
     const ffGroups = getTag(fontfaces, "hh:fontface", "hh:FONTFACE");
     for (const ff of ffGroups) {
+      const lang = String(ff?._attr?.lang ?? "HANGUL").toLowerCase();
       const fonts = getTag(ff, "hh:font", "hh:FONT");
       for (const font of fonts) {
         const fa = font?._attr ?? {};
         const fid = Number(fa.id ?? -1);
         const name = fa.face ?? fa.name ?? fa.Face ?? "";
-        if (fid >= 0 && name && !fontMap.has(fid)) fontMap.set(fid, name);
+        if (fid >= 0 && name) fontMap.set(`${lang}:${fid}`, name);
       }
-      if (fontMap.size > 0) break;
     }
   } catch {
   }
@@ -1460,11 +1460,14 @@ function extractCharPrs(headObj) {
         info.s = true;
       const fontRefAttr = cp?.["hh:fontRef"]?.[0]?._attr ?? cp?.["hh:FONTREF"]?.[0]?._attr;
       if (fontRefAttr) {
-        const fid = Number(
-          fontRefAttr.hangul ?? fontRefAttr.latin ?? fontRefAttr.Hangul ?? 0
-        );
-        const name = fontIdMap.get(fid);
-        if (name) info.font = safeFont(name);
+        const faces = {};
+        for (const lang of ["hangul", "latin", "hanja", "japanese", "other", "symbol", "user"]) {
+          const fid = fontRefAttr[lang];
+          const name = fid === void 0 ? void 0 : fontIdMap.get(`${lang}:${fid}`);
+          if (name) faces[lang] = safeFont(name);
+        }
+        info.font = faces.hangul ?? faces.latin;
+        if (Object.keys(faces).length) info.fontFaces = faces;
       }
       map.set(id, info);
     }
@@ -1598,7 +1601,7 @@ function decodeSection(sec, dims, ctx) {
     (item) => {
       if (item.type === "table") {
         try {
-          const { value } = ctx.shield.guardGrid(
+          const { value: value2 } = ctx.shield.guardGrid(
             item.node,
             (n) => decodeGrid(n, ctx),
             (n) => decodeGridSimple(n, ctx),
@@ -1606,7 +1609,7 @@ function decodeSection(sec, dims, ctx) {
             (n) => decodeGridText(n),
             "hwpx:table"
           );
-          return value;
+          return value2;
         } catch {
           return buildPara([buildSpan("[\uD45C \uD30C\uC2F1 \uC2E4\uD328]")]);
         }
@@ -1703,8 +1706,8 @@ function decodeHeaderFooter(sec, kind, ctx) {
 }
 function decodeHwpxText(t) {
   const kids = [];
-  const pushText = (value) => {
-    kids.push({ tag: "txt", content: value.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "") });
+  const pushText = (value2) => {
+    kids.push({ tag: "txt", content: value2.replace(/__EXT_\d+(?:_W\d+_H\d+)?__/g, "") });
   };
   if (Array.isArray(t?._content)) {
     for (const part of t._content) {
@@ -1845,6 +1848,7 @@ function resolveCharPr(run, ctx) {
       pt: def.pt,
       color: def.color,
       font: def.font,
+      fontFaces: def.fontFaces,
       bg: def.bg
     };
   }
@@ -1868,8 +1872,8 @@ function resolveCharPr(run, ctx) {
   };
 }
 function normalizeHwpxTextColor(raw) {
-  const color = safeHex(raw);
-  return color === "000000" ? void 0 : color;
+  const color2 = safeHex(raw);
+  return color2 === "000000" ? void 0 : color2;
 }
 function decodePic(pic, ctx) {
   try {
@@ -1941,14 +1945,14 @@ function extractHwpxObjectLayout(posAttr, textWrap) {
   const horzRelToMap = {
     PARA: "para",
     MARGIN: "margin",
-    PAGE: "page",
+    PAGE: "margin",
     PAPER: "page",
     COLUMN: "column"
   };
   const vertRelToMap = {
     PARA: "para",
     MARGIN: "margin",
-    PAGE: "page",
+    PAGE: "margin",
     PAPER: "page",
     LINE: "line"
   };
@@ -1968,8 +1972,8 @@ function extractHwpxObjectLayout(posAttr, textWrap) {
   const vertAlign = vertAlignMap[posAttr.vertAlign ?? ""];
   const horzOffset = Number(posAttr.horzOffset ?? 0);
   const vertOffset = Number(posAttr.vertOffset ?? 0);
-  const xPt = horzOffset !== 0 ? Metric.hwpToPt(horzOffset) : void 0;
-  const yPt = vertOffset !== 0 ? Metric.hwpToPt(vertOffset) : void 0;
+  const xPt = horzAlign === "left" || horzOffset !== 0 ? Metric.hwpToPt(horzOffset) : void 0;
+  const yPt = vertAlign === "top" || vertOffset !== 0 ? Metric.hwpToPt(vertOffset) : void 0;
   return { wrap, horzAlign, vertAlign, horzRelTo, vertRelTo, xPt, yPt };
 }
 function applyHwpxOutMargin(layout, obj) {
@@ -1978,16 +1982,16 @@ function applyHwpxOutMargin(layout, obj) {
   const assign = (attr, key) => {
     const raw = outMargin[attr];
     if (raw === void 0) return;
-    const value = Number(raw);
-    if (Number.isFinite(value) && value >= 0) layout[key] = Metric.hwpToPt(value);
+    const value2 = Number(raw);
+    if (Number.isFinite(value2) && value2 >= 0) layout[key] = Metric.hwpToPt(value2);
   };
   assign("top", "distT");
   assign("bottom", "distB");
   assign("left", "distL");
   assign("right", "distR");
 }
-function validHwpxCellPadding(value) {
-  const parsed = Number(value);
+function validHwpxCellPadding(value2) {
+  const parsed = Number(value2);
   return Number.isFinite(parsed) && parsed >= 0 && parsed < 65535 ? parsed : void 0;
 }
 function decodeGrid(tbl, ctx) {
@@ -2246,6 +2250,7 @@ function parseDocInfo(data, compressed) {
   const recs = parseRecords(raw);
   const info = {
     faceNames: [],
+    fontBanks: [],
     charShapes: [],
     paraShapes: [],
     borderFills: [],
@@ -2265,6 +2270,17 @@ function parseDocInfo(data, compressed) {
     } catch {
     }
   }
+  const mapping = recs.find((r) => r.tag === 17)?.data;
+  if (mapping && mapping.length >= 32) {
+    let start = 0;
+    for (let lang = 0; lang < 7; lang++) {
+      const count = BinaryKit.readU32LE(mapping, 4 + lang * 4);
+      info.fontBanks.push(info.faceNames.slice(start, start + count));
+      start += count;
+    }
+  } else {
+    info.fontBanks = Array.from({ length: 7 }, () => info.faceNames);
+  }
   return info;
 }
 function parseFaceName(d) {
@@ -2281,9 +2297,9 @@ function parseStyle(d) {
     offset += 2;
     const end = offset + length * 2;
     if (end > d.length) throw new Error("truncated STYLE name");
-    const value = new TextDecoder("utf-16le").decode(d.subarray(offset, end));
+    const value2 = new TextDecoder("utf-16le").decode(d.subarray(offset, end));
     offset = end;
-    return value;
+    return value2;
   };
   const name = readName();
   const engName = readName();
@@ -2320,17 +2336,15 @@ function parseCharShape(d) {
   for (let i = 0; i < 7; i++) faceIds.push(d.length >= (i + 1) * 2 ? BinaryKit.readU16LE(d, i * 2) : 0);
   const height = d.length >= 46 ? BinaryKit.readU32LE(d, 42) : 1e3;
   const attr = d.length >= 50 ? BinaryKit.readU32LE(d, 46) : 0;
-  const compactStyleFlags = (attr & 4278190080) === 0;
-  const suType = attr >> 16 & 3;
   return {
     faceIds,
     height: height > 0 && height < 1e5 ? height : 1e3,
     italic: (attr & 1) !== 0,
     bold: (attr >> 1 & 1) !== 0,
-    underline: compactStyleFlags && (attr & 1 << 2) !== 0,
-    strikeout: compactStyleFlags && (attr >> 18 & 7) !== 0,
-    superscript: suType === 1,
-    subscript: suType === 2,
+    underline: (attr >>> 2 & 3) !== 0,
+    strikeout: (attr >>> 18 & 7) !== 0,
+    superscript: (attr & 1 << 15) !== 0,
+    subscript: (attr & 1 << 16) !== 0,
     textColor: d.length >= 56 ? colorRef(d, 52) : "000000"
   };
 }
@@ -2382,8 +2396,8 @@ function parseBorderFill(d) {
     const off = 2 + i * 6;
     const type = off < d.length ? d[off] : 0;
     const widthPt = off + 1 < d.length ? BORDER_W_PT[d[off + 1]] ?? 0.5 : 0.5;
-    const color = off + 6 <= d.length ? colorRef(d, off + 2) : "000000";
-    borders.push({ type, widthPt, color });
+    const color2 = off + 6 <= d.length ? colorRef(d, off + 2) : "000000";
+    borders.push({ type, widthPt, color: color2 });
   }
   let bgColor;
   const fOff = 32;
@@ -2402,8 +2416,8 @@ function parseObjectLayout(data) {
   const vertAlignCode = flags >>> 5 & 7;
   const horzAlignCode = flags >>> 10 & 7;
   const wrapCode = flags >>> 21 & 7;
-  const vertRelTo = vertRelCode === 2 ? "para" : "page";
-  const horzRelTo = horzRelCode === 2 ? "column" : horzRelCode === 3 ? "para" : "page";
+  const vertRelTo = vertRelCode === 2 ? "para" : vertRelCode === 1 ? "margin" : "page";
+  const horzRelTo = horzRelCode === 2 ? "column" : horzRelCode === 3 ? "para" : horzRelCode === 1 ? "margin" : "page";
   const vertAlign = ["top", "center", "bottom"][vertAlignCode];
   const horzAlign = ["left", "center", "right"][horzAlignCode];
   const wrap = textWrapCodeToImgWrap(wrapCode);
@@ -2415,8 +2429,8 @@ function parseObjectLayout(data) {
     vertRelTo,
     horzAlign,
     vertAlign,
-    xPt: rawX !== 0 ? Metric.hwpToPt(rawX) : void 0,
-    yPt: rawY !== 0 ? Metric.hwpToPt(rawY) : void 0,
+    xPt: horzAlignCode === 0 || rawX !== 0 ? Metric.hwpToPt(rawX) : void 0,
+    yPt: vertAlignCode === 0 || rawY !== 0 ? Metric.hwpToPt(rawY) : void 0,
     behindDoc: wrap === "behind" || void 0,
     zOrder: Math.max(0, i32(data, 24))
   };
@@ -2540,41 +2554,7 @@ function parseParagraphGroup(recs, start, di, shield, gsoCtx, firstBodyParagraph
   const nodes = [];
   {
     const paraContent = [];
-    const atnoCtrls = [];
-    if (text && text.controls.length > 0) {
-      for (let ci = 0; ci < text.controls.length; ci++) {
-        const ch = ctrlHeaders[ci];
-        if (ch && ch.ctrlId === CTRL_ATNO)
-          atnoCtrls.push({ pos: text.controls[ci].pos, type: ch.atnoType ?? 0 });
-      }
-      atnoCtrls.sort((a, b) => a.pos - b.pos);
-    }
-    if (text && text.chars.length > 0) {
-      if (atnoCtrls.length > 0) {
-        let k = 0;
-        for (const ac of atnoCtrls) {
-          const seg = [];
-          while (k < text.chars.length && text.chars[k].pos < ac.pos) seg.push(text.chars[k++]);
-          if (seg.length > 0) paraContent.push(...resolveCharShapes(seg, csPairs, di));
-          paraContent.push(buildPageNum(ac.type === 0 ? "decimal" : "total"));
-        }
-        const rest = text.chars.slice(k);
-        if (rest.length > 0) paraContent.push(...resolveCharShapes(rest, csPairs, di));
-      } else {
-        paraContent.push(...resolveCharShapes(text.chars, csPairs, di));
-      }
-    } else if (atnoCtrls.length > 0) {
-      for (const ac of atnoCtrls) paraContent.push(buildPageNum(ac.type === 0 ? "decimal" : "total"));
-    }
-    if (text && text.controls.length > 0) {
-      for (let ci = 0; ci < text.controls.length; ci++) {
-        const ch = ctrlHeaders[ci];
-        if (!ch) continue;
-        const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_PIC || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
-        if (!isImg) continue;
-        paraContent.push(buildSpan(`__EXT_${ch.imgId}__`));
-      }
-    }
+    if (text) paraContent.push(...resolveParagraphInlines(text, csPairs, ctrlHeaders, di));
     const leadingExplicitBreak = firstBodyParagraph && (divideSort & 4) !== 0 && !ps?.pageBreakBefore && grids.length === 0 && paraContent.length > 0;
     if (leadingExplicitBreak) {
       paraContent.unshift({ tag: "span", props: {}, kids: [buildPb()] });
@@ -2680,6 +2660,23 @@ function parseCharShapePairs(d) {
     out.push([BinaryKit.readU32LE(d, i), BinaryKit.readU32LE(d, i + 4)]);
   return out;
 }
+function resolveParagraphInlines(text, pairs, headers, di) {
+  const out = [];
+  let index = 0;
+  for (let ci = 0; ci < text.controls.length; ci++) {
+    const header = headers[ci];
+    if (!header) continue;
+    const isImage = [CTRL_IMAGE, CTRL_PIC, CTRL_FIG, CTRL_OBJ, CTRL_GSO].includes(header.ctrlId);
+    if (!isImage && header.ctrlId !== CTRL_ATNO) continue;
+    const chars = [];
+    while (index < text.chars.length && text.chars[index].pos < text.controls[ci].pos)
+      chars.push(text.chars[index++]);
+    if (chars.length) out.push(...resolveCharShapes(chars, pairs, di));
+    out.push(isImage ? buildSpan(`__EXT_${header.imgId}__`) : buildPageNum(header.atnoType === 0 ? "decimal" : "total"));
+  }
+  if (index < text.chars.length) out.push(...resolveCharShapes(text.chars.slice(index), pairs, di));
+  return out;
+}
 function resolveCharShapes(chars, pairs, di) {
   const defaultId = pairs.length > 0 ? pairs[0][1] : 0;
   if (chars.length === 0) return styledSpans("", defaultId, di);
@@ -2710,8 +2707,14 @@ function styledSpans(text, shapeId, di) {
   const cs = di.charShapes[shapeId];
   if (!cs) return [buildSpan(text)];
   const props = {};
-  const fid = cs.faceIds[0] ?? 0;
-  if (fid < di.faceNames.length && di.faceNames[fid]) props.font = safeFont(di.faceNames[fid]);
+  const scripts = ["hangul", "latin", "hanja", "japanese", "other", "symbol", "user"];
+  const faces = {};
+  for (let lang = 0; lang < scripts.length; lang++) {
+    const face = di.fontBanks[lang]?.[cs.faceIds[lang] ?? 0];
+    if (face) faces[scripts[lang]] = safeFont(face);
+  }
+  props.font = faces.hangul;
+  if (Object.keys(faces).length) props.fontFaces = faces;
   if (cs.height > 0) props.pt = Metric.hwpToPt(cs.height);
   if (cs.bold) props.b = true;
   if (cs.italic) props.i = true;
@@ -2721,38 +2724,10 @@ function styledSpans(text, shapeId, di) {
   if (cs.subscript) props.sub = true;
   const hex = safeHex(cs.textColor);
   if (hex && hex !== "000000") props.color = hex;
-  return splitLeadingSymbolRuns(text, props, di);
-}
-function splitLeadingSymbolRuns(text, props, di) {
-  if (!text) return [buildSpan(text, props)];
-  const symbolFont = firstAvailableFont(di, ["\uD55C\uC591\uC2E0\uBA85\uC870", "HY\uC2E0\uBA85\uC870"]) ?? props.font;
-  const leadFont = firstAvailableFont(di, ["HCI Poppy"]) ?? symbolFont;
-  const out = [];
-  let rest = text;
-  const lead = rest.match(/^(\s+)([◦→])/);
-  if (lead?.[1]) {
-    out.push(buildSpan(lead[1], { ...props, b: false, font: leadFont }));
-    rest = rest.slice(lead[1].length);
-  }
-  const marker = rest.match(/^([□◦→])(\s*)/);
-  if (marker) {
-    out.push(buildSpan(marker[1], { ...props, font: symbolFont }));
-    if (marker[2] && marker[1] !== "\u25A1")
-      out.push(buildSpan(marker[2], { ...props, b: false, font: leadFont }));
-    rest = rest.slice(marker[0].length);
-    if (marker[2] && marker[1] === "\u25A1") rest = `${marker[2]}${rest}`;
-    if (!marker[2] && rest && (marker[1] === "\u25E6" || marker[1] === "\u2192")) {
-      rest = ` ${rest}`;
-    }
-  }
-  if (rest) appendLatinAwareSpans(out, rest, props, leadFont);
-  return out.length ? out : [buildSpan(text, props)];
+  return [buildSpan(text, props)];
 }
 function firstAvailableFont(di, names) {
   return names.find((name) => di.faceNames.includes(name));
-}
-function appendLatinAwareSpans(out, text, props, _latinFont) {
-  out.push(buildSpan(text, props));
 }
 var HWP_DEFAULT_CELL_PADDING = {
   left: 510,
@@ -2990,17 +2965,8 @@ function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gs
             } else j++;
           }
           const paraContent = [];
-          if (txt && txt.chars.length > 0) paraContent.push(...resolveCharShapes(txt.chars, csp, di));
-          if (txt && txt.controls.length > 0) {
-            for (let ci = 0; ci < txt.controls.length; ci++) {
-              const ch = ctrlHdrs[ci];
-              if (!ch) continue;
-              const isImg = ch.ctrlId === CTRL_IMAGE || ch.ctrlId === CTRL_PIC || ch.ctrlId === CTRL_FIG || ch.ctrlId === CTRL_OBJ || ch.ctrlId === CTRL_GSO;
-              if (!isImg) continue;
-              paraContent.push(buildSpan(`__EXT_${ch.imgId}__`));
-            }
-          }
-          const kids = paraContent.length > 0 ? paraContent : [buildSpan("")];
+          if (txt) paraContent.push(...resolveParagraphInlines(txt, csp, ctrlHdrs, di));
+          const kids = paraContent.length > 0 ? paraContent : resolveCharShapes([], csp, di);
           const hasPageBreakBefore = (cellDivide & 4) !== 0;
           const isPageBreakOnlyPara = hasPageBreakBefore && paraContent.length === 0 && innerGrids.length === 0;
           const items = [...innerGrids];
@@ -3058,11 +3024,11 @@ function parseCellRec(d, tag, recs, cStart, cEnd, di, shield, seqIdx, colCnt, gs
     cellChildren: cellChildren.length ? cellChildren : [buildPara([buildSpan("")])]
   };
 }
-function inheritedHwpPadding(value, fallback) {
-  return value === 65535 ? fallback : value;
+function inheritedHwpPadding(value2, fallback) {
+  return value2 === 65535 ? fallback : value2;
 }
-function isCellPaddingOverride(value, inherited) {
-  return value !== 65535 && value !== inherited;
+function isCellPaddingOverride(value2, inherited) {
+  return value2 !== 65535 && value2 !== inherited;
 }
 function parsePageDef(d) {
   if (d.length < 24) return A4;
@@ -3178,6 +3144,7 @@ var HwpScanner = class {
       const diRaw = streams.get("DocInfo");
       let di = {
         faceNames: [],
+        fontBanks: [],
         charShapes: [],
         paraShapes: [],
         borderFills: [],
@@ -3427,6 +3394,275 @@ function paraText(node) {
 }
 registry.registerDecoder(new HwpScanner());
 
+// src/toolkit/ChartRaster.ts
+var import_pako3 = __toESM(require("pako"));
+var palette = ["4472C4", "ED7D31", "A5A5A5", "FFC000", "5B9BD5", "70AD47"];
+var children = (node, tag) => node?.[tag] ?? [];
+var first = (node, tag) => children(node, tag)[0];
+var value = (node, tag) => first(node, tag)?._attr?.val;
+function cache(node) {
+  const ref = first(node, "c:numRef") ?? first(node, "c:strRef");
+  const c = first(ref, "c:numCache") ?? first(ref, "c:strCache") ?? first(node, "c:numLit") ?? first(node, "c:strLit");
+  const count = Math.min(1024, Math.max(0, Number(value(c, "c:ptCount") ?? 0)));
+  const out = Array(count).fill("");
+  for (const point of children(c, "c:pt").slice(0, 1024)) {
+    const index = Number(point?._attr?.idx);
+    if (Number.isInteger(index) && index >= 0 && index < 1024) out[index] = first(point, "c:v")?._text ?? "";
+  }
+  return out;
+}
+function color(node, fallback) {
+  const raw = first(first(node, "a:solidFill"), "a:srgbClr")?._attr?.val;
+  return /^[a-f0-9]{6}$/i.test(raw ?? "") ? raw : fallback;
+}
+async function renderDocxChart(xml, wPt, hPt) {
+  const object = await XmlKit.parseStrict(xml);
+  const chart = first(first(object, "c:chartSpace"), "c:chart");
+  const plot = first(chart, "c:plotArea");
+  const bars = first(plot, "c:barChart");
+  const lines = first(plot, "c:lineChart");
+  const graph = bars ?? lines;
+  const chartTypes = Object.keys(plot ?? {}).filter((k) => /^c:.*Chart$/.test(k));
+  if (!graph || chartTypes.length !== 1 || children(plot, bars ? "c:barChart" : "c:lineChart").length !== 1 || (value(graph, "c:grouping") ?? "clustered") === "percentStacked" || lines && ["stacked", "percentStacked"].includes(value(lines, "c:grouping") ?? "standard"))
+    throw new Error("unsupported chart type (supported: 2D bar/column and line charts)");
+  const series = children(graph, "c:ser").slice(0, 64).map((s, i) => ({
+    name: cache(first(s, "c:tx"))[0] ?? first(first(s, "c:tx"), "c:v")?._text ?? `Series ${i + 1}`,
+    categories: cache(first(s, "c:cat")),
+    values: cache(first(s, "c:val")).map((n) => n.trim() ? Number(n) : NaN),
+    color: color(first(s, "c:spPr"), palette[i % palette.length])
+  }));
+  if (!series.length || !series.some((s) => s.values.some(Number.isFinite))) throw new Error("chart has no cached numeric data");
+  const width = Math.max(72, Math.min(1200, Number.isFinite(wPt) ? wPt : 360));
+  const height = Math.max(48, Math.min(1200, Number.isFinite(hPt) ? hPt : 216));
+  const scene = [];
+  const rect = (x, y, w, h, c) => scene.push({ kind: "rect", x, y, w, h, color: c });
+  const line = (x, y, x2, y2, c = "B3B3B3") => scene.push({ kind: "line", x, y, x2, y2, color: c });
+  const text = (x, y, t, align = "left") => scene.push({ kind: "text", x, y, text: t.slice(0, 80), size: 7, color: "222222", align });
+  const hasLegend = first(chart, "c:legend") !== void 0;
+  const legendWidth = hasLegend ? Math.min(width * 0.3, Math.max(55, ...series.map((s) => s.name.length * 4 + 15))) : 0;
+  const left = Math.min(28, width * 0.18), top = 10, bottom = height - 22, right = width - legendWidth - 7;
+  const pw = Math.max(10, right - left), ph = Math.max(10, bottom - top);
+  const count = Math.max(...series.map((s) => Math.max(s.categories.length, s.values.length)));
+  const stacked = value(graph, "c:grouping") === "stacked";
+  const vals = series.flatMap((s) => s.values).filter(Number.isFinite);
+  if (stacked) for (let i = 0; i < count; i++) {
+    vals.push(series.reduce((n, s) => n + Math.max(0, s.values[i] || 0), 0));
+    vals.push(series.reduce((n, s) => n + Math.min(0, s.values[i] || 0), 0));
+  }
+  const rawMin = Math.min(0, ...vals), rawMax = Math.max(0, ...vals);
+  const span = Math.max(1, rawMax - rawMin);
+  const power = Math.pow(10, Math.floor(Math.log10(span / 5)));
+  const tick = [1, 2, 5, 10].map((n) => n * power).find((n) => n >= span / 5) ?? power * 10;
+  const axis = first(plot, "c:valAx"), scaling = first(axis, "c:scaling");
+  const minimum = Number(value(scaling, "c:min") ?? Math.floor(rawMin / tick) * tick);
+  const maximum = Number(value(scaling, "c:max") ?? Math.ceil((rawMax || 1) / tick) * tick);
+  if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || maximum <= minimum) throw new Error("invalid chart axis range");
+  const horizontal = bars && value(bars, "c:barDir") === "bar";
+  const py = (n) => bottom - (n - minimum) / (maximum - minimum) * ph;
+  const px = (n) => left + (n - minimum) / (maximum - minimum) * pw;
+  for (let n = minimum, i = 0; n <= maximum + tick * 1e-3 && i < 50; n += tick, i++) {
+    const label = Number(n.toPrecision(6)).toString();
+    if (horizontal) {
+      line(px(n), top, px(n), bottom);
+      text(px(n), bottom + 5, label, "center");
+    } else {
+      line(left, py(n), right, py(n));
+      text(left - 5, py(n) - 3.5, label, "right");
+    }
+  }
+  line(left, top, left, bottom);
+  line(left, bottom, right, bottom);
+  const gap = Math.min(5, Math.max(0, Number(value(graph, "c:gapWidth") ?? 150) / 100));
+  const groupSpan = (horizontal ? ph : pw) / Math.max(1, count);
+  const band = groupSpan / (1 + gap / Math.max(1, series.length));
+  for (let i = 0; i < count; i++) {
+    const label = series.find((s) => s.categories[i])?.categories[i] ?? String(i + 1);
+    if (horizontal) text(left - 4, top + (i + 0.5) * groupSpan - 3.5, label, "right");
+    else text(left + (i + 0.5) * groupSpan, bottom + 5, label, "center");
+    let positive = 0, negative = 0;
+    for (let j = 0; j < series.length; j++) {
+      const v = series[j].values[i];
+      if (!Number.isFinite(v)) continue;
+      if (lines) {
+        if (i > 0 && Number.isFinite(series[j].values[i - 1]))
+          line(left + (i - 0.5) * groupSpan, py(series[j].values[i - 1]), left + (i + 0.5) * groupSpan, py(v), series[j].color);
+        rect(left + (i + 0.5) * groupSpan - 1.5, py(v) - 1.5, 3, 3, series[j].color);
+      } else {
+        const start = stacked ? v < 0 ? negative : positive : 0;
+        if (stacked) {
+          if (v < 0) negative += v;
+          else positive += v;
+        }
+        const size = band / (stacked ? 1 : series.length);
+        const offset = (groupSpan - band) / 2 + (stacked ? 0 : j * size);
+        if (horizontal) rect(Math.min(px(start), px(start + v)), top + i * groupSpan + offset, Math.abs(px(start + v) - px(start)), size, series[j].color);
+        else rect(left + i * groupSpan + offset, Math.min(py(start), py(start + v)), size, Math.abs(py(start) - py(start + v)), series[j].color);
+      }
+    }
+  }
+  if (hasLegend) series.forEach((s, i) => {
+    const y = Math.max(top, (height - series.length * 12) / 2) + i * 12;
+    rect(right + 7, y + 1, 6, 6, s.color);
+    text(right + 17, y, s.name);
+  });
+  return rasterize(scene, width, height);
+}
+async function rasterize(scene, width, height) {
+  const scale = 2, w = Math.ceil(width * scale), h = Math.ceil(height * scale);
+  const canvas = typeof OffscreenCanvas !== "undefined" ? new OffscreenCanvas(w, h) : typeof document !== "undefined" ? document.createElement("canvas") : void 0;
+  if (canvas) {
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      ctx.scale(scale, scale);
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillRect(0, 0, width, height);
+      for (const c of scene) {
+        ctx.fillStyle = ctx.strokeStyle = "#" + c.color;
+        if (c.kind === "rect") ctx.fillRect(c.x, c.y, c.w, c.h);
+        else if (c.kind === "line") {
+          ctx.lineWidth = 0.5;
+          ctx.beginPath();
+          ctx.moveTo(c.x, c.y);
+          ctx.lineTo(c.x2, c.y2);
+          ctx.stroke();
+        } else {
+          ctx.font = `${c.size}px Arial, sans-serif`;
+          ctx.textAlign = c.align ?? "left";
+          ctx.textBaseline = "top";
+          ctx.fillText(c.text, c.x, c.y);
+        }
+      }
+      const blob = "convertToBlob" in canvas ? await canvas.convertToBlob({ type: "image/png" }) : await new Promise((resolve, reject) => canvas.toBlob((b) => b ? resolve(b) : reject(Error("canvas PNG encoding failed")), "image/png"));
+      return new Uint8Array(await blob.arrayBuffer());
+    }
+  }
+  if (scene.some((c) => c.kind === "text" && [...c.text].some((ch) => !glyphs[ch] && !glyphs[ch.toUpperCase()])))
+    throw new Error("chart labels require a browser canvas for characters outside the portable font");
+  const pixels = new Uint8Array(w * h * 3).fill(255);
+  function rect(x, y, rw, rh, color2) {
+    const rgb = [0, 2, 4].map((i) => parseInt(color2.slice(i, i + 2), 16));
+    for (let yy = Math.max(0, Math.floor(y)); yy < Math.min(h, Math.ceil(y + rh)); yy++)
+      for (let xx = Math.max(0, Math.floor(x)); xx < Math.min(w, Math.ceil(x + rw)); xx++) pixels.set(rgb, (yy * w + xx) * 3);
+  }
+  for (const c of scene) {
+    if (c.kind === "rect") rect(c.x * scale, c.y * scale, c.w * scale, c.h * scale, c.color);
+    else if (c.kind === "line") {
+      const steps = Math.max(1, Math.ceil(Math.max(Math.abs(c.x2 - c.x), Math.abs(c.y2 - c.y)) * scale));
+      for (let i = 0; i <= steps; i++) rect((c.x + (c.x2 - c.x) * i / steps) * scale, (c.y + (c.y2 - c.y) * i / steps) * scale, 1, 1, c.color);
+    } else {
+      const unit = c.size * scale / 8, tw = c.text.length * 6 * unit;
+      const x = c.x * scale - (c.align === "center" ? tw / 2 : c.align === "right" ? tw : 0);
+      [...c.text].forEach((ch, i) => {
+        const rows = glyphs[ch] ?? glyphs[ch.toUpperCase()] ?? glyphs["?"];
+        rows.forEach((bits, y) => {
+          for (let col = 0; col < 5; col++) if (bits & 1 << 4 - col) rect(x + (i * 6 + col) * unit, c.y * scale + y * unit, unit, unit, c.color);
+        });
+      });
+    }
+  }
+  return png(pixels, w, h);
+}
+var glyphs = Object.fromEntries(Object.entries({
+  " ": "00000000000000",
+  "?": "0e110102040004",
+  ".": "00000000000c0c",
+  "-": "0000001f000000",
+  "0": "0e11131519110e",
+  "1": "040c040404040e",
+  "2": "0e11010204081f",
+  "3": "1e01010e01011e",
+  "4": "02060a121f0202",
+  "5": "1f10101e01011e",
+  "6": "0e10101e11110e",
+  "7": "1f010204080808",
+  "8": "0e11110e11110e",
+  "9": "0e11110f01010e",
+  A: "0e11111f111111",
+  B: "1e11111e11111e",
+  C: "0e11101010110e",
+  D: "1e11111111111e",
+  E: "1f10101e10101f",
+  F: "1f10101e101010",
+  G: "0e11101711110f",
+  H: "1111111f111111",
+  I: "0e04040404040e",
+  J: "0702020212120c",
+  K: "11121418141211",
+  L: "1010101010101f",
+  M: "111b1515111111",
+  N: "11191513111111",
+  O: "0e11111111110e",
+  P: "1e11111e101010",
+  Q: "0e11111115120d",
+  R: "1e11111e141211",
+  S: "0f10100e01011e",
+  T: "1f040404040404",
+  U: "1111111111110e",
+  V: "11111111110a04",
+  W: "1111111515150a",
+  X: "11110a040a1111",
+  Y: "11110a04040404",
+  Z: "1f01020408101f",
+  a: "00000e010f110f",
+  b: "10101e1111111e",
+  c: "00000e1010110e",
+  d: "01010f1111110f",
+  e: "00000e111f100e",
+  f: "0609081c080808",
+  g: "00000f110f010e",
+  h: "10101e11111111",
+  i: "04000c0404040e",
+  j: "0200060202120c",
+  k: "101011121c1211",
+  l: "0c04040404040e",
+  m: "00001a15151515",
+  n: "00001e11111111",
+  o: "00000e1111110e",
+  p: "00001e111e1010",
+  q: "00000f110f0101",
+  r: "00001619101010",
+  s: "00000f100e011e",
+  t: "08081c08080906",
+  u: "0000111111130d",
+  v: "00001111110a04",
+  w: "0000111115150a",
+  x: "0000110a040a11",
+  y: "000011110f010e",
+  z: "00001f0204081f"
+}).map(([key, data]) => [key, data.match(/../g).map((n) => parseInt(n, 16))]));
+function png(rgb, width, height) {
+  function chunk(name, data) {
+    const out2 = new Uint8Array(data.length + 12), view2 = new DataView(out2.buffer);
+    view2.setUint32(0, data.length);
+    [...name].forEach((c, i) => out2[4 + i] = c.charCodeAt(0));
+    out2.set(data, 8);
+    let crc = 4294967295;
+    for (const b of out2.subarray(4, out2.length - 4)) {
+      crc ^= b;
+      for (let i = 0; i < 8; i++) crc = crc >>> 1 ^ (crc & 1 ? 3988292384 : 0);
+    }
+    view2.setUint32(out2.length - 4, (crc ^ 4294967295) >>> 0);
+    return out2;
+  }
+  const ihdr = new Uint8Array(13), view = new DataView(ihdr.buffer);
+  view.setUint32(0, width);
+  view.setUint32(4, height);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  const scanlines = new Uint8Array((width * 3 + 1) * height);
+  for (let y = 0; y < height; y++) scanlines.set(rgb.subarray(y * width * 3, (y + 1) * width * 3), y * (width * 3 + 1) + 1);
+  const chunks = [new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", import_pako3.default.deflate(scanlines)), chunk("IEND", new Uint8Array())];
+  const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.length;
+  }
+  return out;
+}
+
 // src/decoders/docx/DocxDecoder.ts
 var DocxDecoder = class extends BaseDecoder {
   getFormat() {
@@ -3505,8 +3741,10 @@ var DocxDecoder = class extends BaseDecoder {
         numMap,
         warns,
         stylesMap,
-        paraStyleMap
+        paraStyleMap,
+        chartImages: /* @__PURE__ */ new WeakMap()
       };
+      await prepareChartImages(docObj, decCtx);
       const sections = [];
       let kids = [];
       for (const el of elements) {
@@ -3620,7 +3858,9 @@ async function parseNumbering2(xml) {
         const ilvl = Number(lvl?._attr?.["w:ilvl"] ?? lvl?._attr?.ilvl ?? 0);
         const fmtNode = lvl?.["w:numFmt"]?.[0]?._attr ?? lvl?.numFmt?.[0]?._attr ?? {};
         const fmt = fmtNode?.["w:val"] ?? fmtNode?.val ?? "decimal";
-        levels.set(ilvl, { fmt, isOrdered: fmt !== "bullet" });
+        const pPr = lvl?.["w:pPr"]?.[0] ?? lvl?.pPr?.[0];
+        const ind = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
+        levels.set(ilvl, { fmt, isOrdered: fmt !== "bullet", indentation: parseDocxIndentation(ind) });
       }
       absMap.set(absId, levels);
     }
@@ -3736,6 +3976,7 @@ async function decodeHeaderFooter2(kind, body, relsMap, files, ctx) {
         const root = obj?.[rootTag]?.[0] ?? obj?.[rootTag.replace("w:", "")]?.[0] ?? obj;
         const origRelsMap = ctx.relsMap;
         ctx.relsMap = hfRelsMap;
+        await prepareChartImages(root, ctx);
         const paras = toArr2(root?.["w:p"] ?? root?.p);
         result[type] = paras.map((p) => decodePara2(p, ctx));
         ctx.relsMap = origRelsMap;
@@ -3766,7 +4007,7 @@ function hasDrawingDeep(node) {
 }
 function decodeElement(el, ctx) {
   if (el.type === "table") {
-    const { value } = ctx.shield.guardGrid(
+    const { value: value2 } = ctx.shield.guardGrid(
       el.node,
       (n) => decodeGrid2(n, ctx),
       (n) => decodeGridSimple2(n),
@@ -3774,7 +4015,7 @@ function decodeElement(el, ctx) {
       (n) => decodeGridText2(n),
       "docx:table"
     );
-    return value;
+    return value2;
   } else if (el.type === "sdt") {
     return decodeSdt(el.node, ctx);
   }
@@ -3823,7 +4064,11 @@ function decodePara2(p, ctx) {
     ctx.paraStyleMap
   );
   const styleInherited = {
-    rPr: { ...documentDefaults.rPr, ...namedStyle.rPr },
+    rPr: {
+      ...documentDefaults.rPr,
+      ...namedStyle.rPr,
+      fontFaces: { ...documentDefaults.rPr?.fontFaces, ...namedStyle.rPr?.fontFaces }
+    },
     pPr: { ...documentDefaults.pPr, ...namedStyle.pPr }
   };
   const canonicalStyle = canonicalDocxStyleId(headStyle, ctx.paraStyleMap);
@@ -3858,8 +4103,8 @@ function decodePara2(p, ctx) {
   const indAttr = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
   const indentation = parseDocxIndentation(indAttr);
   for (const key of ["indentPt", "indentRightPt", "firstLineIndentPt"]) {
-    const value = indentation[key] ?? styleInherited.pPr?.[key];
-    if (value !== void 0) props[key] = value;
+    const value2 = indentation[key] ?? styleInherited.pPr?.[key];
+    if (value2 !== void 0) props[key] = value2;
   }
   if (!alignVal && styleInherited.pPr?.align)
     props.align = safeAlign(styleInherited.pPr.align);
@@ -3869,30 +4114,34 @@ function decodePara2(p, ctx) {
     const numIdNode = numPr?.["w:numId"]?.[0]?._attr ?? numPr?.numId?.[0]?._attr ?? {};
     const ilvl = Number(ilvlNode?.["w:val"] ?? ilvlNode?.val ?? 0);
     const numId = Number(numIdNode?.["w:val"] ?? numIdNode?.val ?? 0);
-    props.listLv = ilvl;
     const numEntry = ctx.numMap.get(numId);
-    if (numEntry) {
-      const lvlInfo = numEntry.levels.get(ilvl) ?? numEntry.levels.get(0);
-      props.listOrd = lvlInfo?.isOrdered ?? false;
-    } else {
-      props.listOrd = numId >= 2;
+    const lvlInfo = numEntry?.levels.get(ilvl) ?? numEntry?.levels.get(0);
+    if (numId !== 0) {
+      for (const key of ["indentPt", "indentRightPt", "firstLineIndentPt"]) {
+        if (props[key] === void 0 && lvlInfo?.indentation[key] !== void 0)
+          props[key] = lvlInfo.indentation[key];
+      }
+      if (lvlInfo?.fmt !== "none") {
+        props.listLv = ilvl;
+        props.listOrd = lvlInfo?.isOrdered ?? numId >= 2;
+      }
     }
   }
   const pagination = parsePaginationProps(pPr);
   for (const key of ["pageBreakBefore", "keepWithNext", "keepLines", "widowControl"]) {
-    const value = pagination[key] ?? styleInherited.pPr?.[key];
-    if (value !== void 0) props[key] = value;
+    const value2 = pagination[key] ?? styleInherited.pPr?.[key];
+    if (value2 !== void 0) props[key] = value2;
   }
-  const children = p?.["_childOrder"];
+  const children2 = p?.["_childOrder"];
   const kids = [];
-  if (Array.isArray(children)) {
+  if (Array.isArray(children2)) {
     const runsArr = toArr2(p?.["w:r"] ?? p?.r);
     const hlArr = toArr2(p?.["w:hyperlink"] ?? p?.hyperlink);
     const sdtArr = toArr2(p?.["w:sdt"] ?? p?.sdt);
     let ri = 0;
     let hi = 0;
     let si = 0;
-    for (const tag of children) {
+    for (const tag of children2) {
       if (tag === "w:r" || tag === "r") {
         const run = runsArr[ri++];
         if (run) {
@@ -3954,6 +4203,7 @@ function decodePara2(p, ctx) {
     kids.push(...legacyKids);
   }
   const filteredKids = kids.filter(Boolean);
+  if (filteredKids.length === 0) filteredKids.push(decodeRun({ "w:rPr": pPr?.["w:rPr"] }, ctx, styleInherited.rPr));
   return buildPara(filteredKids, props);
 }
 function decodeRunOrImage(run, ctx) {
@@ -3961,14 +4211,14 @@ function decodeRunOrImage(run, ctx) {
     if (!node || typeof node !== "object") return null;
     if (node["w:drawing"]) return node["w:drawing"][0];
     if (node["w:pict"]) return node["w:pict"][0];
-    for (const value of Object.values(node)) {
-      if (Array.isArray(value)) {
-        for (const v of value) {
+    for (const value2 of Object.values(node)) {
+      if (Array.isArray(value2)) {
+        for (const v of value2) {
           const found = findFirstDrawing(v);
           if (found) return found;
         }
       } else {
-        const found = findFirstDrawing(value);
+        const found = findFirstDrawing(value2);
         if (found) return found;
       }
     }
@@ -3981,27 +4231,29 @@ function decodeRunOrImage(run, ctx) {
   }
   return decodeRun(run, ctx);
 }
-function decodeImageLayout(anchor) {
-  const wrap = anchor?.["wp:wrapTop"]?.[0] ?? anchor?.wrapTop?.[0];
-  const anchorPos = anchor?.["wp:anchorPos"]?.[0]?._attr ?? anchor?.anchorPos?.[0]?._attr ?? {};
-  const layout = {
-    wrap: "square",
-    horzAlign: "left",
-    vertAlign: "top",
-    horzRelTo: "page",
-    vertRelTo: "page",
-    xPt: Number(anchorPos?.x ?? 0) / 12700,
-    // emu to pt
-    yPt: Number(anchorPos?.y ?? 0) / 12700
-    // emu to pt
-  };
-  if (wrap?.["wp:none"]) layout.wrap = "none";
-  else if (wrap?.["wp:square"]) layout.wrap = "square";
-  else if (wrap?.["wp:tight"]) layout.wrap = "tight";
-  else if (wrap?.["wp:through"]) layout.wrap = "through";
-  else if (wrap?.["wp:behind"]) layout.wrap = "behind";
-  else if (wrap?.["wp:inFront"]) layout.wrap = "front";
-  return layout;
+async function prepareChartImages(node, ctx, depth = 0) {
+  if (!node || typeof node !== "object" || depth > 128) return;
+  for (const tag of ["wp:inline", "wp:anchor"]) {
+    for (const container of toArr2(node[tag])) {
+      const data = container?.["a:graphic"]?.[0]?.["a:graphicData"]?.[0];
+      const chart = data?.["c:chart"]?.[0];
+      const target = ctx.relsMap.get(chart?._attr?.["r:id"]);
+      if (!chart || !target) continue;
+      const bytes = ctx.files.get(resolveDocxPath("word", target));
+      const extent = container?.["wp:extent"]?.[0]?._attr ?? {};
+      try {
+        if (!bytes) throw new Error("chart XML not found");
+        const png2 = await renderDocxChart(TextKit.decode(bytes), Metric.emuToPt(Number(extent.cx)), Metric.emuToPt(Number(extent.cy)));
+        ctx.chartImages.set(container, png2);
+      } catch (e) {
+        ctx.warns.push(`[DocxDecoder] ${target}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+  for (const [key, value2] of Object.entries(node)) {
+    if (key.startsWith("_")) continue;
+    if (Array.isArray(value2)) for (const item of value2) await prepareChartImages(item, ctx, depth + 1);
+  }
 }
 function decodeDrawing(drawing, ctx) {
   try {
@@ -4019,16 +4271,15 @@ function decodeDrawing(drawing, ctx) {
     const graphic = container?.["a:graphic"]?.[0] ?? container?.graphic?.[0];
     const graphicData = graphic?.["a:graphicData"]?.[0] ?? graphic?.graphicData?.[0];
     if (graphicData?.["c:chart"] || graphicData?.chart) {
-      return {
-        tag: "img",
-        b64: "",
-        // 플레이스홀더
-        mime: "image/png",
-        w: wPt,
-        h: hPt,
-        alt: `[\uCC28\uD2B8: ${alt || "\uCC28\uD2B8"}]`,
-        layout: decodeImageLayout(anchor)
-      };
+      const bytes = ctx.chartImages.get(container);
+      return buildImg(
+        bytes ? TextKit.base64Encode(bytes) : "",
+        "image/png",
+        wPt,
+        hPt,
+        `[\uCC28\uD2B8: ${alt || "\uCC28\uD2B8"}]`,
+        inline ? { wrap: "inline" } : extractAnchorLayout(anchor)
+      );
     }
     const pic = graphicData?.["pic:pic"]?.[0] ?? graphicData?.pic?.[0];
     const blipFill = pic?.["pic:blipFill"]?.[0] ?? pic?.blipFill?.[0];
@@ -4099,6 +4350,18 @@ var HIGHLIGHT_COLOR_MAP = {
   black: "000000",
   white: "FFFFFF"
 };
+function isDocxOff(node) {
+  return ["0", "false", "off"].includes(String(node?._attr?.["w:val"] ?? node?._attr?.val ?? "1").toLowerCase());
+}
+function docxFontFaces(attrs) {
+  const latin = docxAttr(attrs, "ascii") ?? docxAttr(attrs, "hAnsi");
+  const eastAsia = docxAttr(attrs, "eastAsia");
+  if (!latin && !eastAsia) return void 0;
+  return {
+    ...latin ? { latin: safeFont(latin) } : {},
+    ...eastAsia ? { hangul: safeFont(eastAsia), hanja: safeFont(eastAsia), japanese: safeFont(eastAsia) } : {}
+  };
+}
 function decodeRun(run, ctx, styleRpr) {
   const rPr = run?.["w:rPr"]?.[0] ?? run?.rPr?.[0] ?? {};
   const vanishNode = rPr?.["w:vanish"]?.[0] ?? rPr?.vanish?.[0];
@@ -4131,21 +4394,22 @@ function decodeRun(run, ctx, styleRpr) {
     else if (posVal <= -4) isSub = true;
   }
   const bNode = rPr?.["w:b"]?.[0] ?? rPr?.b?.[0];
-  const isBold = bNode != null && (bNode?._attr?.["w:val"] ?? bNode?._attr?.val ?? "1") !== "0";
+  const isBold = bNode != null && !isDocxOff(bNode);
   const iNode = rPr?.["w:i"]?.[0] ?? rPr?.i?.[0];
-  const isItalic = iNode != null && (iNode?._attr?.["w:val"] ?? iNode?._attr?.val ?? "1") !== "0";
+  const isItalic = iNode != null && !isDocxOff(iNode);
   const sNode = rPr?.["w:strike"]?.[0] ?? rPr?.strike?.[0];
-  const isStrike = sNode != null && (sNode?._attr?.["w:val"] ?? sNode?._attr?.val ?? "1") !== "0";
+  const isStrike = sNode != null && !isDocxOff(sNode);
   const props = {
-    b: (bNode != null ? isBold : styleRpr?.b) || void 0,
-    i: (iNode != null ? isItalic : styleRpr?.i) || void 0,
+    b: bNode != null ? isBold : styleRpr?.b,
+    i: iNode != null ? isItalic : styleRpr?.i,
     u: (underVal ? underVal !== "none" : styleRpr?.u) || void 0,
-    s: (sNode != null ? isStrike : styleRpr?.s) || void 0,
+    s: sNode != null ? isStrike : styleRpr?.s,
     sup: isSup || void 0,
     sub: isSub || void 0,
     pt: effectiveSzVal ? Metric.halfPtToPt(Number(effectiveSzVal)) : styleRpr?.pt,
     color: safeHex(colorVal) ?? styleRpr?.color,
     font: fontName ? safeFont(fontName) : styleRpr?.font,
+    fontFaces: { ...styleRpr?.fontFaces, ...docxFontFaces(fontAttr) },
     bg: bgVal
   };
   const fldChar = run?.["w:fldChar"]?.[0]?._attr ?? run?.fldChar?.[0]?._attr;
@@ -4295,7 +4559,8 @@ async function parseParaStyleMap(xml) {
     const stylesRoot = obj?.["w:styles"]?.[0] ?? obj?.styles?.[0] ?? obj;
     const defaultsPPr = stylesRoot?.["w:docDefaults"]?.[0]?.["w:pPrDefault"]?.[0]?.["w:pPr"]?.[0] ?? stylesRoot?.docDefaults?.[0]?.pPrDefault?.[0]?.pPr?.[0];
     map.set(DOCX_DEFAULT_STYLE_KEY, {
-      pPr: { ...parseDocxSpacingProps(defaultsPPr, true), ...parsePaginationProps(defaultsPPr) }
+      pPr: { ...parseDocxSpacingProps(defaultsPPr, true), ...parsePaginationProps(defaultsPPr) },
+      rPr: decodeRun({ "w:rPr": stylesRoot?.["w:docDefaults"]?.[0]?.["w:rPrDefault"]?.[0]?.["w:rPr"] }, {}).props
     });
     const styleArr = toArr2(stylesRoot?.["w:style"] ?? stylesRoot?.style);
     for (const style of styleArr) {
@@ -4317,20 +4582,21 @@ async function parseParaStyleMap(xml) {
         const fontAttr = rPr?.["w:rFonts"]?.[0]?._attr ?? rPr?.rFonts?.[0]?._attr ?? {};
         const fontName = fontAttr?.["w:ascii"] ?? fontAttr?.ascii ?? fontAttr?.["w:eastAsia"] ?? fontAttr?.eastAsia;
         const bNode = rPr?.["w:b"]?.[0] ?? rPr?.b?.[0];
-        const isBold = bNode != null && (bNode?._attr?.["w:val"] ?? bNode?._attr?.val ?? "1") !== "0";
+        const isBold = bNode != null && !isDocxOff(bNode);
         const iNode = rPr?.["w:i"]?.[0] ?? rPr?.i?.[0];
-        const isItalic = iNode != null && (iNode?._attr?.["w:val"] ?? iNode?._attr?.val ?? "1") !== "0";
+        const isItalic = iNode != null && !isDocxOff(iNode);
         const underVal = rPr?.["w:u"]?.[0]?._attr?.["w:val"] ?? rPr?.["w:u"]?.[0]?._attr?.val;
         const sNode = rPr?.["w:strike"]?.[0] ?? rPr?.strike?.[0];
-        const isStrike = sNode != null && (sNode?._attr?.["w:val"] ?? sNode?._attr?.val ?? "1") !== "0";
+        const isStrike = sNode != null && !isDocxOff(sNode);
         def.rPr = {
-          b: isBold || void 0,
-          i: isItalic || void 0,
+          b: bNode != null ? isBold : void 0,
+          i: iNode != null ? isItalic : void 0,
           u: underVal && underVal !== "none" ? true : void 0,
-          s: isStrike || void 0,
+          s: sNode != null ? isStrike : void 0,
           pt: szVal ? Metric.halfPtToPt(Number(szVal)) : void 0,
           color: safeHex(colorVal),
-          font: fontName ? safeFont(fontName) : void 0
+          font: fontName ? safeFont(fontName) : void 0,
+          fontFaces: docxFontFaces(fontAttr)
         };
       }
       const pPr = style?.["w:pPr"]?.[0] ?? style?.pPr?.[0];
@@ -4372,20 +4638,20 @@ function parseDocxIndentation(attrs) {
   const read = (name) => {
     const raw = docxAttr(attrs, name);
     if (raw === void 0) return void 0;
-    const value = Number(raw);
-    return Number.isFinite(value) ? Metric.dxaToPt(value) : void 0;
+    const value2 = Number(raw);
+    return Number.isFinite(value2) ? Metric.dxaToPt(value2) : void 0;
   };
   const left = read("left");
   const right = read("right");
   const hanging = read("hanging");
-  const first = hanging !== void 0 ? -hanging : read("firstLine");
+  const first2 = hanging !== void 0 ? -hanging : read("firstLine");
   if (left !== void 0) result.indentPt = left;
   if (right !== void 0) result.indentRightPt = right;
-  if (first !== void 0) result.firstLineIndentPt = first === 0 ? 0 : first;
+  if (first2 !== void 0) result.firstLineIndentPt = first2 === 0 ? 0 : first2;
   return result;
 }
-function definedProps(value) {
-  return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== void 0));
+function definedProps(value2) {
+  return Object.fromEntries(Object.entries(value2).filter(([, v]) => v !== void 0));
 }
 function resolveParaStyle(styleId, map) {
   let merged = {};
@@ -4396,7 +4662,11 @@ function resolveParaStyle(styleId, map) {
     const def = map.get(cur);
     if (!def) break;
     if (def.rPr) {
-      merged.rPr = { ...def.rPr, ...merged.rPr };
+      merged.rPr = {
+        ...definedProps(def.rPr),
+        ...definedProps(merged.rPr ?? {}),
+        fontFaces: { ...def.rPr.fontFaces, ...merged.rPr?.fontFaces }
+      };
     }
     if (def.pPr) {
       merged.pPr = { ...definedProps(def.pPr), ...definedProps(merged.pPr ?? {}) };
@@ -4450,8 +4720,8 @@ function decodeGrid2(tbl, ctx) {
   if (tblCellMar) {
     const readMarginPt = (side) => {
       const attrs = tblCellMar?.[`w:${side}`]?.[0]?._attr ?? tblCellMar?.[side]?.[0]?._attr;
-      const value = Number(docxAttr(attrs, "w"));
-      return Number.isFinite(value) && value >= 0 ? Metric.dxaToPt(value) : void 0;
+      const value2 = Number(docxAttr(attrs, "w"));
+      return Number.isFinite(value2) && value2 >= 0 ? Metric.dxaToPt(value2) : void 0;
     };
     gridProps.cellPadT = readMarginPt("top");
     gridProps.cellPadB = readMarginPt("bottom");
@@ -4629,8 +4899,8 @@ function decodeFloatingTableLayout(tblPr) {
   const numberDxa = (name) => {
     const raw = get(name);
     if (raw === void 0) return void 0;
-    const value = Number(raw);
-    return Number.isFinite(value) ? Metric.dxaToPt(value) : void 0;
+    const value2 = Number(raw);
+    return Number.isFinite(value2) ? Metric.dxaToPt(value2) : void 0;
   };
   const layout = {
     wrap: "topAndBottom",
@@ -4700,7 +4970,7 @@ function extractAnchorLayout(anchor) {
   else if (anchor?.["wp:wrapTight"]?.[0] != null) wrap = "tight";
   else if (anchor?.["wp:wrapThrough"]?.[0] != null) wrap = "through";
   else if (anchor?.["wp:wrapSquare"]?.[0] != null) wrap = "square";
-  else if (anchor?.["wp:wrapTopAndBottom"]?.[0] != null) wrap = "square";
+  else if (anchor?.["wp:wrapTopAndBottom"]?.[0] != null) wrap = "topAndBottom";
   else if (anchor?.["wp:wrapBehind"]?.[0] != null || behindDoc) wrap = "behind";
   const posH = anchor?.["wp:positionH"]?.[0];
   const horzRelTo = parseHorzRelTo(posH?._attr?.relativeFrom);
@@ -5158,8 +5428,8 @@ function collectInline(tokens, start, stopTags) {
           i++;
           const spanKids = collectInline(tokens, i, ["span", ...stopTags]);
           i = spanKids.nextI;
-          const color = t.attrs?.style?.match(/color:\s*([^;]+)/)?.[1];
-          nodes.push(...spanKids.nodes.map((n) => n.tag === "span" ? { ...n, props: { ...n.props, color: color || n.props.color } } : n));
+          const color2 = t.attrs?.style?.match(/color:\s*([^;]+)/)?.[1];
+          nodes.push(...spanKids.nodes.map((n) => n.tag === "span" ? { ...n, props: { ...n.props, color: color2 || n.props.color } } : n));
           continue;
         case "img":
           const src = t.attrs?.src;
@@ -5449,8 +5719,8 @@ var BaseEncoder = class {
       images.push(node);
       return;
     }
-    const children = this.getChildren(node);
-    for (const child of children) {
+    const children2 = this.getChildren(node);
+    for (const child of children2) {
       this.collectImagesRecursive(child, images);
     }
   }
@@ -5581,20 +5851,11 @@ var LangFontBank = class {
     m.set(face, id);
     return id;
   }
-  /** 폰트 이름 → 한글 폰트 여부 판별 (ANYTOHWP 방식) */
-  isKorean(face) {
-    return /[\uAC00-\uD7A3\u3131-\u318E]/.test(face) || ["\uB9D1\uC740", "\uB098\uB214", "\uAD74\uB9BC", "\uB3CB\uC6C0", "\uBC14\uD0D5", "\uD568\uCD08\uB86C", "\uD55C\uCEF4", "HY"].some(
-      (k) => face.includes(k)
-    );
-  }
-  /** Register a face in every language bank and return bank-local IDs. */
-  registerFont(rawFace) {
-    const face = safeFontToKr(rawFace) || "\uD568\uCD08\uB86C\uBC14\uD0D5";
-    const isKor = this.isKorean(face);
+  registerFont(rawFace, faces) {
     const ids = {};
     for (const group of LANG_GROUPS) {
-      const useFace = group === "LATIN" ? isKor ? "\uD568\uCD08\uB86C\uBC14\uD0D5" : face : isKor ? face : "\uD568\uCD08\uB86C\uBC14\uD0D5";
-      ids[group] = this.register(group, useFace);
+      const face = faces?.[group.toLowerCase()] ?? rawFace;
+      ids[group] = this.register(group, safeFontToKr(face));
     }
     return ids;
   }
@@ -5708,10 +5969,10 @@ function readPixelDims(b64, mime) {
   return null;
 }
 function charPrKey(p) {
-  return `${p.b ? 1 : 0}|${p.i ? 1 : 0}|${p.u ? 1 : 0}|${p.s ? 1 : 0}|${p.pt ?? 10}|${p.color ?? "000000"}|${p.font ?? ""}|${p.bg ?? ""}`;
+  return `${p.b ? 1 : 0}|${p.i ? 1 : 0}|${p.u ? 1 : 0}|${p.s ? 1 : 0}|${p.pt ?? 10}|${p.color ?? "000000"}|${p.font ?? ""}|${JSON.stringify(LANG_GROUPS.map((g) => p.fontFaces?.[g.toLowerCase()]))}|${p.bg ?? ""}`;
 }
-function paraShapeHwpToLayoutHwp(value) {
-  return Math.round(value / 2);
+function paraShapeHwpToLayoutHwp(value2) {
+  return Math.round(value2 / 2);
 }
 function paraPrKey(p) {
   return `${p.pageBreakBefore ?? false}|${p.keepWithNext ?? false}|${p.keepLines ?? false}|${p.widowControl ?? false}|${p.align ?? "left"}|${p.verAlign ?? "baseline"}|${p.lineWrap ?? "break"}|${p.listOrd ?? ""}|${p.listLv ?? 0}|${p.indentPt ?? 0}|${p.indentRightPt ?? 0}|${p.firstLineIndentPt ?? 0}|${p.spaceBefore ?? 0}|${p.spaceAfter ?? 0}|${p.lineHeight ?? 0}|${p.lineHeightFixed ?? 0}|${p.styleId ?? ""}`;
@@ -5721,7 +5982,7 @@ function registerCharPr(props, ctx) {
   const existing = ctx.charPrMap.get(key);
   if (existing !== void 0) return existing;
   const rawFont = props.font ?? "\uD568\uCD08\uB86C\uBC14\uD0D5";
-  const fontIds = ctx.fontBank.registerFont(rawFont);
+  const fontIds = ctx.fontBank.registerFont(rawFont, props.fontFaces);
   const id = ctx.charPrs.length;
   ctx.charPrs.push({
     id,
@@ -6228,10 +6489,10 @@ function buildLinesegarray(text, vertPosStart, fontSize, lineSpacingPct, horzSiz
     lineHeightHwp ?? Math.round(fontSize * Math.max(100, lineSpacingPct) / 100)
   );
   const spacing = Math.max(0, lineAdvance - textHeight);
-  const baseline = Math.round(textHeight * 0.85);
-  const firstHorzPos = Math.max(0, layout.firstHorzPos ?? 0);
-  const restHorzPos = Math.max(0, layout.restHorzPos ?? firstHorzPos);
-  const rightMargin = Math.max(0, layout.rightMargin ?? 0);
+  const baseline = layout.baseline ?? Math.round(fontSize * 0.85);
+  const firstHorzPos = layout.firstHorzPos ?? 0;
+  const restHorzPos = layout.restHorzPos ?? firstHorzPos;
+  const rightMargin = layout.rightMargin ?? 0;
   const lineHorzPos = (index) => index === 0 ? firstHorzPos : restHorzPos;
   const lineHorzSize = (index) => Math.max(100, horzSize - lineHorzPos(index) - rightMargin);
   if (text.length === 0) {
@@ -6320,7 +6581,7 @@ function paraHasPageBreak(para) {
   return visit(para.kids);
 }
 function fontSizeForPara(para, ctx) {
-  let maxSize = 1e3;
+  let maxSize = 0;
   const visit = (kids) => {
     for (const kid of kids ?? []) {
       if (kid.tag === "span") {
@@ -6334,7 +6595,7 @@ function fontSizeForPara(para, ctx) {
     }
   };
   visit(para.kids);
-  return maxSize;
+  return maxSize || 1e3;
 }
 function inlineObjectHeightForPara(para, ctx) {
   let maxHeight = 0;
@@ -6384,16 +6645,8 @@ function encodeParaPositioned(para, ctx, vertPos, secPr = "", availWidth, hfRun 
   if (!runsXml) runsXml = `<hp:run charPrIDRef="0" charTcId="0"><hp:t xml:space="preserve"> </hp:t></hp:run>`;
   const paraText2 = extractParaText(para);
   const paraStart = vertPos + Math.max(0, paraShapeHwpToLayoutHwp(paraPr?.prevHwp ?? 0));
-  const firstHorzPos = Math.max(
-    0,
-    paraShapeHwpToLayoutHwp(
-      (paraPr?.leftHwp ?? 0) + Math.max(0, paraPr?.intentHwp ?? 0)
-    )
-  );
-  const restHorzPos = Math.max(
-    0,
-    paraShapeHwpToLayoutHwp((paraPr?.leftHwp ?? 0) - Math.min(0, paraPr?.intentHwp ?? 0))
-  );
+  const firstHorzPos = Metric.ptToHwp((para.props.indentPt ?? 0) + (para.props.firstLineIndentPt ?? 0));
+  const restHorzPos = Metric.ptToHwp(para.props.indentPt ?? 0);
   const { xml: linesegXml, totalHeight } = buildLinesegarray(
     paraText2,
     paraStart,
@@ -6403,12 +6656,10 @@ function encodeParaPositioned(para, ctx, vertPos, secPr = "", availWidth, hfRun 
     effectiveLineHeight,
     {
       textHeight,
+      baseline: Math.max(Math.round(fontSize * 0.85), inlineObjectHeightForPara(para, ctx)),
       firstHorzPos,
       restHorzPos,
-      rightMargin: Math.max(
-        0,
-        paraShapeHwpToLayoutHwp(paraPr?.rightHwp ?? 0)
-      ),
+      rightMargin: Metric.ptToHwp(para.props.indentRightPt ?? 0),
       indentFirst: (paraPr?.intentHwp ?? 0) !== 0,
       pageFirst
     }
@@ -6599,13 +6850,13 @@ function buildObjectLayoutAttrs(layout, fallbackHorzAlign, defaultDistHwp = 138)
   const horzRelMap = {
     para: "PARA",
     margin: "PAGE",
-    page: "PAGE",
+    page: "PAPER",
     column: "COLUMN"
   };
   const vertRelMap = {
     para: "PARA",
     margin: "PAGE",
-    page: "PAGE",
+    page: "PAPER",
     line: "PARA"
   };
   const horzAlignMap = {
@@ -6625,7 +6876,7 @@ function buildObjectLayoutAttrs(layout, fallbackHorzAlign, defaultDistHwp = 138)
   const horzOffset = layout?.xPt != null ? Metric.ptToHwp(layout.xPt) : 0;
   const vertOffset = layout?.yPt != null ? Metric.ptToHwp(layout.yPt) : 0;
   const posXml = `<hp:pos treatAsChar="${floats ? "0" : "1"}" affectLSpacing="0" flowWithText="${floats && (layout?.vertRelTo === "page" || layout?.horzRelTo === "page") ? "0" : "1"}" allowOverlap="${floats ? "1" : "0"}" holdAnchorAndSO="0" vertRelTo="${vertRelTo}" horzRelTo="${horzRelTo}" vertAlign="${vertAlign}" horzAlign="${horzAlign}" vertOffset="${vertOffset}" horzOffset="${horzOffset}"/>`;
-  const dist = (value) => value != null ? Math.max(0, Metric.ptToHwp(value)) : defaultDistHwp;
+  const dist = (value2) => value2 != null ? Math.max(0, Metric.ptToHwp(value2)) : defaultDistHwp;
   const outMarginXml = `<hp:outMargin left="${dist(layout?.distL)}" right="${dist(layout?.distR)}" top="${dist(layout?.distT)}" bottom="${dist(layout?.distB)}"/>`;
   return {
     textWrap,
@@ -7095,6 +7346,7 @@ function collectFontsFromPara(para, fonts) {
 function collectFontsFromSpan(span, fonts) {
   const font = span.props.font?.trim();
   if (font) fonts.add(font);
+  for (const face of Object.values(span.props.fontFaces ?? {})) if (face) fonts.add(face);
 }
 function mappedFontName(font) {
   const entry = FONT_MAPPING[font] ?? FONT_MAPPING[font.trim()];
@@ -7102,9 +7354,9 @@ function mappedFontName(font) {
   if (typeof entry === "string") return entry;
   if (entry.altName) return entry.altName;
   if (entry.nearest) return entry.nearest;
-  const first = entry.candidates?.[0];
-  if (typeof first === "string") return first;
-  return first?.name ?? first?.font;
+  const first2 = entry.candidates?.[0];
+  if (typeof first2 === "string") return first2;
+  return first2?.name ?? first2?.font;
 }
 function fontTableXml(fonts) {
   const body = Array.from(fonts).filter(Boolean).sort((a, b) => a.localeCompare(b, "ko")).map((font) => {
@@ -7457,8 +7709,8 @@ function encodeParaInner(para, ctx, maxWidthPt, sectionPrXml = "") {
   if (para.props.indentRightPt !== void 0)
     indParts.push(`w:right="${Math.round(Metric.ptToDxa(para.props.indentRightPt))}"`);
   if (para.props.firstLineIndentPt !== void 0) {
-    const first = Math.round(Metric.ptToDxa(para.props.firstLineIndentPt));
-    indParts.push(first < 0 ? `w:hanging="${-first}"` : `w:firstLine="${first}"`);
+    const first2 = Math.round(Metric.ptToDxa(para.props.firstLineIndentPt));
+    indParts.push(first2 < 0 ? `w:hanging="${-first2}"` : `w:firstLine="${first2}"`);
   }
   if (indParts.length > 0) indentXml = `<w:ind ${indParts.join(" ")}/>`;
   const cjkLineBreakXml = "<w:kinsoku/><w:wordWrap/><w:overflowPunct/>";
@@ -7534,10 +7786,10 @@ function docxLineHeightRatio(lineHeight) {
 }
 function encodeTextProperties(p) {
   const rPr = [];
-  if (p.b) rPr.push("<w:b/>");
-  if (p.i) rPr.push("<w:i/>");
+  if (p.b !== void 0) rPr.push(p.b ? "<w:b/>" : '<w:b w:val="0"/>');
+  if (p.i !== void 0) rPr.push(p.i ? "<w:i/>" : '<w:i w:val="0"/>');
   if (p.u) rPr.push('<w:u w:val="single"/>');
-  if (p.s) rPr.push("<w:strike/>");
+  if (p.s !== void 0) rPr.push(p.s ? "<w:strike/>" : '<w:strike w:val="0"/>');
   if (p.sup) rPr.push('<w:vertAlign w:val="superscript"/>');
   if (p.sub) rPr.push('<w:vertAlign w:val="subscript"/>');
   if (p.pt)
@@ -7545,10 +7797,11 @@ function encodeTextProperties(p) {
       `<w:sz w:val="${Metric.ptToHalfPt(p.pt)}"/><w:szCs w:val="${Metric.ptToHalfPt(p.pt)}"/>`
     );
   if (p.color) rPr.push(`<w:color w:val="${p.color}"/>`);
-  if (p.font)
-    rPr.push(
-      `<w:rFonts w:ascii="${esc2(p.font)}" w:hAnsi="${esc2(p.font)}" w:eastAsia="${esc2(p.font)}" w:hint="eastAsia"/>`
-    );
+  if (p.font || p.fontFaces) {
+    const latin = p.fontFaces?.latin ?? p.font ?? p.fontFaces?.hangul ?? "\uD568\uCD08\uB86C\uBC14\uD0D5";
+    const eastAsia = p.fontFaces?.hangul ?? p.font ?? latin;
+    rPr.push(`<w:rFonts w:ascii="${esc2(latin)}" w:hAnsi="${esc2(latin)}" w:eastAsia="${esc2(eastAsia)}" w:hint="eastAsia"/>`);
+  }
   if (p.bg) rPr.push(`<w:shd w:val="clear" w:color="auto" w:fill="${p.bg}"/>`);
   return rPr;
 }
@@ -8065,8 +8318,8 @@ function strokeToCss(s) {
   const kindMap = { solid: "solid", dash: "dashed", dot: "dotted", double: "double", none: "none" };
   const style = kindMap[s.kind] ?? "solid";
   const px = Math.max(1, Math.round(s.pt * 96 / 72));
-  const color = s.color.startsWith("#") ? s.color : `#${s.color}`;
-  return `${px}px ${style} ${color}`;
+  const color2 = s.color.startsWith("#") ? s.color : `#${s.color}`;
+  return `${px}px ${style} ${color2}`;
 }
 function encodeGrid2(grid, warns, includeImages) {
   if (grid.kids.length === 0) return "";
@@ -8366,7 +8619,7 @@ ${rows}</tbody>
 registry.registerEncoder(new HtmlEncoder());
 
 // src/encoders/hwp/HwpEncoder.ts
-var import_pako3 = __toESM(require("pako"));
+var import_pako4 = __toESM(require("pako"));
 
 // src/encoders/hwp/verify.ts
 var HWPTAG_BEGIN2 = 16;
@@ -8487,7 +8740,7 @@ function verifyIdMappings(records, errors) {
       errors.push(`ID_MAPPINGS[${index}] is negative (${values[index]})`);
     }
   }
-  const faceNameDeclared = values.slice(1, 8).reduce((sum, value) => sum + value, 0);
+  const faceNameDeclared = values.slice(1, 8).reduce((sum, value2) => sum + value2, 0);
   const faceNameActual = countTag(records, TAG_FACE_NAME2);
   if (faceNameDeclared !== faceNameActual) {
     errors.push(
@@ -8518,13 +8771,48 @@ function verifyIdMappings(records, errors) {
 }
 function directChildren(records, parentIndex) {
   const parentLevel = records[parentIndex].level;
-  const children = [];
+  const children2 = [];
   for (let index = parentIndex + 1; index < records.length; index++) {
     const record = records[index];
     if (record.level <= parentLevel) break;
-    if (record.level === parentLevel + 1) children.push(record);
+    if (record.level === parentLevel + 1) children2.push(record);
   }
-  return children;
+  return children2;
+}
+function verifyTableGeometry(records, index, errors) {
+  const table = records[index];
+  if (table.data.length < 8) return;
+  const rowCount = readU16(table.data, 4);
+  const colCount = readU16(table.data, 6);
+  const label = `TABLE at offset ${table.offset}`;
+  if (!rowCount || !colCount) {
+    errors.push(`${label} must have at least one row and column`);
+    return;
+  }
+  const rows = Array.from({ length: rowCount }, () => []);
+  const starts = new Array(rowCount).fill(0);
+  for (let i = index + 1; i < records.length && records[i].level >= table.level; i++) {
+    const cell = records[i];
+    if (cell.tag !== TAG_LIST_HEADER2 || cell.level !== table.level || cell.data.length !== CELL_LIST_HEADER_SIZE) continue;
+    const col = readU16(cell.data, 8), row = readU16(cell.data, 10);
+    const cs = readU16(cell.data, 12), rs = readU16(cell.data, 14);
+    if (!cs || !rs || row + rs > rowCount || col + cs > colCount) {
+      errors.push(`${label} has an out-of-bounds cell at row ${row}, column ${col}`);
+      continue;
+    }
+    starts[row]++;
+    for (let r = row; r < row + rs; r++) rows[r].push([col, col + cs]);
+  }
+  rows.forEach((intervals, row) => {
+    let end = 0;
+    for (const [start, next] of intervals.sort((a, b) => a[0] - b[0])) {
+      if (start !== end) errors.push(`${label} has a cell gap or overlap in row ${row}, column ${end}`);
+      end = next;
+    }
+    if (end !== colCount) errors.push(`${label} has an uncovered cell in row ${row}, column ${end}`);
+    if (table.data.length >= 20 + row * 2 && readU16(table.data, 18 + row * 2) !== starts[row])
+      errors.push(`${label} row ${row} cell count does not match LIST_HEADER records`);
+  });
 }
 function verifyHwpRecordStreams(docInfoRaw, sectionRaw) {
   const errors = [];
@@ -8647,12 +8935,12 @@ function verifyHwpRecordStreams(docInfoRaw, sectionRaw) {
         `${label} references styleId ${styleId}, but only ${styleCount} STYLE record(s) exist`
       );
     }
-    const children = directChildren(bodyRecords, index);
-    const paraTexts = children.filter((record) => record.tag === TAG_PARA_TEXT2);
-    const charShapeRanges = children.filter(
+    const children2 = directChildren(bodyRecords, index);
+    const paraTexts = children2.filter((record) => record.tag === TAG_PARA_TEXT2);
+    const charShapeRanges = children2.filter(
       (record) => record.tag === TAG_PARA_CHAR_SHAPE2
     );
-    const lineSegs = children.filter(
+    const lineSegs = children2.filter(
       (record) => record.tag === TAG_PARA_LINE_SEG
     );
     let textBytes = 0;
@@ -8664,7 +8952,13 @@ function verifyHwpRecordStreams(docInfoRaw, sectionRaw) {
       }
       textBytes += record.data.length;
     }
-    if (nChars !== textBytes / 2) {
+    if (nChars === 0) {
+      errors.push(`${label} declares zero characters; the implicit paragraph terminator is required`);
+    } else if (nChars === 1) {
+      if (paraTexts.length !== 0) {
+        errors.push(`${label} with nChars 1 must omit PARA_TEXT (the paragraph terminator is implicit)`);
+      }
+    } else if (nChars !== textBytes / 2) {
       errors.push(
         `${label} declares nChars ${nChars}, but direct PARA_TEXT payloads contain ${textBytes / 2} UTF-16 code unit(s)`
       );
@@ -8709,7 +9003,7 @@ function verifyHwpRecordStreams(docInfoRaw, sectionRaw) {
       );
     }
   }
-  for (const record of bodyRecords) {
+  for (const [index, record] of bodyRecords.entries()) {
     let borderFillId;
     if (record.tag === TAG_PAGE_BORDER_FILL) {
       if (record.data.length < 14) {
@@ -8722,6 +9016,7 @@ function verifyHwpRecordStreams(docInfoRaw, sectionRaw) {
     } else if (record.tag === TAG_LIST_HEADER2 && record.data.length === CELL_LIST_HEADER_SIZE) {
       borderFillId = readU16(record.data, 32);
     } else if (record.tag === TAG_TABLE) {
+      verifyTableGeometry(bodyRecords, index, errors);
       if (record.data.length < 6) {
         errors.push(
           `TABLE at offset ${record.offset} is ${record.data.length} bytes, expected at least 6`
@@ -8931,11 +9226,6 @@ var LANG_GROUPS2 = [
   "SYMBOL",
   "USER"
 ];
-function isKoreanFont(face) {
-  return /[\uAC00-\uD7A3\u3131-\u318E]/.test(face) || ["\uB9D1\uC740", "\uB098\uB214", "\uAD74\uB9BC", "\uB3CB\uC6C0", "\uBC14\uD0D5", "\uD568\uCD08\uB86C", "\uD55C\uCEF4", "HY"].some(
-    (k) => face.includes(k)
-  );
-}
 var HwpStyleBank = class {
   // id=0 → 모두 0
   constructor() {
@@ -8973,17 +9263,11 @@ var HwpStyleBank = class {
     return id;
   }
   /** 폰트 이름 → 언어별 7개 ID 반환 (ANYTOHWP 방식) */
-  registerFontForLangs(rawFace) {
-    const face = safeFontToKr(rawFace) || "\uD568\uCD08\uB86C\uBC14\uD0D5";
-    const isKor = isKoreanFont(face);
-    const hangulFace = isKor ? face : "\uD568\uCD08\uB86C\uBC14\uD0D5";
-    const latinFace = isKor ? "\uD568\uCD08\uB86C\uBC14\uD0D5" : face;
-    const ids = [];
-    for (const lang of LANG_GROUPS2) {
-      const f = lang === "LATIN" ? latinFace : hangulFace;
-      ids.push(this._registerLangFont(lang, f));
-    }
-    return ids;
+  registerFontForLangs(rawFace, faces) {
+    return LANG_GROUPS2.map((lang) => this._registerLangFont(
+      lang,
+      safeFontToKr(faces?.[lang.toLowerCase()] ?? rawFace)
+    ));
   }
   /** 언어별 폰트 목록 반환 */
   getFontsForLang(lang) {
@@ -8997,7 +9281,7 @@ var HwpStyleBank = class {
     const k = csKey(p);
     if (this.csIdx.has(k)) return this.csIdx.get(k);
     const id = this.csProps.length;
-    const fIds = p.font ? this.registerFontForLangs(p.font) : [0, 0, 0, 0, 0, 0, 0];
+    const fIds = p.font || p.fontFaces ? this.registerFontForLangs(p.font ?? "\uD568\uCD08\uB86C\uBC14\uD0D5", p.fontFaces) : [0, 0, 0, 0, 0, 0, 0];
     this.csProps.push(p);
     this.csFontIds.push(fIds);
     this.csIdx.set(k, id);
@@ -9055,6 +9339,7 @@ var HwpStyleBank = class {
 function csKey(p) {
   return [
     p.font ?? "",
+    ...LANG_GROUPS2.map((lang) => p.fontFaces?.[lang.toLowerCase()] ?? ""),
     p.pt ?? 10,
     p.b ? 1 : 0,
     p.i ? 1 : 0,
@@ -9062,7 +9347,8 @@ function csKey(p) {
     p.s ? 1 : 0,
     p.sup ? 1 : 0,
     p.sub ? 1 : 0,
-    p.color ?? "000000"
+    p.color ?? "000000",
+    p.bg ?? "FFFFFF"
   ].join("|");
 }
 function psKey(p) {
@@ -9308,8 +9594,8 @@ function mkCharShape(fontIds, p) {
   if (p.b) attr |= 1 << 1;
   if (p.u) attr |= 1 << 2;
   if (p.s) attr |= 1 << 18;
-  if (p.sup) attr |= 1 << 16;
-  if (p.sub) attr |= 2 << 16;
+  if (p.sup) attr |= 1 << 15;
+  if (p.sub) attr |= 1 << 16;
   const w = new BufWriter();
   for (const id of fontIds) w.u16(id);
   for (let i = 0; i < 7; i++) w.u8(100);
@@ -9446,24 +9732,24 @@ function mkParaCharShape(pairs) {
   for (const [pos, id] of pairs) w.u32(pos).u32(id);
   return w.build();
 }
-function calcLineHeight(type, value, textHeight) {
+function calcLineHeight(type, value2, textHeight) {
   switch (type) {
     case 0:
-      return Math.floor(textHeight * value / 100);
+      return Math.floor(textHeight * value2 / 100);
     case 1:
-      return value;
+      return value2;
     case 2:
-      return textHeight + value;
+      return textHeight + value2;
     case 3:
-      return Math.max(textHeight, value);
+      return Math.max(textHeight, value2);
     case 4:
-      return Math.floor(textHeight * value);
+      return Math.floor(textHeight * value2);
     default:
-      return Math.floor(textHeight * value / 100);
+      return Math.floor(textHeight * value2 / 100);
   }
 }
 function maxFontHwpInPara(para) {
-  let maxHwp = 1e3;
+  let maxHwp = 0;
   const visit = (kids) => {
     for (const kid of kids ?? []) {
       if (kid.tag === "span" && typeof kid.props?.pt === "number" && kid.props.pt > 0) {
@@ -9473,7 +9759,7 @@ function maxFontHwpInPara(para) {
     }
   };
   visit(para.kids);
-  return maxHwp;
+  return maxHwp || 1e3;
 }
 function extractParaLayoutText(para) {
   let text = "";
@@ -9501,9 +9787,9 @@ function estimateCharWidthHwp(code, fontHwp) {
   if (code > 255) return fontHwp;
   return Math.round(fontHwp * 0.42);
 }
-function lineStartPositionsHwp(text, fontHwp, availWidthHwp) {
+function lineStartPositionsHwp(text, fontHwp, availWidthHwp, paraProps) {
   if (!text) return [0];
-  const maxWidth = Math.max(1, availWidthHwp ?? 0);
+  const lineWidth = (index) => Math.max(1, (availWidthHwp ?? 0) - Metric.ptToHwp((paraProps?.indentPt ?? 0) + (index === 0 ? paraProps?.firstLineIndentPt ?? 0 : 0)) - Metric.ptToHwp(paraProps?.indentRightPt ?? 0));
   if (!availWidthHwp || availWidthHwp <= 0) {
     const starts2 = [0];
     for (let i = 0; i < text.length; i++) {
@@ -9524,9 +9810,13 @@ function lineStartPositionsHwp(text, fontHwp, availWidthHwp) {
       currentWidth = 0;
       continue;
     }
+    if ([2, 3, 9, 11].includes(code)) {
+      i += 7;
+      continue;
+    }
     if (code < 32) continue;
     const charWidth = estimateCharWidthHwp(code, fontHwp);
-    if (currentWidth > 0 && currentWidth + charWidth > maxWidth) {
+    if (currentWidth > 0 && currentWidth + charWidth > lineWidth(starts.length - 1)) {
       starts.push(i);
       currentWidth = charWidth;
     } else {
@@ -9535,8 +9825,8 @@ function lineStartPositionsHwp(text, fontHwp, availWidthHwp) {
   }
   return starts;
 }
-function estimateLineCountHwp(text, fontHwp, availWidthHwp) {
-  return lineStartPositionsHwp(text, fontHwp, availWidthHwp).length;
+function estimateLineCountHwp(text, fontHwp, availWidthHwp, paraProps) {
+  return lineStartPositionsHwp(text, fontHwp, availWidthHwp, paraProps).length;
 }
 function safeParaLineAdvanceHwp(props, fontHwp) {
   const textHeight = Math.max(1, fontHwp);
@@ -9551,23 +9841,30 @@ function safeParaLineAdvanceHwp(props, fontHwp) {
   const ratio = Math.max(100, Math.round((props?.lineHeight ?? 1.6) * 100));
   return Math.max(calcLineHeight(0, ratio, textHeight), textHeight);
 }
+function inlineImageHeightHwp(para, width = Number.MAX_SAFE_INTEGER) {
+  return Math.max(0, ...flatImgNodes(para.kids).filter((img) => !img.layout || img.layout.wrap === "inline").map((img) => imageDisplaySizeHwp(img, width).h));
+}
 function minParaHeightHwp(para, availWidthHwp) {
   const fontHwp = maxFontHwpInPara(para);
+  const lineBoxHeight = Math.max(fontHwp, inlineImageHeightHwp(para, availWidthHwp));
   const lineCount = estimateLineCountHwp(
     extractParaLayoutText(para),
     fontHwp,
-    availWidthHwp
+    availWidthHwp,
+    para.props
   );
-  return Metric.ptToHwp(Math.max(0, para.props.spaceBefore ?? 0)) + safeParaLineAdvanceHwp(para.props, fontHwp) * lineCount + Metric.ptToHwp(Math.max(0, para.props.spaceAfter ?? 0));
+  return Metric.ptToHwp(Math.max(0, para.props.spaceBefore ?? 0)) + (safeParaLineAdvanceHwp(para.props, fontHwp) + lineBoxHeight - fontHwp) * lineCount + Metric.ptToHwp(Math.max(0, para.props.spaceAfter ?? 0));
 }
 function nextParaVertPosHwp(para, vertPos, availWidthHwp, pageBodyHeightHwp) {
   const fontHwp = maxFontHwpInPara(para);
+  const lineBoxHeight = Math.max(fontHwp, inlineImageHeightHwp(para, availWidthHwp));
   const lineCount = estimateLineCountHwp(
     extractParaLayoutText(para),
     fontHwp,
-    availWidthHwp
+    availWidthHwp,
+    para.props
   );
-  const lineAdvance = safeParaLineAdvanceHwp(para.props, fontHwp);
+  const lineAdvance = safeParaLineAdvanceHwp(para.props, fontHwp) + lineBoxHeight - fontHwp;
   let next = vertPos + Metric.ptToHwp(Math.max(0, para.props.spaceBefore ?? 0));
   for (let i = 0; i < lineCount; i++) {
     if (pageBodyHeightHwp !== void 0 && next > 0 && next + lineAdvance > pageBodyHeightHwp) {
@@ -9595,17 +9892,7 @@ function minCellHeightHwp(cell, innerWidthHwp) {
   let content = 0;
   for (const kid of cell.kids ?? []) {
     if (kid.tag === "para") {
-      const images = flatImgNodes(kid.kids);
-      for (const image of images) {
-        content += imageDisplaySizeHwp(
-          image,
-          innerWidthHwp ?? Number.MAX_SAFE_INTEGER
-        ).h;
-      }
-      const textKids = kid.kids.filter((child) => child.tag !== "img");
-      if (textKids.length > 0 || images.length === 0) {
-        content += minParaHeightHwp({ ...kid, kids: textKids }, innerWidthHwp);
-      }
+      content += minParaHeightHwp(kid, innerWidthHwp);
     } else if (kid.tag === "grid")
       content += minGridHeightHwp(kid) + Metric.ptToHwp(6);
   }
@@ -9648,12 +9935,12 @@ function buildObjectLineSeg(availWidthHwp, objectHeightHwp, vertPos = 0) {
     393216
   );
 }
-function buildParaLineSegs(text, availWidthHwp, fontHwp, paraProps, vertPos, textPosOffset = 0, pageBodyHeightHwp) {
-  const starts = lineStartPositionsHwp(text, fontHwp, availWidthHwp);
-  const lineAdvance = safeParaLineAdvanceHwp(paraProps, fontHwp);
-  const vertSize = fontHwp;
+function buildParaLineSegs(text, availWidthHwp, fontHwp, paraProps, vertPos, textPosOffset = 0, pageBodyHeightHwp, inlineHeightHwp = 0) {
+  const starts = lineStartPositionsHwp(text, fontHwp, availWidthHwp, paraProps);
+  const vertSize = Math.max(fontHwp, inlineHeightHwp);
+  const lineAdvance = safeParaLineAdvanceHwp(paraProps, fontHwp) + vertSize - fontHwp;
   const spacing = Math.max(0, lineAdvance - vertSize);
-  const baseline = Math.round(fontHwp * 0.85);
+  const baseline = Math.max(Math.round(fontHwp * 0.85), inlineHeightHwp);
   const hasIndent = (paraProps?.firstLineIndentPt ?? 0) !== 0;
   let nextLineVertPos = vertPos + Metric.ptToHwp(Math.max(0, paraProps?.spaceBefore ?? 0));
   const segments = starts.map((start, index) => {
@@ -9670,8 +9957,8 @@ function buildParaLineSegs(text, availWidthHwp, fontHwp, paraProps, vertPos, tex
       fontHwp,
       baseline,
       spacing,
-      0,
-      availWidthHwp,
+      Metric.ptToHwp((paraProps?.indentPt ?? 0) + (index === 0 ? paraProps?.firstLineIndentPt ?? 0 : 0)),
+      Math.max(1, availWidthHwp - Metric.ptToHwp((paraProps?.indentPt ?? 0) + (index === 0 ? paraProps?.firstLineIndentPt ?? 0 : 0) + (paraProps?.indentRightPt ?? 0))),
       flags
     );
   });
@@ -9691,11 +9978,6 @@ function mkSectionAndColumnParaTextPrefix() {
 function mkTableParaText() {
   const lo = CTRL_TABLE2 & 65535;
   const hi = CTRL_TABLE2 >>> 16 & 65535;
-  return new BufWriter().u16(11).u16(lo).u16(hi).u16(0).u16(0).u16(0).u16(0).u16(11).u16(13).build();
-}
-function mkPicParaText() {
-  const lo = CTRL_GSO2 & 65535;
-  const hi = CTRL_GSO2 >>> 16 & 65535;
   return new BufWriter().u16(11).u16(lo).u16(hi).u16(0).u16(0).u16(0).u16(0).u16(11).u16(13).build();
 }
 function imageDisplaySizeHwp(imgNode, maxWidthHwp, maxHeightHwp = Number.MAX_SAFE_INTEGER) {
@@ -9728,14 +10010,14 @@ function mkShapeComponentPicture(binDataId, wHwp, hHwp, instanceId) {
   return new BufWriter().u32(0).i32(0).u32(0).i32(0).i32(0).i32(wHwp).i32(0).i32(wHwp).i32(hHwp).i32(0).i32(hHwp).i32(0).i32(0).i32(wHwp).i32(hHwp).u16(0).u16(0).u16(0).u16(0).u8(0).u8(0).u8(0).u16(binDataId).u8(0).u32(instanceId).u32(0).u32(wHwp).u32(hHwp).u8(0).build();
 }
 function objectLayoutAttr(base, layout) {
-  const VERT_REL = { page: 1, margin: 1, para: 2, line: 2 };
-  const HORZ_REL = { page: 1, margin: 1, column: 2, para: 3 };
+  const VERT_REL = { page: 0, margin: 1, para: 2, line: 2 };
+  const HORZ_REL = { page: 0, margin: 1, column: 2, para: 3 };
   const ALIGN = { top: 0, left: 0, center: 1, bottom: 2, right: 2 };
   let attr = base;
-  const set = (shift, bits, value) => {
-    if (value === void 0) return;
+  const set = (shift, bits, value2) => {
+    if (value2 === void 0) return;
     const mask = (1 << bits) - 1 << shift;
-    attr = attr & ~mask | value << shift & mask;
+    attr = attr & ~mask | value2 << shift & mask;
   };
   set(3, 2, layout.vertRelTo ? VERT_REL[layout.vertRelTo] : void 0);
   set(5, 3, layout.vertAlign ? ALIGN[layout.vertAlign] : void 0);
@@ -9750,46 +10032,9 @@ function mkObjectCtrl(ctrlId, wHwp, hHwp, instanceId, layout) {
   else attr = objectLayoutAttr(attr, layout);
   return new BufWriter().u32(ctrlId).u32(attr).i32(layout?.yPt ? Metric.ptToHwp(layout.yPt) : 0).i32(layout?.xPt ? Metric.ptToHwp(layout.xPt) : 0).u32(wHwp).u32(hHwp).i32(layout?.zOrder ?? 0).u16(layout?.distL ? Metric.ptToHwp(layout.distL) : 0).u16(layout?.distR ? Metric.ptToHwp(layout.distR) : 0).u16(layout?.distT ? Metric.ptToHwp(layout.distT) : 0).u16(layout?.distB ? Metric.ptToHwp(layout.distB) : 0).u32(instanceId).i32(0).u16(0).build();
 }
-function encodePicPara(imgNode, binDataId, bank, lv, idGen, availWidthHwp, divideSort = 0, vertPos = 0, maxHeightHwp = Number.MAX_SAFE_INTEGER) {
-  const { w: wHwp, h: hHwp } = imageDisplaySizeHwp(
-    imgNode,
-    availWidthHwp,
-    maxHeightHwp
-  );
-  const CTRL_MASK = 1 << 11;
-  const instanceId = idGen();
-  const psId = bank.addParaShape({});
-  return [
-    mkRec(
-      TAG_PARA_HEADER3,
-      lv,
-      mkParaHeader(9, CTRL_MASK, psId, 1, 1, instanceId, 0, divideSort)
-    ),
-    mkRec(TAG_PARA_TEXT3, lv + 1, mkPicParaText()),
-    mkRec(TAG_PARA_CHAR_SHAPE3, lv + 1, mkParaCharShape([[0, 0]])),
-    mkRec(
-      TAG_PARA_LINE_SEG2,
-      lv + 1,
-      buildObjectLineSeg(availWidthHwp, hHwp, vertPos)
-    ),
-    mkRec(
-      TAG_CTRL_HEADER2,
-      lv + 1,
-      mkObjectCtrl(CTRL_GSO2, wHwp, hHwp, idGen(), imgNode.layout)
-    ),
-    mkRec(
-      TAG_SHAPE_COMPONENT,
-      lv + 2,
-      mkShapeComponent(wHwp, hHwp)
-    ),
-    mkRec(
-      TAG_SHAPE_COMPONENT_PICTURE2,
-      lv + 3,
-      mkShapeComponentPicture(binDataId, wHwp, hHwp, idGen())
-    )
-  ];
-}
-function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPos = 0, divideSortOverride = 0, sectionPrefix, pageBodyHeightHwp) {
+function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPos = 0, divideSortOverride = 0, sectionPrefix, pageBodyHeightHwp, imageCtx) {
+  const objectRecords = [];
+  let inlineHeight = 0;
   let text = "";
   const csPairs = [];
   let pos = 0;
@@ -9812,6 +10057,20 @@ function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPo
             pos += 1;
           }
         }
+      } else if (kid.tag === "img" && imageCtx) {
+        const img = kid;
+        const bin = imageCtx.images.find((b) => b64Matches(b, img.b64));
+        if (!bin) continue;
+        const { w, h } = imageDisplaySizeHwp(img, availWidthHwp, pageBodyHeightHwp);
+        const control = String.fromCharCode(11, CTRL_GSO2 & 65535, CTRL_GSO2 >>> 16, 0, 0, 0, 0, 11);
+        text += control;
+        pos += 8;
+        objectRecords.push(
+          mkRec(TAG_CTRL_HEADER2, lv + 1, mkObjectCtrl(CTRL_GSO2, w, h, imageCtx.idGen(), img.layout)),
+          mkRec(TAG_SHAPE_COMPONENT, lv + 2, mkShapeComponent(w, h)),
+          mkRec(TAG_SHAPE_COMPONENT_PICTURE2, lv + 3, mkShapeComponentPicture(bin.id, w, h, imageCtx.idGen()))
+        );
+        if (!img.layout || img.layout.wrap === "inline") inlineHeight = Math.max(inlineHeight, h);
       } else if (kid.tag === "link") {
         const link = kid;
         processKids(link.kids);
@@ -9825,7 +10084,8 @@ function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPo
   const styleId = hwpStyleIdForPara(para.props) ?? 0;
   const divideSort = divideSortOverride || (paraHasPageBreak2(para.kids) ? 4 : 0);
   const sectionCharCount = sectionPrefix ? 16 : 0;
-  const effectiveMask = sectionPrefix ? mask | 1 << 2 : mask;
+  const objectMask = objectRecords.length ? mask | 1 << 11 : mask;
+  const effectiveMask = sectionPrefix ? objectMask | 1 << 2 : objectMask;
   const effectiveDivideSort = sectionPrefix ? divideSort | 3 : divideSort;
   const effectiveCsPairs = sectionPrefix ? [
     [0, 0],
@@ -9841,7 +10101,8 @@ function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPo
     para.props,
     vertPos,
     sectionCharCount,
-    pageBodyHeightHwp
+    pageBodyHeightHwp,
+    inlineHeight
   );
   return [
     mkRec(
@@ -9858,14 +10119,18 @@ function encodePara3(para, bank, lv, instanceId, availWidthHwp, mask = 0, vertPo
         effectiveDivideSort
       )
     ),
-    mkRec(TAG_PARA_TEXT3, lv + 1, paraTextData),
+    // Hancom's reader synthesizes CR when nChars == 1 and immediately reads
+    // PARA_CHAR_SHAPE (libCoreEngine.so, sub_6547a0). A PARA_TEXT record here
+    // leaves tag 67 where tag 68 is expected and rejects the entire document.
+    ...nchars > 1 ? [mkRec(TAG_PARA_TEXT3, lv + 1, paraTextData)] : [],
     mkRec(TAG_PARA_CHAR_SHAPE3, lv + 1, mkParaCharShape(effectiveCsPairs)),
     mkRec(
       TAG_PARA_LINE_SEG2,
       lv + 1,
       lineSegs.data
     ),
-    ...sectionRecords
+    ...sectionRecords,
+    ...objectRecords
   ];
 }
 function mkTableCtrl(wHwp, hHwp, instanceId, align = "left") {
@@ -9876,7 +10141,7 @@ function mkTableRecord(rowCnt, colCnt, cellCountPerRow, bfId, repeatHeader, padL
   const w = new BufWriter();
   w.u32(67108865 | (repeatHeader ? 1 << 2 : 0)).u16(rowCnt).u16(colCnt).u16(0);
   w.u16(padL).u16(padR).u16(padT).u16(padB);
-  for (const count of cellCountPerRow) w.u16(Math.max(1, count & 65535));
+  for (const count of cellCountPerRow) w.u16(count);
   w.u16(bfId).u16(0);
   return w.build();
 }
@@ -9885,17 +10150,45 @@ function mkCellListHeader(paraCount, row, col, rs, cs, wHwp, hHwp, bfId, padL = 
   return new BufWriter().u16(paraCount).u16(0).u32(verticalAlign << 5).u16(col).u16(row).u16(cs).u16(rs).u32(wHwp).u32(hHwp).u16(padL).u16(padR).u16(padT).u16(padB).u16(bfId).zeros(13).build();
 }
 var DEFAULT_ROW_HEIGHT_PT = 14;
+function layoutHwpCells(grid) {
+  const occupied = grid.kids.map(() => /* @__PURE__ */ new Set());
+  let columnCount = Math.max(1, grid.props.colWidths?.length ?? 0);
+  const rows = grid.kids.map((row, rowIndex) => {
+    let col = 0;
+    return row.kids.map((source) => {
+      const cs = Math.max(1, Math.trunc(source.cs ?? 1));
+      const rs = Math.max(1, Math.min(grid.kids.length - rowIndex, Math.trunc(source.rs ?? 1)));
+      while (Array.from({ length: cs }, (_, i) => col + i).some((c) => occupied[rowIndex].has(c))) col++;
+      const start = col;
+      for (let r = rowIndex; r < rowIndex + rs; r++) {
+        for (let c = start; c < start + cs; c++) occupied[r].add(c);
+      }
+      col += cs;
+      columnCount = Math.max(columnCount, col);
+      return { cell: { ...source, cs, rs }, col: start };
+    });
+  });
+  rows.forEach((row, rowIndex) => {
+    for (let col = 0; col < columnCount; ) {
+      if (occupied[rowIndex].has(col)) {
+        col++;
+        continue;
+      }
+      const start = col;
+      while (col < columnCount && !occupied[rowIndex].has(col)) col++;
+      row.push({ col: start, cell: { tag: "cell", cs: col - start, rs: 1, props: {}, kids: [] } });
+    }
+    row.sort((a, b) => a.col - b.col);
+  });
+  return rows;
+}
 function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
   const records = [];
   const rowCnt = grid.kids.length;
+  const cellRows = layoutHwpCells(grid);
   const colCnt = Math.max(
     1,
-    ...grid.kids.map(
-      (row) => row.kids.reduce(
-        (sum, cell) => sum + Math.max(1, cell.cs ?? 1),
-        0
-      )
-    )
+    ...cellRows.flatMap((row) => row.map(({ cell, col }) => col + cell.cs))
   );
   const sourceWidthsHwp = (grid.props.colWidths ?? []).map(
     (width) => width > 0 ? Metric.ptToHwp(width) : 0
@@ -9912,11 +10205,10 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
   const tablePadR = Metric.ptToHwp(grid.props.cellPadR ?? 5.1);
   const tablePadT = Metric.ptToHwp(grid.props.cellPadT ?? 1.41);
   const tablePadB = Metric.ptToHwp(grid.props.cellPadB ?? 1.41);
-  const rowHwp = grid.kids.map((row) => {
+  const rowHwp = grid.kids.map((row, rowIndex) => {
     const base = row.heightPt != null && row.heightPt > 0 ? Metric.ptToHwp(row.heightPt) : Metric.ptToHwp(DEFAULT_ROW_HEIGHT_PT);
     let minRow = 0;
-    let logicalCol = 0;
-    for (const cell of row.kids ?? []) {
+    for (const { cell, col: logicalCol } of cellRows[rowIndex]) {
       const cs = Math.max(1, cell.cs ?? 1);
       let cellWidthHwp = 0;
       for (let sc = logicalCol; sc < logicalCol + cs; sc++) {
@@ -9935,13 +10227,10 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
         minRow,
         Math.ceil(minCellHeightHwp(cell, innerWidthHwp) / span)
       );
-      logicalCol += cs;
     }
     return Math.max(base, minRow);
   });
-  const cellCountPerRow = grid.kids.map(
-    (row) => Math.max(1, row.kids.length)
-  );
+  const cellCountPerRow = cellRows.map((row) => row.length);
   const tblWidthHwp = colWidthsHwp.reduce((sum, width) => sum + width, 0);
   const tblHwp = rowHwp.reduce((s, h) => s + h, 0);
   const tblInstanceId = idGen();
@@ -9976,9 +10265,7 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
     )
   );
   for (let r = 0; r < grid.kids.length; r++) {
-    let logicalCol = 0;
-    for (let c = 0; c < grid.kids[r].kids.length; c++) {
-      const cell = grid.kids[r].kids[c];
+    for (const { cell, col: logicalCol } of cellRows[r]) {
       const cs = Math.max(1, cell.cs ?? 1);
       let wHwp = 0;
       for (let sc = logicalCol; sc < logicalCol + cs; sc++) {
@@ -10000,14 +10287,7 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
       const padR = cp.padR !== void 0 ? Metric.ptToHwp(cp.padR) : tablePadR;
       const padT = cp.padT !== void 0 ? Metric.ptToHwp(cp.padT) : tablePadT;
       const padB = cp.padB !== void 0 ? Metric.ptToHwp(cp.padB) : tablePadB;
-      const encodedCellParagraphs = cellKids.reduce((count, kid) => {
-        if (kid.tag === "grid") return count + 1;
-        const paraImages = flatImgNodes(kid.kids).filter(
-          (img) => images.some((bin) => b64Matches(bin, img.b64))
-        );
-        const textKids = kid.kids.filter((child) => child.tag !== "img");
-        return count + paraImages.length + (textKids.length > 0 || paraImages.length === 0 ? 1 : 0);
-      }, 0);
+      const encodedCellParagraphs = cellKids.length;
       records.push(
         mkRec(
           TAG_LIST_HEADER3,
@@ -10056,43 +10336,22 @@ function encodeGrid4(grid, bank, lv, idGen, availWidthHwp, images) {
           cellVertPos += nestedGridHeight + Metric.ptToHwp(6);
         } else {
           const para = kid;
-          const paraImages = flatImgNodes(para.kids);
-          for (const img of paraImages) {
-            const binImg = images.find((bin) => b64Matches(bin, img.b64));
-            if (!binImg) continue;
-            records.push(
-              ...encodePicPara(
-                img,
-                binImg.id,
-                bank,
-                lv + 1,
-                idGen,
-                cellWidthHwp,
-                0,
-                cellVertPos
-              )
-            );
-            cellVertPos += imageDisplaySizeHwp(img, cellWidthHwp).h;
-          }
-          const textKids = para.kids.filter((child) => child.tag !== "img");
-          if (textKids.length > 0 || paraImages.length === 0) {
-            const textPara = { ...para, kids: textKids };
-            records.push(
-              ...encodePara3(
-                textPara,
-                bank,
-                lv + 1,
-                idGen(),
-                cellWidthHwp,
-                0,
-                cellVertPos
-              )
-            );
-            cellVertPos += minParaHeightHwp(textPara, cellWidthHwp);
-          }
+          records.push(...encodePara3(
+            para,
+            bank,
+            lv + 1,
+            idGen(),
+            cellWidthHwp,
+            0,
+            cellVertPos,
+            0,
+            void 0,
+            void 0,
+            { images, idGen }
+          ));
+          cellVertPos += minParaHeightHwp(para, cellWidthHwp);
         }
       }
-      logicalCol += cs;
     }
   }
   return records;
@@ -10247,96 +10506,27 @@ function buildBodyTextStream(doc, bank, images) {
           vertPos += Math.max(Metric.ptToHwp(20), gridHeight + Metric.ptToHwp(6));
           continue;
         }
-        const imgNodes = flatImgNodes(para.kids);
-        if (imgNodes.length > 0) {
-          if (!sectionWritten) {
-            for (const r of buildSectionParagraph(dims, idGen())) chunks.push(r);
-            sectionWritten = true;
-          }
-          let appliedImageBreak = false;
-          for (const img of imgNodes) {
-            const binImg = images.find((b) => b64Matches(b, img.b64));
-            if (binImg) {
-              const imageHeight = imageDisplaySizeHwp(
-                img,
-                availWidthHwp,
-                bodyHeightHwp
-              ).h;
-              if (vertPos > 0 && vertPos + imageHeight > bodyHeightHwp) {
-                vertPos = 0;
-              }
-              const imageDivideSort = !appliedImageBreak ? paraDivideSort : 0;
-              appliedImageBreak = true;
-              for (const r of encodePicPara(
-                img,
-                binImg.id,
-                bank,
-                0,
-                idGen,
-                availWidthHwp,
-                imageDivideSort,
-                vertPos,
-                bodyHeightHwp
-              )) {
-                chunks.push(r);
-              }
-              vertPos += imageHeight + Metric.ptToHwp(6);
-            }
-          }
-          const textKids = para.kids.filter((k) => k.tag !== "img");
-          if (textKids.length > 0) {
-            const textPara = {
-              tag: "para",
-              props: para.props,
-              kids: textKids
-            };
-            const textHeight = minParaHeightHwp(textPara, availWidthHwp);
-            if (vertPos > 0 && vertPos + textHeight > bodyHeightHwp) vertPos = 0;
-            for (const r of encodePara3(
-              textPara,
-              bank,
-              0,
-              idGen(),
-              availWidthHwp,
-              paraMask,
-              vertPos,
-              imgNodes.length > 0 ? 0 : paraDivideSort,
-              void 0,
-              bodyHeightHwp
-            )) {
-              if (r[0] === (TAG_PARA_HEADER3 & 255)) {
-              }
-              chunks.push(r);
-            }
-            vertPos = nextParaVertPosHwp(
-              textPara,
-              vertPos,
-              availWidthHwp,
-              bodyHeightHwp
-            );
-          }
-        } else {
-          for (const r of encodePara3(
-            para,
-            bank,
-            0,
-            idGen(),
-            availWidthHwp,
-            paraMask,
-            vertPos,
-            paraDivideSort,
-            !sectionWritten ? { dims } : void 0,
-            bodyHeightHwp
-          ))
-            chunks.push(r);
-          sectionWritten = true;
-          vertPos = nextParaVertPosHwp(
-            para,
-            vertPos,
-            availWidthHwp,
-            bodyHeightHwp
-          );
-        }
+        for (const r of encodePara3(
+          para,
+          bank,
+          0,
+          idGen(),
+          availWidthHwp,
+          paraMask,
+          vertPos,
+          paraDivideSort,
+          !sectionWritten ? { dims } : void 0,
+          bodyHeightHwp,
+          { images, idGen }
+        ))
+          chunks.push(r);
+        sectionWritten = true;
+        vertPos = nextParaVertPosHwp(
+          para,
+          vertPos,
+          availWidthHwp,
+          bodyHeightHwp
+        );
       } else if (node.tag === "grid") {
         if (!sectionWritten) {
           for (const r of buildSectionParagraph(dims, idGen())) chunks.push(r);
@@ -10592,7 +10782,7 @@ function buildHwpOle2(fileHeaderData, docInfoData, sectionData, binImages = []) 
   }
   const dirBuf = new Uint8Array(dirN * SS);
   const dv = new DataView(dirBuf.buffer);
-  function writeDirEntry(idx, name, type, color, left, right, child, startSec, size) {
+  function writeDirEntry(idx, name, type, color2, left, right, child, startSec, size) {
     const base = idx * 128;
     const nl = name.length;
     for (let i = 0; i < nl; i++) {
@@ -10600,7 +10790,7 @@ function buildHwpOle2(fileHeaderData, docInfoData, sectionData, binImages = []) 
     }
     dv.setUint16(base + 64, (nl + 1) * 2, true);
     dirBuf[base + 66] = type;
-    dirBuf[base + 67] = color;
+    dirBuf[base + 67] = color2;
     dv.setInt32(base + 68, left, true);
     dv.setInt32(base + 72, right, true);
     dv.setInt32(base + 76, child, true);
@@ -10950,8 +11140,8 @@ var HwpEncoder = class extends BaseEncoder {
           `HwpEncoder: \uB808\uCF54\uB4DC \uCC38\uC870 \uBB34\uACB0\uC131 \uC624\uB958 - ${verification.errors.join("; ")}`
         );
       }
-      const docInfoCmp = import_pako3.default.deflateRaw(docInfoRaw);
-      const bodyCmp = bodyRaw.map((section) => import_pako3.default.deflateRaw(section));
+      const docInfoCmp = import_pako4.default.deflateRaw(docInfoRaw);
+      const bodyCmp = bodyRaw.map((section) => import_pako4.default.deflateRaw(section));
       const fileHdr = buildHwpFileHeader();
       if (fileHdr.length !== 256) {
         return fail(

@@ -283,6 +283,7 @@ function collectFontsFromPara(para: ParaNode, fonts: Set<string>): void {
 function collectFontsFromSpan(span: SpanNode, fonts: Set<string>): void {
   const font = span.props.font?.trim();
   if (font) fonts.add(font);
+  for (const face of Object.values(span.props.fontFaces ?? {})) if (face) fonts.add(face);
 }
 
 function mappedFontName(font: string): string | undefined {
@@ -952,10 +953,10 @@ function cellHasVisibleContent(cell: any): boolean {
 
 function encodeTextProperties(p: TextProps): string[] {
   const rPr: string[] = [];
-  if (p.b) rPr.push("<w:b/>");
-  if (p.i) rPr.push("<w:i/>");
+  if (p.b !== undefined) rPr.push(p.b ? "<w:b/>" : '<w:b w:val="0"/>');
+  if (p.i !== undefined) rPr.push(p.i ? "<w:i/>" : '<w:i w:val="0"/>');
   if (p.u) rPr.push('<w:u w:val="single"/>');
-  if (p.s) rPr.push("<w:strike/>");
+  if (p.s !== undefined) rPr.push(p.s ? "<w:strike/>" : '<w:strike w:val="0"/>');
   if (p.sup) rPr.push('<w:vertAlign w:val="superscript"/>');
   if (p.sub) rPr.push('<w:vertAlign w:val="subscript"/>');
   if (p.pt)
@@ -963,10 +964,11 @@ function encodeTextProperties(p: TextProps): string[] {
       `<w:sz w:val="${Metric.ptToHalfPt(p.pt)}"/><w:szCs w:val="${Metric.ptToHalfPt(p.pt)}"/>`,
     );
   if (p.color) rPr.push(`<w:color w:val="${p.color}"/>`);
-  if (p.font)
-    rPr.push(
-      `<w:rFonts w:ascii="${esc(p.font)}" w:hAnsi="${esc(p.font)}" w:eastAsia="${esc(p.font)}" w:hint="eastAsia"/>`,
-    );
+  if (p.font || p.fontFaces) {
+    const latin = p.fontFaces?.latin ?? p.font ?? p.fontFaces?.hangul ?? "함초롬바탕";
+    const eastAsia = p.fontFaces?.hangul ?? p.font ?? latin;
+    rPr.push(`<w:rFonts w:ascii="${esc(latin)}" w:hAnsi="${esc(latin)}" w:eastAsia="${esc(eastAsia)}" w:hint="eastAsia"/>`);
+  }
   if (p.bg) rPr.push(`<w:shd w:val="clear" w:color="auto" w:fill="${p.bg}"/>`);
   return rPr;
 }

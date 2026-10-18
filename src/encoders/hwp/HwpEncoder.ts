@@ -22,6 +22,7 @@ import type {
   GridNode,
   ImgNode,
   LinkNode,
+  CellNode,
 } from "../../model/doc-tree";
 import type { Outcome } from "../../contract/result";
 import type {
@@ -235,16 +236,6 @@ const LANG_GROUPS = [
 ] as const;
 type LangGroup = (typeof LANG_GROUPS)[number];
 
-/** 한글 폰트 여부 판별 */
-function isKoreanFont(face: string): boolean {
-  return (
-    /[\uAC00-\uD7A3\u3131-\u318E]/.test(face) ||
-    ["맑은", "나눔", "굴림", "돋움", "바탕", "함초롬", "한컴", "HY"].some((k) =>
-      face.includes(k),
-    )
-  );
-}
-
 class HwpStyleBank {
   readonly NONE_STROKE: Stroke = { kind: "none", pt: 0, color: "000000" };
   readonly DEF_STROKE: Stroke = { kind: "solid", pt: 0.5, color: "000000" };
@@ -290,18 +281,9 @@ class HwpStyleBank {
   }
 
   /** 폰트 이름 → 언어별 7개 ID 반환 (ANYTOHWP 방식) */
-  registerFontForLangs(rawFace: string): number[] {
-    const face = safeFontToKr(rawFace) || "함초롬바탕";
-    const isKor = isKoreanFont(face);
-    const hangulFace = isKor ? face : "함초롬바탕";
-    const latinFace = isKor ? "함초롬바탕" : face;
-
-    const ids: number[] = [];
-    for (const lang of LANG_GROUPS) {
-      const f = lang === "LATIN" ? latinFace : hangulFace;
-      ids.push(this._registerLangFont(lang, f));
-    }
-    return ids; // [hangulId, latinId, hanjaId, japaneseId, otherId, symbolId, userId]
+  registerFontForLangs(rawFace: string, faces?: TextProps['fontFaces']): number[] {
+    return LANG_GROUPS.map(lang => this._registerLangFont(lang,
+      safeFontToKr(faces?.[lang.toLowerCase() as keyof NonNullable<TextProps['fontFaces']>] ?? rawFace)));
   }
 
   /** 언어별 폰트 목록 반환 */
@@ -318,8 +300,8 @@ class HwpStyleBank {
     const k = csKey(p);
     if (this.csIdx.has(k)) return this.csIdx.get(k)!;
     const id = this.csProps.length;
-    const fIds = p.font
-      ? this.registerFontForLangs(p.font)
+    const fIds = p.font || p.fontFaces
+      ? this.registerFontForLangs(p.font ?? "함초롬바탕", p.fontFaces)
       : [0, 0, 0, 0, 0, 0, 0];
     this.csProps.push(p);
     this.csFontIds.push(fIds);
@@ -399,6 +381,7 @@ class HwpStyleBank {
 function csKey(p: TextProps): string {
   return [
     p.font ?? "",
+    ...LANG_GROUPS.map(lang => p.fontFaces?.[lang.toLowerCase() as keyof NonNullable<TextProps["fontFaces"]>] ?? ""),
     p.pt ?? 10,
     p.b ? 1 : 0,
     p.i ? 1 : 0,
@@ -407,6 +390,7 @@ function csKey(p: TextProps): string {
     p.sup ? 1 : 0,
     p.sub ? 1 : 0,
     p.color ?? "000000",
+    p.bg ?? "FFFFFF",
   ].join("|");
 }
 
@@ -821,8 +805,8 @@ function mkCharShape(fontIds: number[], p: TextProps): Uint8Array {
   if (p.b) attr |= 1 << 1;
   if (p.u) attr |= 1 << 2;
   if (p.s) attr |= 1 << 18;
-  if (p.sup) attr |= 1 << 16;
-  if (p.sub) attr |= 2 << 16;
+  if (p.sup) attr |= 1 << 15;
+  if (p.sub) attr |= 1 << 16;
 
   const w = new BufWriter();
   // faceId[7]: 언어별 독립 ID (ANYTOHWP 핵심 개선)
@@ -1085,7 +1069,7 @@ function calcLineHeight(
 }
 
 function maxFontHwpInPara(para: ParaNode): number {
-  let maxHwp = 1000;
+  let maxHwp = 0;
   const visit = (kids: any[]) => {
     for (const kid of kids ?? []) {
       if (
@@ -1099,7 +1083,7 @@ function maxFontHwpInPara(para: ParaNode): number {
     }
   };
   visit(para.kids as any[]);
-  return maxHwp;
+  return maxHwp || 1000;
 }
 
 function extractParaLayoutText(para: ParaNode): string {
@@ -1134,9 +1118,12 @@ function lineStartPositionsHwp(
   text: string,
   fontHwp: number,
   availWidthHwp?: number,
+  paraProps?: ParaProps,
 ): number[] {
   if (!text) return [0];
-  const maxWidth = Math.max(1, availWidthHwp ?? 0);
+  const lineWidth = (index: number) => Math.max(1, (availWidthHwp ?? 0)
+    - Metric.ptToHwp((paraProps?.indentPt ?? 0) + (index === 0 ? (paraProps?.firstLineIndentPt ?? 0) : 0))
+    - Metric.ptToHwp(paraProps?.indentRightPt ?? 0));
   if (!availWidthHwp || availWidthHwp <= 0) {
     const starts = [0];
     for (let i = 0; i < text.length; i++) {
@@ -1157,10 +1144,11 @@ function lineStartPositionsHwp(
       currentWidth = 0;
       continue;
     }
-    // HWP control characters occupy text positions but have no glyph width.
+    // Extended/inline controls occupy eight UTF-16 words, including payload.
+    if ([2, 3, 9, 11].includes(code)) { i += 7; continue; }
     if (code < 32) continue;
     const charWidth = estimateCharWidthHwp(code, fontHwp);
-    if (currentWidth > 0 && currentWidth + charWidth > maxWidth) {
+    if (currentWidth > 0 && currentWidth + charWidth > lineWidth(starts.length - 1)) {
       starts.push(i);
       currentWidth = charWidth;
     } else {
@@ -1174,8 +1162,9 @@ function estimateLineCountHwp(
   text: string,
   fontHwp: number,
   availWidthHwp?: number,
+  paraProps?: ParaProps,
 ): number {
-  return lineStartPositionsHwp(text, fontHwp, availWidthHwp).length;
+  return lineStartPositionsHwp(text, fontHwp, availWidthHwp, paraProps).length;
 }
 
 function safeParaLineAdvanceHwp(
@@ -1195,16 +1184,24 @@ function safeParaLineAdvanceHwp(
   return Math.max(calcLineHeight(0, ratio, textHeight), textHeight);
 }
 
+function inlineImageHeightHwp(para: ParaNode, width = Number.MAX_SAFE_INTEGER): number {
+  return Math.max(0, ...flatImgNodes(para.kids)
+    .filter(img => !img.layout || img.layout.wrap === 'inline')
+    .map(img => imageDisplaySizeHwp(img, width).h));
+}
+
 function minParaHeightHwp(para: ParaNode, availWidthHwp?: number): number {
   const fontHwp = maxFontHwpInPara(para);
+  const lineBoxHeight = Math.max(fontHwp, inlineImageHeightHwp(para, availWidthHwp));
   const lineCount = estimateLineCountHwp(
     extractParaLayoutText(para),
     fontHwp,
     availWidthHwp,
+    para.props,
   );
   return (
     Metric.ptToHwp(Math.max(0, para.props.spaceBefore ?? 0)) +
-    safeParaLineAdvanceHwp(para.props, fontHwp) * lineCount +
+    (safeParaLineAdvanceHwp(para.props, fontHwp) + lineBoxHeight - fontHwp) * lineCount +
     Metric.ptToHwp(Math.max(0, para.props.spaceAfter ?? 0))
   );
 }
@@ -1216,12 +1213,14 @@ function nextParaVertPosHwp(
   pageBodyHeightHwp?: number,
 ): number {
   const fontHwp = maxFontHwpInPara(para);
+  const lineBoxHeight = Math.max(fontHwp, inlineImageHeightHwp(para, availWidthHwp));
   const lineCount = estimateLineCountHwp(
     extractParaLayoutText(para),
     fontHwp,
     availWidthHwp,
+    para.props,
   );
-  const lineAdvance = safeParaLineAdvanceHwp(para.props, fontHwp);
+  const lineAdvance = safeParaLineAdvanceHwp(para.props, fontHwp) + lineBoxHeight - fontHwp;
   let next = vertPos + Metric.ptToHwp(Math.max(0, para.props.spaceBefore ?? 0));
   for (let i = 0; i < lineCount; i++) {
     if (
@@ -1257,17 +1256,7 @@ function minCellHeightHwp(cell: any, innerWidthHwp?: number): number {
   let content = 0;
   for (const kid of cell.kids ?? []) {
     if (kid.tag === "para") {
-      const images = flatImgNodes(kid.kids);
-      for (const image of images) {
-        content += imageDisplaySizeHwp(
-          image,
-          innerWidthHwp ?? Number.MAX_SAFE_INTEGER,
-        ).h;
-      }
-      const textKids = kid.kids.filter((child: any) => child.tag !== "img");
-      if (textKids.length > 0 || images.length === 0) {
-        content += minParaHeightHwp({ ...kid, kids: textKids }, innerWidthHwp);
-      }
+      content += minParaHeightHwp(kid, innerWidthHwp);
     }
     else if (kid.tag === "grid")
       content += minGridHeightHwp(kid) + Metric.ptToHwp(6);
@@ -1358,12 +1347,13 @@ function buildParaLineSegs(
   vertPos: number,
   textPosOffset = 0,
   pageBodyHeightHwp?: number,
+  inlineHeightHwp = 0,
 ): { data: Uint8Array; count: number; totalHeight: number } {
-  const starts = lineStartPositionsHwp(text, fontHwp, availWidthHwp);
-  const lineAdvance = safeParaLineAdvanceHwp(paraProps, fontHwp);
-  const vertSize = fontHwp;
+  const starts = lineStartPositionsHwp(text, fontHwp, availWidthHwp, paraProps);
+  const vertSize = Math.max(fontHwp, inlineHeightHwp);
+  const lineAdvance = safeParaLineAdvanceHwp(paraProps, fontHwp) + vertSize - fontHwp;
   const spacing = Math.max(0, lineAdvance - vertSize);
-  const baseline = Math.round(fontHwp * 0.85);
+  const baseline = Math.max(Math.round(fontHwp * 0.85), inlineHeightHwp);
   const hasIndent = (paraProps?.firstLineIndentPt ?? 0) !== 0;
   let nextLineVertPos =
     vertPos + Metric.ptToHwp(Math.max(0, paraProps?.spaceBefore ?? 0));
@@ -1387,8 +1377,9 @@ function buildParaLineSegs(
       fontHwp,
       baseline,
       spacing,
-      0,
-      availWidthHwp,
+      Metric.ptToHwp((paraProps?.indentPt ?? 0) + (index === 0 ? paraProps?.firstLineIndentPt ?? 0 : 0)),
+      Math.max(1, availWidthHwp - Metric.ptToHwp((paraProps?.indentPt ?? 0)
+        + (index === 0 ? paraProps?.firstLineIndentPt ?? 0 : 0) + (paraProps?.indentRightPt ?? 0))),
       flags,
     );
   });
@@ -1453,22 +1444,6 @@ function mkSectionAndColumnParaTextPrefix(): Uint8Array {
 function mkTableParaText(): Uint8Array {
   const lo = CTRL_TABLE & 0xffff;
   const hi = (CTRL_TABLE >>> 16) & 0xffff;
-  return new BufWriter()
-    .u16(0x000b)
-    .u16(lo)
-    .u16(hi)
-    .u16(0)
-    .u16(0)
-    .u16(0)
-    .u16(0)
-    .u16(0x000b)
-    .u16(0x000d)
-    .build();
-}
-
-function mkPicParaText(): Uint8Array {
-  const lo = CTRL_GSO & 0xffff;
-  const hi = (CTRL_GSO >>> 16) & 0xffff;
   return new BufWriter()
     .u16(0x000b)
     .u16(lo)
@@ -1561,11 +1536,11 @@ function mkShapeComponentPicture(
 /**
  * 개체 공통 속성(HWP 5 표 70)의 배치 비트를 layout으로 채운다.
  * bit 3-4 세로 기준(0 종이,1 쪽,2 문단), 5-7 세로 정렬, 8-9 가로 기준(0 종이,1 쪽,2 단,3 문단),
- * 10-12 가로 정렬, 21-23 textWrap. IR page/margin은 디코더와 같게 쪽(1)으로 쓴다.
+ * 10-12 가로 정렬, 21-23 textWrap. IR page는 종이(0), margin은 본문 쪽 영역(1)이다.
  */
 function objectLayoutAttr(base: number, layout: ImgLayout): number {
-  const VERT_REL: Record<string, number> = { page: 1, margin: 1, para: 2, line: 2 };
-  const HORZ_REL: Record<string, number> = { page: 1, margin: 1, column: 2, para: 3 };
+  const VERT_REL: Record<string, number> = { page: 0, margin: 1, para: 2, line: 2 };
+  const HORZ_REL: Record<string, number> = { page: 0, margin: 1, column: 2, para: 3 };
   const ALIGN: Record<string, number> = { top: 0, left: 0, center: 1, bottom: 2, right: 2 };
   let attr = base;
   const set = (shift: number, bits: number, value: number | undefined) => {
@@ -1609,62 +1584,6 @@ function mkObjectCtrl(
     .build(); // 46 bytes
 }
 
-/**
- * 이미지 단락 인코딩
- * ANYTOHWP 개선: PNG/JPEG 픽셀 치수에서 HWPUNIT 계산
- */
-function encodePicPara(
-  imgNode: ImgNode,
-  binDataId: number,
-  bank: HwpStyleBank,
-  lv: number,
-  idGen: () => number,
-  availWidthHwp: number,
-  divideSort = 0,
-  vertPos = 0,
-  maxHeightHwp = Number.MAX_SAFE_INTEGER,
-): Uint8Array[] {
-  const { w: wHwp, h: hHwp } = imageDisplaySizeHwp(
-    imgNode,
-    availWidthHwp,
-    maxHeightHwp,
-  );
-
-  const CTRL_MASK = 1 << 11;
-  const instanceId = idGen();
-  const psId = bank.addParaShape({});
-
-  return [
-    mkRec(
-      TAG_PARA_HEADER,
-      lv,
-      mkParaHeader(9, CTRL_MASK, psId, 1, 1, instanceId, 0, divideSort),
-    ),
-    mkRec(TAG_PARA_TEXT, lv + 1, mkPicParaText()),
-    mkRec(TAG_PARA_CHAR_SHAPE, lv + 1, mkParaCharShape([[0, 0]])),
-    mkRec(
-      TAG_PARA_LINE_SEG,
-      lv + 1,
-      buildObjectLineSeg(availWidthHwp, hHwp, vertPos),
-    ),
-    mkRec(
-      TAG_CTRL_HEADER,
-      lv + 1,
-      mkObjectCtrl(CTRL_GSO, wHwp, hHwp, idGen(), imgNode.layout),
-    ),
-    mkRec(
-      TAG_SHAPE_COMPONENT,
-      lv + 2,
-      mkShapeComponent(wHwp, hHwp),
-    ),
-    mkRec(
-      TAG_SHAPE_COMPONENT_PICTURE,
-      lv + 3,
-      mkShapeComponentPicture(binDataId, wHwp, hHwp, idGen()),
-    ),
-  ];
-}
-
 // ─── 문단 인코딩 ─────────────────────────────────────────────
 
 function encodePara(
@@ -1678,7 +1597,10 @@ function encodePara(
   divideSortOverride = 0,
   sectionPrefix?: { dims: PageDims },
   pageBodyHeightHwp?: number,
+  imageCtx?: { images: BinImage[]; idGen: () => number },
 ): Uint8Array[] {
+  const objectRecords: Uint8Array[] = [];
+  let inlineHeight = 0;
   let text = "";
   const csPairs: [number, number][] = [];
   let pos = 0;
@@ -1705,6 +1627,20 @@ function encodePara(
             pos += 1;
           }
         }
+      } else if (kid.tag === "img" && imageCtx) {
+        const img = kid as ImgNode;
+        const bin = imageCtx.images.find(b => b64Matches(b, img.b64));
+        if (!bin) continue;
+        const { w, h } = imageDisplaySizeHwp(img, availWidthHwp, pageBodyHeightHwp);
+        const control = String.fromCharCode(11, CTRL_GSO & 0xffff, CTRL_GSO >>> 16, 0, 0, 0, 0, 11);
+        text += control;
+        pos += 8;
+        objectRecords.push(
+          mkRec(TAG_CTRL_HEADER, lv + 1, mkObjectCtrl(CTRL_GSO, w, h, imageCtx.idGen(), img.layout)),
+          mkRec(TAG_SHAPE_COMPONENT, lv + 2, mkShapeComponent(w, h)),
+          mkRec(TAG_SHAPE_COMPONENT_PICTURE, lv + 3, mkShapeComponentPicture(bin.id, w, h, imageCtx.idGen())),
+        );
+        if (!img.layout || img.layout.wrap === 'inline') inlineHeight = Math.max(inlineHeight, h);
       } else if (kid.tag === "link") {
         const link = kid as LinkNode;
         // A hyperlink field requires an 8-character extended control plus a
@@ -1723,7 +1659,8 @@ function encodePara(
   const styleId = hwpStyleIdForPara(para.props) ?? 0;
   const divideSort = divideSortOverride || (paraHasPageBreak(para.kids) ? 4 : 0);
   const sectionCharCount = sectionPrefix ? 16 : 0;
-  const effectiveMask = sectionPrefix ? mask | (1 << 2) : mask;
+  const objectMask = objectRecords.length ? mask | (1 << 11) : mask;
+  const effectiveMask = sectionPrefix ? objectMask | (1 << 2) : objectMask;
   const effectiveDivideSort = sectionPrefix ? divideSort | 3 : divideSort;
   const effectiveCsPairs: [number, number][] = sectionPrefix
     ? [
@@ -1749,6 +1686,7 @@ function encodePara(
     vertPos,
     sectionCharCount,
     pageBodyHeightHwp,
+    inlineHeight,
   );
 
   return [
@@ -1766,7 +1704,10 @@ function encodePara(
         effectiveDivideSort,
       ),
     ),
-    mkRec(TAG_PARA_TEXT, lv + 1, paraTextData),
+    // Hancom's reader synthesizes CR when nChars == 1 and immediately reads
+    // PARA_CHAR_SHAPE (libCoreEngine.so, sub_6547a0). A PARA_TEXT record here
+    // leaves tag 67 where tag 68 is expected and rejects the entire document.
+    ...(nchars > 1 ? [mkRec(TAG_PARA_TEXT, lv + 1, paraTextData)] : []),
     mkRec(TAG_PARA_CHAR_SHAPE, lv + 1, mkParaCharShape(effectiveCsPairs)),
     mkRec(
       TAG_PARA_LINE_SEG,
@@ -1774,6 +1715,7 @@ function encodePara(
       lineSegs.data,
     ),
     ...sectionRecords,
+    ...objectRecords,
   ];
 }
 
@@ -1824,7 +1766,7 @@ function mkTableRecord(
     .u16(colCnt)
     .u16(0);
   w.u16(padL).u16(padR).u16(padT).u16(padB);
-  for (const count of cellCountPerRow) w.u16(Math.max(1, count & 0xffff));
+  for (const count of cellCountPerRow) w.u16(count);
   w.u16(bfId).u16(0);
   return w.build();
 }
@@ -1866,6 +1808,40 @@ function mkCellListHeader(
 
 const DEFAULT_ROW_HEIGHT_PT = 14;
 
+/** HWP stores explicit cell addresses and requires a complete rectangular grid. */
+function layoutHwpCells(grid: GridNode): { cell: CellNode; col: number }[][] {
+  const occupied = grid.kids.map(() => new Set<number>());
+  let columnCount = Math.max(1, grid.props.colWidths?.length ?? 0);
+  const rows = grid.kids.map((row, rowIndex) => {
+    let col = 0;
+    return row.kids.map(source => {
+      const cs = Math.max(1, Math.trunc(source.cs ?? 1));
+      const rs = Math.max(1, Math.min(grid.kids.length - rowIndex, Math.trunc(source.rs ?? 1)));
+      // Cells covered by an earlier row span have no model node in this row.
+      while (Array.from({ length: cs }, (_, i) => col + i).some(c => occupied[rowIndex].has(c))) col++;
+      const start = col;
+      for (let r = rowIndex; r < rowIndex + rs; r++) {
+        for (let c = start; c < start + cs; c++) occupied[r].add(c);
+      }
+      col += cs;
+      columnCount = Math.max(columnCount, col);
+      return { cell: { ...source, cs, rs }, col: start };
+    });
+  });
+  // DOCX gridBefore/gridAfter and ragged rows can leave holes. Keep their
+  // position as empty cells instead of producing a null slot in Hancom layout.
+  rows.forEach((row, rowIndex) => {
+    for (let col = 0; col < columnCount;) {
+      if (occupied[rowIndex].has(col)) { col++; continue; }
+      const start = col;
+      while (col < columnCount && !occupied[rowIndex].has(col)) col++;
+      row.push({ col: start, cell: { tag: 'cell', cs: col - start, rs: 1, props: {}, kids: [] } });
+    }
+    row.sort((a, b) => a.col - b.col);
+  });
+  return rows;
+}
+
 function encodeGrid(
   grid: GridNode,
   bank: HwpStyleBank,
@@ -1876,14 +1852,10 @@ function encodeGrid(
 ): Uint8Array[] {
   const records: Uint8Array[] = [];
   const rowCnt = grid.kids.length;
+  const cellRows = layoutHwpCells(grid);
   const colCnt = Math.max(
     1,
-    ...grid.kids.map((row: any) =>
-      row.kids.reduce(
-        (sum: number, cell: any) => sum + Math.max(1, cell.cs ?? 1),
-        0,
-      ),
-    ),
+    ...cellRows.flatMap(row => row.map(({ cell, col }) => col + cell.cs)),
   );
 
   const sourceWidthsHwp = ((grid.props as any).colWidths ?? []).map(
@@ -1902,14 +1874,13 @@ function encodeGrid(
   const tablePadT = Metric.ptToHwp(grid.props.cellPadT ?? 1.41);
   const tablePadB = Metric.ptToHwp(grid.props.cellPadB ?? 1.41);
 
-  const rowHwp = grid.kids.map((row: any) => {
+  const rowHwp = grid.kids.map((row: any, rowIndex) => {
     const base =
       row.heightPt != null && row.heightPt > 0
         ? Metric.ptToHwp(row.heightPt)
         : Metric.ptToHwp(DEFAULT_ROW_HEIGHT_PT);
     let minRow = 0;
-    let logicalCol = 0;
-    for (const cell of row.kids ?? []) {
+    for (const { cell, col: logicalCol } of cellRows[rowIndex]) {
       const cs = Math.max(1, cell.cs ?? 1);
       let cellWidthHwp = 0;
       for (let sc = logicalCol; sc < logicalCol + cs; sc++) {
@@ -1928,13 +1899,10 @@ function encodeGrid(
         minRow,
         Math.ceil(minCellHeightHwp(cell, innerWidthHwp) / span),
       );
-      logicalCol += cs;
     }
     return Math.max(base, minRow);
   });
-  const cellCountPerRow = grid.kids.map((row: any) =>
-    Math.max(1, row.kids.length),
-  );
+  const cellCountPerRow = cellRows.map(row => row.length);
 
   const tblWidthHwp = colWidthsHwp.reduce((sum, width) => sum + width, 0);
   const tblHwp = rowHwp.reduce((s: number, h: number) => s + h, 0);
@@ -1972,9 +1940,7 @@ function encodeGrid(
   );
 
   for (let r = 0; r < grid.kids.length; r++) {
-    let logicalCol = 0;
-    for (let c = 0; c < grid.kids[r].kids.length; c++) {
-      const cell = grid.kids[r].kids[c];
+    for (const { cell, col: logicalCol } of cellRows[r]) {
       const cs = Math.max(1, cell.cs ?? 1);
       let wHwp = 0;
       for (let sc = logicalCol; sc < logicalCol + cs; sc++) {
@@ -2005,14 +1971,7 @@ function encodeGrid(
       const padR = cp.padR !== undefined ? Metric.ptToHwp(cp.padR) : tablePadR;
       const padT = cp.padT !== undefined ? Metric.ptToHwp(cp.padT) : tablePadT;
       const padB = cp.padB !== undefined ? Metric.ptToHwp(cp.padB) : tablePadB;
-      const encodedCellParagraphs = cellKids.reduce((count: number, kid: any) => {
-        if (kid.tag === "grid") return count + 1;
-        const paraImages = flatImgNodes(kid.kids).filter((img) =>
-          images.some((bin) => b64Matches(bin, img.b64)),
-        );
-        const textKids = kid.kids.filter((child: any) => child.tag !== "img");
-        return count + paraImages.length + (textKids.length > 0 || paraImages.length === 0 ? 1 : 0);
-      }, 0);
+      const encodedCellParagraphs = cellKids.length;
 
       records.push(
         mkRec(
@@ -2063,43 +2022,11 @@ function encodeGrid(
           cellVertPos += nestedGridHeight + Metric.ptToHwp(6);
         } else {
           const para = kid as ParaNode;
-          const paraImages = flatImgNodes(para.kids);
-          for (const img of paraImages) {
-            const binImg = images.find((bin) => b64Matches(bin, img.b64));
-            if (!binImg) continue;
-            records.push(
-              ...encodePicPara(
-                img,
-                binImg.id,
-                bank,
-                lv + 1,
-                idGen,
-                cellWidthHwp,
-                0,
-                cellVertPos,
-              ),
-            );
-            cellVertPos += imageDisplaySizeHwp(img, cellWidthHwp).h;
-          }
-          const textKids = para.kids.filter((child: any) => child.tag !== "img");
-          if (textKids.length > 0 || paraImages.length === 0) {
-            const textPara: ParaNode = { ...para, kids: textKids as any };
-            records.push(
-              ...encodePara(
-                textPara,
-                bank,
-                lv + 1,
-                idGen(),
-                cellWidthHwp,
-                0,
-                cellVertPos,
-              ),
-            );
-            cellVertPos += minParaHeightHwp(textPara, cellWidthHwp);
-          }
+          records.push(...encodePara(para, bank, lv + 1, idGen(), cellWidthHwp,
+            0, cellVertPos, 0, undefined, undefined, { images, idGen }));
+          cellVertPos += minParaHeightHwp(para, cellWidthHwp);
         }
       }
-      logicalCol += cs;
     }
   }
   return records;
@@ -2315,105 +2242,28 @@ function buildBodyTextStream(
           continue;
         }
 
-        const imgNodes = flatImgNodes(para.kids);
-        if (imgNodes.length > 0) {
-          if (!sectionWritten) {
-            for (const r of buildSectionParagraph(dims, idGen())) chunks.push(r);
-            sectionWritten = true;
-          }
-          let appliedImageBreak = false;
-          for (const img of imgNodes) {
-            const binImg = images.find((b) => b64Matches(b, img.b64));
-            if (binImg) {
-              const imageHeight = imageDisplaySizeHwp(
-                img,
-                availWidthHwp,
-                bodyHeightHwp,
-              ).h;
-              if (
-                vertPos > 0 &&
-                vertPos + imageHeight > bodyHeightHwp
-              ) {
-                vertPos = 0;
-              }
-              const imageDivideSort = !appliedImageBreak ? paraDivideSort : 0;
-              appliedImageBreak = true;
-              for (const r of encodePicPara(
-                img,
-                binImg.id,
-                bank,
-                0,
-                idGen,
-                availWidthHwp,
-                imageDivideSort,
-                vertPos,
-                bodyHeightHwp,
-              )) {
-                // 첫 레코드가 PARA_HEADER인 경우 페이지 브레이크 마스크 적용
-                chunks.push(r);
-              }
-              vertPos += imageHeight + Metric.ptToHwp(6);
-            }
-          }
-          const textKids = para.kids.filter((k: any) => k.tag !== "img");
-          if (textKids.length > 0) {
-            const textPara: ParaNode = {
-              tag: "para",
-              props: para.props,
-              kids: textKids as any,
-            };
-            const textHeight = minParaHeightHwp(textPara, availWidthHwp);
-            if (vertPos > 0 && vertPos + textHeight > bodyHeightHwp) vertPos = 0;
-            for (const r of encodePara(
-              textPara,
-              bank,
-              0,
-              idGen(),
-              availWidthHwp,
-              paraMask,
-              vertPos,
-              imgNodes.length > 0 ? 0 : paraDivideSort,
-              undefined,
-              bodyHeightHwp,
-            )) {
-              // PARA_HEADER 레코드(목록의 첫 번째)에 마스크 적용
-              if (r[0] === (TAG_PARA_HEADER & 0xff)) {
-                // 레코드 헤더 수정은 복잡하므로 encodePara 내부에서 처리하는 것이 안전하지만
-                // 여기서는 간단히 구현하기 위해 encodePara의 인자로 mask를 넘기도록 구조를 변경하는 것이 좋습니다.
-              }
-              chunks.push(r);
-            }
-            // 단락 높이 계산 및 vertPos 업데이트 (이미지/텍스트 혼합)
-            vertPos = nextParaVertPosHwp(
-              textPara,
-              vertPos,
-              availWidthHwp,
-              bodyHeightHwp,
-            );
-          }
-        } else {
-          for (const r of encodePara(
-            para,
-            bank,
-            0,
-            idGen(),
-            availWidthHwp,
-            paraMask,
-            vertPos,
-            paraDivideSort,
-            !sectionWritten ? { dims } : undefined,
-            bodyHeightHwp,
-          ))
-            chunks.push(r);
-          sectionWritten = true;
-          // 단락 높이 계산 및 vertPos 업데이트 (일반 단락)
-          vertPos = nextParaVertPosHwp(
-            para,
-            vertPos,
-            availWidthHwp,
-            bodyHeightHwp,
-          );
-        }
+        for (const r of encodePara(
+          para,
+          bank,
+          0,
+          idGen(),
+          availWidthHwp,
+          paraMask,
+          vertPos,
+          paraDivideSort,
+          !sectionWritten ? { dims } : undefined,
+          bodyHeightHwp,
+          { images, idGen },
+        ))
+          chunks.push(r);
+        sectionWritten = true;
+        // 단락 높이 계산 및 vertPos 업데이트 (일반 단락)
+        vertPos = nextParaVertPosHwp(
+          para,
+          vertPos,
+          availWidthHwp,
+          bodyHeightHwp,
+        );
       } else if (node.tag === "grid") {
         if (!sectionWritten) {
           for (const r of buildSectionParagraph(dims, idGen())) chunks.push(r);

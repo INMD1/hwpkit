@@ -52,6 +52,7 @@ import {
 import { BaseDecoder } from "../../core/BaseDecoder";
 import { ArchiveKit } from "../../toolkit/ArchiveKit";
 import { XmlKit } from "../../toolkit/XmlKit";
+import { renderDocxChart } from "../../toolkit/ChartRaster";
 import { TextKit } from "../../toolkit/TextKit";
 import { registry } from "../../pipeline/registry";
 
@@ -151,7 +152,9 @@ export class DocxDecoder extends BaseDecoder {
         warns,
         stylesMap,
         paraStyleMap,
+        chartImages: new WeakMap(),
       };
+      await prepareChartImages(docObj, decCtx);
 
       const sections: { kids: ContentNode[]; sp: any }[] = [];
       let kids: ContentNode[] = [];
@@ -226,6 +229,7 @@ interface ParaStyleDef {
     pt?: number;
     color?: string;
     font?: string;
+    fontFaces?: TextProps['fontFaces'];
   };
   pPr?: {
     pageBreakBefore?: boolean;
@@ -255,6 +259,7 @@ type StylesMap = Map<string, TblStyleDef>; // styleId → table style defaults
 type ParaStyleMap = Map<string, ParaStyleDef>; // styleId → para/char style defaults
 
 interface DecCtx {
+  chartImages: WeakMap<object, Uint8Array>;
   relsMap: Map<string, string>;
   files: Map<string, Uint8Array>;
   shield: ShieldedParser;
@@ -264,11 +269,9 @@ interface DecCtx {
   paraStyleMap: ParaStyleMap;
 }
 
-// numId → { abstractNumId, levels: Map<ilvl, { fmt, isOrdered }> }
-type NumMap = Map<
-  number,
-  { levels: Map<number, { fmt: string; isOrdered: boolean }> }
->;
+// Numbering levels carry layout as well as the marker type.
+type NumLevel = { fmt: string; isOrdered: boolean; indentation: Partial<ParaProps> };
+type NumMap = Map<number, { levels: Map<number, NumLevel> }>;
 
 // ─── helpers ────────────────────────────────────────────────
 
@@ -336,19 +339,21 @@ async function parseNumbering(xml: string): Promise<NumMap> {
     // Parse abstractNums
     const absMap = new Map<
       number,
-      Map<number, { fmt: string; isOrdered: boolean }>
+      Map<number, NumLevel>
     >();
     for (const abs of toArr(root?.["w:abstractNum"] ?? root?.abstractNum)) {
       const absId = Number(
         abs?._attr?.["w:abstractNumId"] ?? abs?._attr?.abstractNumId ?? 0,
       );
-      const levels = new Map<number, { fmt: string; isOrdered: boolean }>();
+      const levels = new Map<number, NumLevel>();
       for (const lvl of toArr(abs?.["w:lvl"] ?? abs?.lvl)) {
         const ilvl = Number(lvl?._attr?.["w:ilvl"] ?? lvl?._attr?.ilvl ?? 0);
         const fmtNode =
           lvl?.["w:numFmt"]?.[0]?._attr ?? lvl?.numFmt?.[0]?._attr ?? {};
         const fmt = fmtNode?.["w:val"] ?? fmtNode?.val ?? "decimal";
-        levels.set(ilvl, { fmt, isOrdered: fmt !== "bullet" });
+        const pPr = lvl?.["w:pPr"]?.[0] ?? lvl?.pPr?.[0];
+        const ind = pPr?.["w:ind"]?.[0]?._attr ?? pPr?.ind?.[0]?._attr ?? {};
+        levels.set(ilvl, { fmt, isOrdered: fmt !== "bullet", indentation: parseDocxIndentation(ind) });
       }
       absMap.set(absId, levels);
     }
@@ -511,6 +516,7 @@ async function decodeHeaderFooter(
         // ctx에 hfRelsMap 임시 적용
         const origRelsMap = ctx.relsMap;
         (ctx as any).relsMap = hfRelsMap;
+        await prepareChartImages(root, ctx);
         const paras = toArr(root?.["w:p"] ?? root?.p);
         result[type] = paras.map((p: any) => decodePara(p, ctx));
         (ctx as any).relsMap = origRelsMap;
@@ -622,7 +628,8 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
     ctx.paraStyleMap,
   );
   const styleInherited: ParaStyleDef = {
-    rPr: { ...documentDefaults.rPr, ...namedStyle.rPr },
+    rPr: { ...documentDefaults.rPr, ...namedStyle.rPr,
+      fontFaces: { ...documentDefaults.rPr?.fontFaces, ...namedStyle.rPr?.fontFaces } },
     pPr: { ...documentDefaults.pPr, ...namedStyle.pPr },
   };
   const canonicalStyle = canonicalDocxStyleId(headStyle, ctx.paraStyleMap);
@@ -689,14 +696,18 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
     const ilvl = Number(ilvlNode?.["w:val"] ?? ilvlNode?.val ?? 0);
     const numId = Number(numIdNode?.["w:val"] ?? numIdNode?.val ?? 0);
 
-    props.listLv = ilvl;
     const numEntry = ctx.numMap.get(numId);
-    if (numEntry) {
-      const lvlInfo = numEntry.levels.get(ilvl) ?? numEntry.levels.get(0);
-      props.listOrd = lvlInfo?.isOrdered ?? false;
-    } else {
-      // Fallback: numId=1 is typically bullet, numId=2 is numbered
-      props.listOrd = numId >= 2;
+    const lvlInfo = numEntry?.levels.get(ilvl) ?? numEntry?.levels.get(0);
+    if (numId !== 0) {
+      for (const key of ['indentPt', 'indentRightPt', 'firstLineIndentPt'] as const) {
+        // Direct and paragraph-style indentation (including explicit zero) wins.
+        if (props[key] === undefined && lvlInfo?.indentation[key] !== undefined)
+          props[key] = lvlInfo.indentation[key];
+      }
+      if (lvlInfo?.fmt !== 'none') {
+        props.listLv = ilvl;
+        props.listOrd = lvlInfo?.isOrdered ?? numId >= 2;
+      }
     }
   }
 
@@ -791,7 +802,9 @@ function decodePara(p: any, ctx: DecCtx): ParaNode {
   }
 
   const filteredKids = kids.filter(Boolean) as ParaNode["kids"];
-
+  // Paragraph-mark properties determine an empty paragraph's size, not the
+  // formatting of its visible runs. Dropping them shifts every following line.
+  if (filteredKids.length === 0) filteredKids.push(decodeRun({ 'w:rPr': pPr?.['w:rPr'] }, ctx, styleInherited.rPr));
   return buildPara(filteredKids, props);
 }
 
@@ -827,31 +840,30 @@ function decodeRunOrImage(run: any, ctx: DecCtx): SpanNode | ImgNode {
 
   return decodeRun(run, ctx);
 }
-/** Decode image layout from anchor element */
-function decodeImageLayout(anchor: any): ImgLayout {
-  const wrap = anchor?.["wp:wrapTop"]?.[0] ?? anchor?.wrapTop?.[0];
-  const anchorPos =
-    anchor?.["wp:anchorPos"]?.[0]?._attr ?? anchor?.anchorPos?.[0]?._attr ?? {};
-
-  const layout: ImgLayout = {
-    wrap: "square",
-    horzAlign: "left",
-    vertAlign: "top",
-    horzRelTo: "page",
-    vertRelTo: "page",
-    xPt: Number(anchorPos?.x ?? 0) / 12700, // emu to pt
-    yPt: Number(anchorPos?.y ?? 0) / 12700, // emu to pt
-  };
-
-  // Parse wrap type
-  if (wrap?.["wp:none"]) layout.wrap = "none";
-  else if (wrap?.["wp:square"]) layout.wrap = "square";
-  else if (wrap?.["wp:tight"]) layout.wrap = "tight";
-  else if (wrap?.["wp:through"]) layout.wrap = "through";
-  else if (wrap?.["wp:behind"]) layout.wrap = "behind";
-  else if (wrap?.["wp:inFront"]) layout.wrap = "front";
-
-  return layout;
+/** Prepare chart previews before the synchronous paragraph walk. */
+async function prepareChartImages(node: any, ctx: DecCtx, depth = 0): Promise<void> {
+  if (!node || typeof node !== 'object' || depth > 128) return;
+  for (const tag of ['wp:inline', 'wp:anchor']) {
+    for (const container of toArr(node[tag])) {
+      const data = container?.['a:graphic']?.[0]?.['a:graphicData']?.[0];
+      const chart = data?.['c:chart']?.[0];
+      const target = ctx.relsMap.get(chart?._attr?.['r:id']);
+      if (!chart || !target) continue;
+      const bytes = ctx.files.get(resolveDocxPath('word', target));
+      const extent = container?.['wp:extent']?.[0]?._attr ?? {};
+      try {
+        if (!bytes) throw new Error('chart XML not found');
+        const png = await renderDocxChart(TextKit.decode(bytes), Metric.emuToPt(Number(extent.cx)), Metric.emuToPt(Number(extent.cy)));
+        ctx.chartImages.set(container, png);
+      } catch (e) {
+        ctx.warns.push(`[DocxDecoder] ${target}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+  for (const [key, value] of Object.entries(node)) {
+    if (key.startsWith('_')) continue;
+    if (Array.isArray(value)) for (const item of value) await prepareChartImages(item, ctx, depth + 1);
+  }
 }
 
 function decodeDrawing(drawing: any, ctx: DecCtx): ImgNode | null {
@@ -883,15 +895,9 @@ function decodeDrawing(drawing: any, ctx: DecCtx): ImgNode | null {
 
     // 1. 차트 감지
     if (graphicData?.["c:chart"] || graphicData?.chart) {
-      return {
-        tag: "img",
-        b64: "", // 플레이스홀더
-        mime: "image/png",
-        w: wPt,
-        h: hPt,
-        alt: `[차트: ${alt || "차트"}]`,
-        layout: decodeImageLayout(anchor),
-      };
+      const bytes = ctx.chartImages.get(container);
+      return buildImg(bytes ? TextKit.base64Encode(bytes) : '', 'image/png', wPt, hPt,
+        `[차트: ${alt || "차트"}]`, inline ? { wrap: 'inline' } : extractAnchorLayout(anchor));
     }
 
     const pic = graphicData?.["pic:pic"]?.[0] ?? graphicData?.pic?.[0];
@@ -979,6 +985,20 @@ const HIGHLIGHT_COLOR_MAP: Record<string, string> = {
   white: "FFFFFF",
 };
 
+function isDocxOff(node: any): boolean {
+  return ['0', 'false', 'off'].includes(String(node?._attr?.['w:val'] ?? node?._attr?.val ?? '1').toLowerCase());
+}
+
+function docxFontFaces(attrs: Record<string, string>): TextProps['fontFaces'] {
+  const latin = docxAttr(attrs, 'ascii') ?? docxAttr(attrs, 'hAnsi');
+  const eastAsia = docxAttr(attrs, 'eastAsia');
+  if (!latin && !eastAsia) return undefined;
+  return {
+    ...(latin ? { latin: safeFont(latin) } : {}),
+    ...(eastAsia ? { hangul: safeFont(eastAsia), hanja: safeFont(eastAsia), japanese: safeFont(eastAsia) } : {}),
+  };
+}
+
 function decodeRun(
   run: any,
   ctx: DecCtx,
@@ -1049,22 +1069,22 @@ function decodeRun(
   const bNode = rPr?.["w:b"]?.[0] ?? rPr?.b?.[0];
   const isBold =
     bNode != null &&
-    (bNode?._attr?.["w:val"] ?? bNode?._attr?.val ?? "1") !== "0";
+    !isDocxOff(bNode);
   const iNode = rPr?.["w:i"]?.[0] ?? rPr?.i?.[0];
   const isItalic =
     iNode != null &&
-    (iNode?._attr?.["w:val"] ?? iNode?._attr?.val ?? "1") !== "0";
+    !isDocxOff(iNode);
   const sNode = rPr?.["w:strike"]?.[0] ?? rPr?.strike?.[0];
   const isStrike =
     sNode != null &&
-    (sNode?._attr?.["w:val"] ?? sNode?._attr?.val ?? "1") !== "0";
+    !isDocxOff(sNode);
 
   // Run-level properties: run wins, then fall back to paragraph style inheritance
   const props: TextProps = {
-    b: (bNode != null ? isBold : styleRpr?.b) || undefined,
-    i: (iNode != null ? isItalic : styleRpr?.i) || undefined,
+    b: bNode != null ? isBold : styleRpr?.b,
+    i: iNode != null ? isItalic : styleRpr?.i,
     u: (underVal ? underVal !== "none" : styleRpr?.u) || undefined,
-    s: (sNode != null ? isStrike : styleRpr?.s) || undefined,
+    s: sNode != null ? isStrike : styleRpr?.s,
     sup: isSup || undefined,
     sub: isSub || undefined,
     pt: effectiveSzVal
@@ -1072,6 +1092,7 @@ function decodeRun(
       : styleRpr?.pt,
     color: safeHex(colorVal) ?? styleRpr?.color,
     font: fontName ? safeFont(fontName) : styleRpr?.font,
+    fontFaces: { ...styleRpr?.fontFaces, ...docxFontFaces(fontAttr) },
     bg: bgVal,
   };
 
@@ -1250,6 +1271,7 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
       stylesRoot?.docDefaults?.[0]?.pPrDefault?.[0]?.pPr?.[0];
     map.set(DOCX_DEFAULT_STYLE_KEY, {
       pPr: { ...parseDocxSpacingProps(defaultsPPr, true), ...parsePaginationProps(defaultsPPr) },
+      rPr: decodeRun({ "w:rPr": stylesRoot?.["w:docDefaults"]?.[0]?.["w:rPrDefault"]?.[0]?.["w:rPr"] }, {} as DecCtx).props,
     });
     const styleArr = toArr(stylesRoot?.["w:style"] ?? stylesRoot?.style);
     for (const style of styleArr) {
@@ -1283,25 +1305,26 @@ async function parseParaStyleMap(xml: string): Promise<ParaStyleMap> {
         const bNode = rPr?.["w:b"]?.[0] ?? rPr?.b?.[0];
         const isBold =
           bNode != null &&
-          (bNode?._attr?.["w:val"] ?? bNode?._attr?.val ?? "1") !== "0";
+          !isDocxOff(bNode);
         const iNode = rPr?.["w:i"]?.[0] ?? rPr?.i?.[0];
         const isItalic =
           iNode != null &&
-          (iNode?._attr?.["w:val"] ?? iNode?._attr?.val ?? "1") !== "0";
+          !isDocxOff(iNode);
         const underVal =
           rPr?.["w:u"]?.[0]?._attr?.["w:val"] ?? rPr?.["w:u"]?.[0]?._attr?.val;
         const sNode = rPr?.["w:strike"]?.[0] ?? rPr?.strike?.[0];
         const isStrike =
           sNode != null &&
-          (sNode?._attr?.["w:val"] ?? sNode?._attr?.val ?? "1") !== "0";
+          !isDocxOff(sNode);
         def.rPr = {
-          b: isBold || undefined,
-          i: isItalic || undefined,
+          b: bNode != null ? isBold : undefined,
+          i: iNode != null ? isItalic : undefined,
           u: underVal && underVal !== "none" ? true : undefined,
-          s: isStrike || undefined,
+          s: sNode != null ? isStrike : undefined,
           pt: szVal ? Metric.halfPtToPt(Number(szVal)) : undefined,
           color: safeHex(colorVal),
           font: fontName ? safeFont(fontName) : undefined,
+          fontFaces: docxFontFaces(fontAttr),
         };
       }
 
@@ -1381,7 +1404,8 @@ function resolveParaStyle(
     if (!def) break;
     // Merge: child values win over parent
     if (def.rPr) {
-      merged.rPr = { ...def.rPr, ...merged.rPr };
+      merged.rPr = { ...definedProps(def.rPr), ...definedProps(merged.rPr ?? {}),
+        fontFaces: { ...def.rPr.fontFaces, ...merged.rPr?.fontFaces } };
     }
     if (def.pPr) {
       merged.pPr = { ...definedProps(def.pPr), ...definedProps(merged.pPr ?? {}) };
@@ -1806,7 +1830,7 @@ function extractAnchorLayout(anchor: any): ImgLayout {
   else if (anchor?.["wp:wrapTight"]?.[0] != null) wrap = "tight";
   else if (anchor?.["wp:wrapThrough"]?.[0] != null) wrap = "through";
   else if (anchor?.["wp:wrapSquare"]?.[0] != null) wrap = "square";
-  else if (anchor?.["wp:wrapTopAndBottom"]?.[0] != null) wrap = "square";
+  else if (anchor?.["wp:wrapTopAndBottom"]?.[0] != null) wrap = "topAndBottom";
   else if (anchor?.["wp:wrapBehind"]?.[0] != null || behindDoc) wrap = "behind";
 
   // 가로 위치
